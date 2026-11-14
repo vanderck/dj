@@ -212,11 +212,10 @@ fn track(ui: &mut Ui, core: &mut Core, _st: &mut UiState, d: usize, color: Color
         }
         let r = ui.add(egui::Button::new("CUE").sense(Sense::click_and_drag()));
         learnable(core, &r, &a("Cue"));
-        if r.is_pointer_button_down_on() && !core.learn {
-            if r.drag_started() || ui.input(|i| i.pointer.primary_pressed()) && r.hovered() {
+        if r.is_pointer_button_down_on() && !core.learn
+            && (r.drag_started() || ui.input(|i| i.pointer.primary_pressed()) && r.hovered()) {
                 act_i(core, &a("Cue"), 1);
             }
-        }
         if r.drag_stopped() || r.clicked() {
             act_i(core, &a("Cue"), 0);
         }

@@ -26,7 +26,7 @@ pub fn copy_wstring(src: &str, dst: &mut [TChar]) {
 
 pub fn wstring(src: &[TChar]) -> String {
     let end = src.iter().position(|&c| c == 0).unwrap_or(src.len());
-    String::from_utf16_lossy(&src[..end].iter().map(|&c| c as u16).collect::<Vec<_>>())
+    String::from_utf16_lossy(&src[..end].iter().map(|&c| c).collect::<Vec<_>>())
 }
 
 pub fn cstring(src: &[std::ffi::c_char]) -> String {

@@ -413,7 +413,7 @@ impl Vst3Handle {
     }
 
     pub fn latency_changed(flags: i32) -> bool {
-        flags & RestartFlags_::kLatencyChanged as i32 != 0
+        flags & RestartFlags_::kLatencyChanged != 0
     }
 
     /// Parameter edits made inside the plugin (e.g. in its own editor).
@@ -616,7 +616,7 @@ pub fn instantiate(info: &PluginInfo, sample_rate: f64, max_block: usize) -> Res
                 }
                 let flags = pi.flags;
                 use ParameterInfo_::ParameterFlags_ as F;
-                if flags & (F::kIsHidden as i32 | F::kIsReadOnly as i32 | F::kIsBypass as i32) != 0 {
+                if flags & (F::kIsHidden | F::kIsReadOnly | F::kIsBypass) != 0 {
                     continue;
                 }
                 params.push(ParamInfo {
@@ -728,7 +728,7 @@ impl Vst3Effect {
         use ProcessContext_::StatesAndFlags_ as S;
         let beat = ctx.beat + offset_beats;
         let mut pc: ProcessContext = unsafe { std::mem::zeroed() };
-        pc.state = (S::kPlaying | S::kTempoValid | S::kProjectTimeMusicValid | S::kBarPositionValid | S::kTimeSigValid) as u32;
+        pc.state = (S::kPlaying | S::kTempoValid | S::kProjectTimeMusicValid | S::kBarPositionValid | S::kTimeSigValid);
         pc.sampleRate = ctx.sample_rate as f64;
         pc.projectTimeSamples = self.frames;
         pc.continousTimeSamples = self.frames;

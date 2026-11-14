@@ -135,10 +135,10 @@ fn start_device(settings: &AudioSettings) -> Result<(AudioHost, Controller, f32)
     let cue_pair = settings.cue_enabled.then_some((settings.cue_pair as usize).min(pairs - 1));
     let router = Router::new(engine, channels, master_pair, cue_pair);
     let stream = match default.sample_format() {
-        cpal::SampleFormat::F32 => build::<f32>(&device, config.clone(), router),
-        cpal::SampleFormat::I16 => build::<i16>(&device, config.clone(), router),
-        cpal::SampleFormat::I32 => build::<i32>(&device, config.clone(), router),
-        cpal::SampleFormat::U16 => build::<u16>(&device, config.clone(), router),
+        cpal::SampleFormat::F32 => build::<f32>(&device, config, router),
+        cpal::SampleFormat::I16 => build::<i16>(&device, config, router),
+        cpal::SampleFormat::I32 => build::<i32>(&device, config, router),
+        cpal::SampleFormat::U16 => build::<u16>(&device, config, router),
         f => return Err(anyhow!("unsupported sample format {f:?}")),
     };
     let stream = match stream {
@@ -147,7 +147,7 @@ fn start_device(settings: &AudioSettings) -> Result<(AudioHost, Controller, f32)
             // Retry with the driver's default buffer size.
             let (engine, ctl2) = create(EngineConfig { sample_rate: sr as f32, max_block: MAX_BLOCK, max_latency: 16384 });
             let router = Router::new(engine, channels, master_pair, cue_pair);
-            let mut c = config.clone();
+            let mut c = config;
             c.buffer_size = cpal::BufferSize::Default;
             eprintln!("audio: fixed buffer rejected ({e}); using the default");
             let s = build::<f32>(&device, c, router)?;

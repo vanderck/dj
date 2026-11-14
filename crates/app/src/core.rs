@@ -2053,3 +2053,138 @@ fn drop_garbage(g: Garbage) {
     // large deallocations stay off the audio thread.
     drop(g);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use collective_engine::{create, EngineConfig};
+
+    fn core() -> (collective_engine::Engine, Core) {
+        let dir = std::env::temp_dir().join(format!("collective-core-test-{}-{:?}", std::process::id(), std::thread::current().id()));
+        std::env::set_var("COLLECTIVE_CONFIG_DIR", &dir);
+        let (engine, ctl) = create(EngineConfig { sample_rate: 48000.0, max_block: 512, max_latency: 4096 });
+        let settings = Settings { osc_enabled: false, vst3_enabled: false, library_folders: vec![], ..Default::default() };
+        let mut c = Core::new(ctl, 48000.0, 512, settings, Session::default());
+        c.sync_engine();
+        (engine, c)
+    }
+
+    fn pump(e: &mut collective_engine::Engine, c: &mut Core) {
+        for _ in 0..4 {
+            e.process(512);
+        }
+        c.tick();
+    }
+
+    #[test]
+    fn fx_chain_macros_and_presets() {
+        let (mut e, mut c) = core();
+        assert!(c.route("Mixer/CH1/FX/Insert", &[OscType::String("native:autofilter".into())]));
+        c.route("Mixer/CH1/FX/Insert", &[OscType::String("native:echo".into()), OscType::String("post".into())]);
+        pump(&mut e, &mut c);
+        assert_eq!(c.snap.channels[0].fx.iter().flatten().count(), 2);
+        assert_eq!(c.session.channels[0].fx.slots[1].as_ref().unwrap().pos, InsertPos::Post);
+
+        // A macro driving two parameters with different ranges.
+        c.assign_macro(0, 0, 0, 0);
+        c.assign_macro(0, 0, 1, 1);
+        c.set_macro_target(0, 0, 1, |t| {
+            t.min = 0.2;
+            t.max = 0.4;
+        });
+        assert!(c.route("Mixer/CH1/FX/Macro/1", &[OscType::Float(0.5)]));
+        let s0 = c.session.channels[0].fx.slots[0].as_ref().unwrap().params[0];
+        let s1 = c.session.channels[0].fx.slots[1].as_ref().unwrap().params[1];
+        assert!((s0 - 0.5).abs() < 1e-6 && (s1 - 0.3).abs() < 1e-6, "{s0} {s1}");
+
+        // FX switch = bypass all inverted.
+        c.route("Mixer/CH1/FX", &[OscType::Int(0)]);
+        assert!(c.session.channels[0].fx.bypass_all);
+
+        // Reorder keeps macro targets attached to their effects.
+        c.move_insert(0, 0, 1);
+        assert_eq!(c.session.channels[0].fx.slots[1].as_ref().unwrap().name, "Auto Filter");
+        assert!(c.session.channels[0].fx.macros[0].targets.iter().any(|t| t.slot == 1 && t.param == 0));
+
+        // Preset round trip into another channel.
+        c.save_fx_preset(0, "test chain");
+        let (_, path) = FxChainModel::list_presets().into_iter().find(|(n, _)| n == "test chain").unwrap();
+        c.load_fx_preset(2, &path);
+        pump(&mut e, &mut c);
+        let a = &c.session.channels[0].fx;
+        let b = &c.session.channels[2].fx;
+        assert_eq!(a.slots.iter().flatten().map(|s| &s.name).collect::<Vec<_>>(), b.slots.iter().flatten().map(|s| &s.name).collect::<Vec<_>>());
+        assert_eq!(a.macros, b.macros);
+        assert!(b.bypass_all);
+        assert_eq!(c.snap.channels[2].fx.iter().flatten().count(), 2);
+
+        c.remove_insert(0, 1);
+        assert!(c.session.channels[0].fx.macros[0].targets.iter().all(|t| t.slot != 1));
+    }
+
+    #[test]
+    fn osc_root_and_mixer_routes() {
+        let (mut e, mut c) = core();
+        assert_eq!(c.strip_root("/Collective/Deck/1/PlayPause"), Some("Deck/1/PlayPause"));
+        assert_eq!(c.strip_root("/collective/mixer/ch1/volume"), Some("mixer/ch1/volume"));
+        c.settings.osc_root = "/Syndicate/".into();
+        assert_eq!(c.strip_root("/Syndicate/Mixer/CH3/Volume"), Some("Mixer/CH3/Volume"));
+        assert_eq!(c.strip_root("/Other/Mixer/CH3/Volume"), None);
+        assert!(c.route("Mixer/CH3/Volume", &[OscType::Float(0.25)]));
+        assert!(c.route("Mixer/CH3/Trim", &[OscType::Float(1.0)]));
+        assert!(c.route("Mixer/CH3/EQ/Low", &[OscType::Float(0.0)]));
+        assert!(c.route("mixer/ch3/filter1", &[OscType::Float(0.2)]));
+        let p = c.session.channels[2].params;
+        assert_eq!(p.volume, 0.25);
+        assert_eq!(p.trim_db, 6.0);
+        assert_eq!(p.eq[0], 0.0);
+        assert_eq!(p.cutoff, 0.2);
+        assert!(c.route("Header/BPM", &[OscType::Float(131.0)]));
+        pump(&mut e, &mut c);
+        assert!((c.snap.clock.bpm - 131.0).abs() < 1e-6);
+        assert!(!c.route("Nope/Thing", &[]));
+        // Legacy native-FX routes from the original are accepted and ignored.
+        assert!(c.route("Mixer/CH1/Reverb/Mix", &[OscType::Float(0.5)]));
+    }
+
+    #[test]
+    fn midi_learn_and_toggle() {
+        let (mut e, mut c) = core();
+        c.learn = true;
+        c.touch("Mixer/CH2/Mute");
+        c.handle_midi(&[0x91, 36, 127]);
+        assert_eq!(c.profile.mappings.len(), 1);
+        assert_eq!(c.profile.mappings[0].mode, MapMode::Toggle);
+        c.learn = false;
+        c.handle_midi(&[0x91, 36, 127]);
+        c.handle_midi(&[0x81, 36, 0]);
+        assert!(c.session.channels[1].params.mute);
+        c.handle_midi(&[0x91, 36, 127]);
+        assert!(!c.session.channels[1].params.mute);
+        // CC on a knob: absolute.
+        c.profile.mappings.push(MidiMapping {
+            source: MidiSource { kind: MidiKind::Cc, channel: 0, number: 7 },
+            address: "Mixer/CH1/Volume".into(),
+            mode: MapMode::Absolute,
+            invert: false,
+            feedback: false,
+        });
+        c.handle_midi(&[0xb0, 7, 64]);
+        assert!((c.session.channels[0].params.volume - 64.0 / 127.0).abs() < 1e-6);
+        // ":value" suffix fixes the value sent.
+        assert!(c.route("Deck/1/Quantize:6", &[]));
+        assert_eq!(c.session.decks[0].quantize, collective_engine::deck::Quantize::Beats(0.5));
+        pump(&mut e, &mut c);
+    }
+
+    #[test]
+    fn address_kinds() {
+        assert_eq!(addr_kind("Deck/1/PlayPause"), Kind::Trigger);
+        assert_eq!(addr_kind("Deck/1/Cue3"), Kind::Trigger);
+        assert_eq!(addr_kind("Deck/1/Cue"), Kind::Hold);
+        assert_eq!(addr_kind("Deck/1/SlipLoop/Quarter"), Kind::Hold);
+        assert_eq!(addr_kind("Deck/1/BeatSkip"), Kind::Step);
+        assert_eq!(addr_kind("Mixer/CH1/Mute"), Kind::Switch);
+        assert_eq!(addr_kind("Mixer/CH1/FX/Macro/2"), Kind::Value);
+    }
+}

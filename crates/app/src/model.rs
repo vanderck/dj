@@ -48,6 +48,7 @@ impl MacroModel {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct FxChainModel {
     pub name: String,
     pub slots: [Option<FxSlotModel>; MAX_SLOTS],
@@ -55,11 +56,6 @@ pub struct FxChainModel {
     pub macros: [MacroModel; NUM_MACROS],
 }
 
-impl Default for FxChainModel {
-    fn default() -> Self {
-        Self { name: String::new(), slots: Default::default(), bypass_all: false, macros: Default::default() }
-    }
-}
 
 impl FxChainModel {
     pub fn presets_dir() -> PathBuf {
@@ -111,16 +107,12 @@ impl Default for ChannelModel {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct LaneModel {
     pub params: LaneParams,
     pub sample: Option<PathBuf>,
 }
 
-impl Default for LaneModel {
-    fn default() -> Self {
-        Self { params: LaneParams::default(), sample: None }
-    }
-}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SamplerModel {

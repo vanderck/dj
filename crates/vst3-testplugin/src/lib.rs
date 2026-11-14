@@ -51,7 +51,7 @@ unsafe fn len_wstring(string: *const TChar) -> usize {
     len as usize
 }
 
-const PLUGIN_NAME: &'static str = "Gain (vst3-rs example plugin)";
+const PLUGIN_NAME: &str = "Gain (vst3-rs example plugin)";
 
 struct GainProcessor {
     gain: AtomicU64,
@@ -121,7 +121,7 @@ impl IComponentTrait for GainProcessor {
                         bus.channelCount = 2;
                         copy_wstring("Input", &mut bus.name);
                         bus.busType = BusTypes_::kMain as BusType;
-                        bus.flags = BusInfo_::BusFlags_::kDefaultActive as u32;
+                        bus.flags = BusInfo_::BusFlags_::kDefaultActive;
 
                         kResultOk
                     }
@@ -136,7 +136,7 @@ impl IComponentTrait for GainProcessor {
                         bus.channelCount = 2;
                         copy_wstring("Output", &mut bus.name);
                         bus.busType = BusTypes_::kMain as BusType;
-                        bus.flags = BusInfo_::BusFlags_::kDefaultActive as u32 as uint32;
+                        bus.flags = BusInfo_::BusFlags_::kDefaultActive as uint32;
 
                         kResultOk
                     }
@@ -239,8 +239,8 @@ impl IAudioProcessorTrait for GainProcessor {
 
     unsafe fn canProcessSampleSize(&self, symbolic_sample_size: i32) -> tresult {
         match symbolic_sample_size as SymbolicSampleSizes {
-            SymbolicSampleSizes_::kSample32 => kResultOk as i32,
-            SymbolicSampleSizes_::kSample64 => kNotImplemented as i32,
+            SymbolicSampleSizes_::kSample32 => kResultOk,
+            SymbolicSampleSizes_::kSample64 => kNotImplemented,
             _ => kInvalidArgument,
         }
     }
@@ -270,21 +270,18 @@ impl IAudioProcessorTrait for GainProcessor {
                     let param_id = param_queue.getParameterId();
                     let point_count = param_queue.getPointCount();
 
-                    match param_id {
-                        0 => {
-                            let mut sample_offset = 0;
-                            let mut value = 0.0;
-                            let result = param_queue.getPoint(
-                                point_count - 1,
-                                &mut sample_offset,
-                                &mut value,
-                            );
+                    if param_id == 0 {
+                        let mut sample_offset = 0;
+                        let mut value = 0.0;
+                        let result = param_queue.getPoint(
+                            point_count - 1,
+                            &mut sample_offset,
+                            &mut value,
+                        );
 
-                            if result == kResultTrue {
-                                self.gain.store(value.to_bits(), Ordering::Relaxed);
-                            }
+                        if result == kResultTrue {
+                            self.gain.store(value.to_bits(), Ordering::Relaxed);
                         }
-                        _ => {}
                     }
                 }
             }
@@ -404,7 +401,7 @@ impl IEditControllerTrait for GainController {
                 info.stepCount = 0;
                 info.defaultNormalizedValue = 1.0;
                 info.unitId = 0;
-                info.flags = ParameterInfo_::ParameterFlags_::kCanAutomate as i32;
+                info.flags = ParameterInfo_::ParameterFlags_::kCanAutomate;
 
                 kResultOk
             }
