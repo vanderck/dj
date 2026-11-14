@@ -43,6 +43,10 @@ pub trait Separator: Send {
     /// Clear internal state (called when playback restarts).
     fn reset(&mut self) {}
 
+    /// Offline (non-real-time) rendering: the separator may block until its results are ready
+    /// instead of falling back to stale ones, so bounces are always fully separated.
+    fn set_offline(&mut self, _offline: bool) {}
+
     /// `left`/`right` are the `fft_size / 2 + 1` complex bins of the newest frame.
     fn separate(&mut self, left: &[Complex32], right: &[Complex32], masks: &mut StemMasks);
 }

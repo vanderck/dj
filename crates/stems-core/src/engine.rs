@@ -166,6 +166,11 @@ impl StemEngine {
         self.fft_size + self.separator.lookahead_frames() * self.hop
     }
 
+    /// Switch between real-time and offline (bounce) processing. See [`Separator::set_offline`].
+    pub fn set_offline(&mut self, offline: bool) {
+        self.separator.set_offline(offline);
+    }
+
     /// Enable/disable the soundfield analysis (skip it while no UI is open).
     pub fn set_analysis_enabled(&mut self, enabled: bool) {
         self.analysis_enabled = enabled;

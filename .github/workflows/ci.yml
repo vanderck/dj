@@ -36,3 +36,36 @@ jobs:
         with:
           name: stems-${{ matrix.os }}
           path: target/bundled/
+
+  onnx:
+    # Downloads ONNX Runtime at build time and runs the model tests against the test model.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux GUI dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libgl-dev libjack-dev libx11-xcb-dev \
+            libxcb1-dev libxcb-dri2-0-dev libxcb-icccm4-dev libxcursor-dev libxkbcommon-dev \
+            libxcb-shape0-dev libxcb-xfixes0-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: onnx
+      - run: cargo clippy --workspace --all-targets --features stems-plugin/onnx -- -D warnings
+      - run: cargo test --workspace --features stems-plugin/onnx
+      - run: cargo run --release -p stems-core --features onnx --example bench -- crates/stems-core/tests/data/test_model.onnx
+      - name: Bundle with the test model embedded
+        shell: bash
+        run: STEMS_EMBED_MODEL="$PWD/crates/stems-core/tests/data/test_model.onnx" cargo xtask bundle stems-plugin --release --features onnx
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stems-onnx-${{ matrix.os }}
+          path: target/bundled/

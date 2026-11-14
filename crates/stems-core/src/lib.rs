@@ -12,18 +12,26 @@
 
 mod engine;
 mod focus;
+mod model;
+#[cfg(any(feature = "onnx", feature = "onnx-dynamic"))]
+mod onnx;
 mod separator;
 mod settings;
 mod soundfield;
+mod threaded;
 
 pub use engine::StemEngine;
 pub use focus::focus_weight;
+pub use model::{MaskModel, ModelError, ModelSpec, INPUT_PLANES};
+#[cfg(any(feature = "onnx", feature = "onnx-dynamic"))]
+pub use onnx::{OnnxModel, OnnxOptions};
 pub use separator::{HeuristicSeparator, Separator, StemMasks};
 pub use settings::{FocusMode, FocusSettings, Settings, StemSettings};
 pub use soundfield::{
     band_center_hz, SoundfieldFrame, SoundfieldPoint, SOUNDFIELD_BANDS, SOUNDFIELD_MAX_HZ,
     SOUNDFIELD_MIN_HZ,
 };
+pub use threaded::{SeparatorStats, ThreadedSeparator};
 
 pub use realfft::num_complex::Complex32;
 
