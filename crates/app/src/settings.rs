@@ -90,6 +90,12 @@ pub struct Settings {
     pub key_notation: KeyNotation,
     pub light_theme: bool,
     pub ui_scale: f32,
+    /// Separate every loaded track into stems in the background.
+    pub stems_enabled: bool,
+    /// ONNX separation model. `None` uses `STEMS_MODEL`, else the low-quality placeholder.
+    pub stems_model: Option<PathBuf>,
+    /// Disk cache for separated stems (MB); 0 disables it.
+    pub stems_cache_mb: u64,
 }
 
 impl Default for Settings {
@@ -123,6 +129,9 @@ impl Default for Settings {
             key_notation: KeyNotation::Camelot,
             light_theme: false,
             ui_scale: 1.0,
+            stems_enabled: true,
+            stems_model: None,
+            stems_cache_mb: 4096,
         }
     }
 }

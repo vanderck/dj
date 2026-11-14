@@ -18,7 +18,7 @@ use crate::dsp::{db_to_gain, Frame, Limiter, Meter};
 use crate::fx::{Effect, FxCtx, FxSlot, InsertPos, MacroTarget, SlotHealth, MACRO_TARGETS, MAX_SLOTS};
 use crate::mixer::{mix_gains, Channel, ChannelParams, ExtStages, FaderCurve, MixMode, Output, XfAssign};
 use crate::sampler::{LaneParams, Sampler, SamplerView, Step, LANES};
-use crate::track::{AudioData, BeatGrid, Track};
+use crate::track::{AudioData, BeatGrid, StemData, Track};
 
 pub const NUM_DECKS: usize = 4;
 pub const MAX_PAIRS: usize = 8;
@@ -81,6 +81,9 @@ pub enum DeckCmd {
     /// Tempo bend on the master deck (BPM, held), 0 releases.
     BpmBend(f64),
     TapeStopMs(f64),
+    /// Per-stem gain (0 = muted, 1 = unity) in [`crate::track::Stem`] order. Takes effect once
+    /// stems are attached; resets to unity when a new track loads.
+    StemGain { stem: u8, gain: f32 },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -100,6 +103,8 @@ pub enum SamplerCmd {
 pub enum Command {
     Load { deck: u8, track: Arc<Track>, start_at_first_cue: bool },
     Eject { deck: u8 },
+    /// Separated stems for the track loaded on `deck` (ignored if that track was replaced).
+    AttachStems { deck: u8, stems: Arc<StemData> },
     Deck { deck: u8, cmd: DeckCmd },
     DeckMode { deck: u8, mode: DeckMode },
     Sampler { deck: u8, cmd: SamplerCmd },
@@ -147,6 +152,7 @@ pub enum Command {
 /// Objects released by the audio thread, to be dropped elsewhere.
 pub enum Garbage {
     Track(Arc<Track>),
+    Stems(Arc<StemData>),
     Audio(Arc<AudioData>),
     Fx(FxSlot),
     Recorder(Producer<Frame>),
@@ -551,6 +557,7 @@ impl Engine {
             }
             DeckCmd::BpmBend(b) => deck.set_bpm_bend(b),
             DeckCmd::TapeStopMs(ms) => self.tape_stop_ms[d] = ms.clamp(0.0, 5000.0),
+            DeckCmd::StemGain { stem, gain } => deck.set_stem_gain(stem as usize, gain),
         }
     }
 
@@ -564,6 +571,9 @@ impl Engine {
                 let all_empty = self.decks.iter().all(|x| !x.is_loaded()) && self.mode.iter().all(|m| *m == DeckMode::Track);
                 let has_grid = track.grid.is_some();
                 self.mode[d] = DeckMode::Track;
+                if let Some(old) = self.decks[d].detach_stems() {
+                    self.trash(Garbage::Stems(old));
+                }
                 if let Some(old) = self.decks[d].load(track, start_at_first_cue) {
                     self.trash(Garbage::Track(old));
                 }
@@ -581,10 +591,22 @@ impl Engine {
             Command::Eject { deck } => {
                 let d = deck as usize;
                 if d < NUM_DECKS {
+                    if let Some(old) = self.decks[d].detach_stems() {
+                        self.trash(Garbage::Stems(old));
+                    }
                     if let Some(old) = self.decks[d].eject() {
                         self.trash(Garbage::Track(old));
                     }
                     self.maintain_owner();
+                }
+            }
+            Command::AttachStems { deck, stems } => {
+                let d = deck as usize;
+                if d >= NUM_DECKS {
+                    return self.trash(Garbage::Stems(stems));
+                }
+                if let Some(unused) = self.decks[d].attach_stems(stems) {
+                    self.trash(Garbage::Stems(unused));
                 }
             }
             Command::Deck { deck, cmd } => {
@@ -596,6 +618,9 @@ impl Engine {
                 let d = deck as usize;
                 if d < NUM_DECKS && self.mode[d] != mode {
                     if mode == DeckMode::Sampler {
+                        if let Some(old) = self.decks[d].detach_stems() {
+                            self.trash(Garbage::Stems(old));
+                        }
                         if let Some(old) = self.decks[d].eject() {
                             self.trash(Garbage::Track(old));
                         }

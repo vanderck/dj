@@ -47,6 +47,30 @@ folder.
 cargo test --workspace
 ```
 
+## Stems
+
+Every track is separated into **drums, bass, vocals and other** in the background after it loads,
+using [`stems-core`](https://github.com/vanderck/stems). The deck plays the full mix until the stems
+are ready (a progress bar under the waveform shows how far it is), then each deck gets:
+
+- **DRUMS / BASS / VOCALS / OTHER** toggles (lit = audible) and **ACAPELLA / INSTR** shortcuts.
+- Zero added latency: stems are mixed where the deck reads audio, before key lock, loops, slip and
+  hot cues, so all of those keep working.
+- MIDI learn and OSC: `/Collective/Deck/N/StemDrums`, `StemBass`, `StemVocals`, `StemOther`,
+  `Acapella`, `Instrumental` (switches, 1 = on), with feedback.
+
+Separated stems are cached (about 50 MB per minute of audio; size limit and *Clear cache* in
+Settings → Stems), so reloading a track is instant.
+
+**Model.** Set an ONNX separation model in Settings → Stems (or the `STEMS_MODEL` environment
+variable). Without one, a low-quality placeholder separator is used and the deck says so in red.
+Models are trained with the pipeline in the stems repository.
+
+**Build.** The default `stems-onnx` feature downloads ONNX Runtime at build time and links it
+statically. Where that download is blocked, build with
+`--no-default-features --features stems-onnx-dynamic` and set `ORT_DYLIB_PATH` to an existing
+`libonnxruntime` instead.
+
 ## Mixed In Key
 
 Collective reads, from MP3, WAV, AIFF, FLAC, Ogg/Opus and M4A files:

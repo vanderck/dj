@@ -280,3 +280,120 @@ fn removed_effects_are_returned_for_disposal() {
     assert!(evs.iter().any(|e| matches!(e, Event::Garbage(Garbage::Fx(_)))));
     assert!(NUM_DECKS == 4);
 }
+
+// ------------------------------------------------------------------ stems
+
+use collective_engine::track::{Stem, StemData};
+
+/// Window that holds whole periods of both test tones (12 x 60 Hz, 200 x 1 kHz at 48 kHz).
+const TONE_WIN: usize = 9600;
+
+/// Energy of `hz` in the first `TONE_WIN` frames of `x` (left channel), via Goertzel.
+fn tone_energy(x: &[Frame], hz: f32, sr: f32) -> f32 {
+    let x = &x[..TONE_WIN];
+    let w = 2.0 * std::f32::consts::PI * hz / sr;
+    let (mut s1, mut s2) = (0.0f32, 0.0f32);
+    for f in x {
+        let s0 = f[0] + 2.0 * w.cos() * s1 - s2;
+        s2 = s1;
+        s1 = s0;
+    }
+    (s1 * s1 + s2 * s2 - 2.0 * w.cos() * s1 * s2) / x.len() as f32
+}
+
+/// A track that is a 60 Hz "bass" plus a 1 kHz "vocal", with matching stems.
+fn stem_track(id: u64) -> (Arc<Track>, Arc<StemData>) {
+    let n = 10 * SR as usize;
+    let sine = |hz: f32, a: f32| -> Vec<Frame> {
+        (0..n).map(|i| {
+            let v = a * (2.0 * std::f32::consts::PI * hz * i as f32 / SR).sin();
+            [v, v]
+        }).collect()
+    };
+    let (bass, vocals, drums) = (sine(60.0, 0.4), sine(1000.0, 0.3), vec![[0.0; 2]; n]);
+    let frames = bass.iter().zip(&vocals).map(|(b, v)| [b[0] + v[0], b[1] + v[1]]).collect();
+    let track = Arc::new(Track {
+        id,
+        audio: AudioData { sample_rate: SR as u32, frames },
+        grid: None,
+        gain: 1.0,
+        cues: Default::default(),
+    });
+    (track, Arc::new(StemData::from_f32(id, &drums, &bass, &vocals)))
+}
+
+fn stem_garbage(events: &[Event]) -> Vec<u64> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Garbage(Garbage::Stems(s)) => Some(s.track_id),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn stems_mute_removes_the_vocal_and_dispose_off_thread() {
+    let (mut e, mut c) = setup();
+    let (track, stems) = stem_track(42);
+    send(&mut c, Command::Load { deck: 0, track, start_at_first_cue: false });
+    send(&mut c, Command::GlobalQuantize(None));
+    deck(&mut c, 0, DeckCmd::KeyLock(false));
+    deck(&mut c, 0, DeckCmd::Play);
+    // Muting before stems exist has no audible effect yet.
+    deck(&mut c, 0, DeckCmd::StemGain { stem: Stem::Vocals as u8, gain: 0.0 });
+    let before = run(&mut e, 60);
+    let vocal_before = tone_energy(&before[4096..], 1000.0, SR);
+    let bass_before = tone_energy(&before[4096..], 60.0, SR);
+    assert!(vocal_before > 0.1 * bass_before, "vocal audible before stems attach");
+    assert!(!e.snapshot().decks[0].stems_ready);
+
+    // Stems for a different track are rejected and handed back.
+    let (_, wrong) = stem_track(7);
+    send(&mut c, Command::AttachStems { deck: 0, stems: wrong });
+    send(&mut c, Command::AttachStems { deck: 0, stems });
+    run(&mut e, 4); // let the 4 ms gain ramp settle
+    assert_eq!(stem_garbage(&drain(&mut c)), vec![7]);
+    let snap = e.snapshot();
+    assert!(snap.decks[0].stems_ready);
+    assert_eq!(snap.decks[0].stem_gains[Stem::Vocals as usize], 0.0);
+
+    let after = run(&mut e, 40);
+    let vocal_after = tone_energy(&after, 1000.0, SR);
+    let bass_after = tone_energy(&after, 60.0, SR);
+    assert!(vocal_after < 1e-4 * vocal_before, "vocal removed: {vocal_after} vs {vocal_before}");
+    assert!((bass_after / bass_before - 1.0).abs() < 0.05, "bass untouched");
+
+    // Unmuting brings it back.
+    deck(&mut c, 0, DeckCmd::StemGain { stem: Stem::Vocals as u8, gain: 1.0 });
+    run(&mut e, 4);
+    let back = run(&mut e, 40);
+    assert!((tone_energy(&back, 1000.0, SR) / vocal_before - 1.0).abs() < 0.05);
+
+    // Loading another track drops the stems (returned for disposal) and resets gains.
+    deck(&mut c, 0, DeckCmd::StemGain { stem: Stem::Drums as u8, gain: 0.0 });
+    let (next, _) = stem_track(43);
+    send(&mut c, Command::Load { deck: 0, track: next, start_at_first_cue: false });
+    run(&mut e, 2);
+    assert_eq!(stem_garbage(&drain(&mut c)), vec![42]);
+    let snap = e.snapshot();
+    assert!(!snap.decks[0].stems_ready);
+    assert_eq!(snap.decks[0].stem_gains, [1.0; 4]);
+}
+
+#[test]
+fn stems_survive_keylock_and_loops() {
+    let (mut e, mut c) = setup();
+    let (track, stems) = stem_track(5);
+    send(&mut c, Command::Load { deck: 0, track, start_at_first_cue: false });
+    send(&mut c, Command::AttachStems { deck: 0, stems });
+    send(&mut c, Command::GlobalQuantize(None));
+    deck(&mut c, 0, DeckCmd::KeyLock(true));
+    deck(&mut c, 0, DeckCmd::Tempo(0.5)); // speed change => time-stretch path
+    deck(&mut c, 0, DeckCmd::Play);
+    deck(&mut c, 0, DeckCmd::StemGain { stem: Stem::Bass as u8, gain: 0.0 });
+    let out = run(&mut e, 100);
+    let tail = &out[out.len() - TONE_WIN..];
+    let (bass, vocal) = (tone_energy(tail, 60.0, SR), tone_energy(tail, 1000.0, SR));
+    assert!(vocal > 100.0 * bass, "bass muted through the stretcher: {bass} vs {vocal}");
+}

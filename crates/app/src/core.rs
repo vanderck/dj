@@ -58,6 +58,10 @@ pub struct DeckUi {
     pub info: Option<LoadedInfo>,
     pub loading: Option<PathBuf>,
     pub error: Option<String>,
+    /// Stem separation progress (0..1) while it runs for the loaded track.
+    pub stems_progress: Option<f32>,
+    /// What produced the attached stems (model name, "placeholder separator", "cache").
+    pub stems_source: Option<String>,
     /// Bar/beat last reported over OSC.
     last_beat: i64,
 }
@@ -97,7 +101,8 @@ pub fn addr_kind(addr: &str) -> Kind {
         | "previous" | "next" | "tap" => Kind::Trigger,
         "playing" | "cuemomentary" | "slip" | "cueslip" | "faderstart" | "speedhalf" | "speeddouble" | "reverse"
         | "slipdotted" | "slipth" | "sliptriplet" | "pitchpreserve" | "mute" | "solo" | "fx" | "on" | "limiter"
-        | "metronome" | "wallclock" | "sync" | "record" | "quantizeon" | "bypassall" => Kind::Switch,
+        | "metronome" | "wallclock" | "sync" | "record" | "quantizeon" | "bypassall" | "stemdrums" | "stembass"
+        | "stemvocals" | "stemother" | "acapella" | "instrumental" => Kind::Switch,
         "cue" | "backspin" | "phaseminus" | "phaseplus" | "trigger" => Kind::Hold,
         "beatskip" | "barskip" | "loopmovebeat" | "loopmovebar" | "pitchstep" | "bpmstep" | "browse" => Kind::Step,
         "phasebend" | "bend" => Kind::Bend,
@@ -106,6 +111,20 @@ pub fn addr_kind(addr: &str) -> Kind {
         _ => Kind::Value,
     }
 }
+
+/// Deck stem switches (`/deck/N/stemvocals` etc., on = audible) -> stem index.
+pub fn stem_switch(name: &str) -> Option<usize> {
+    match name {
+        "stemdrums" => Some(0),
+        "stembass" => Some(1),
+        "stemvocals" => Some(2),
+        "stemother" => Some(3),
+        _ => None,
+    }
+}
+
+pub const STEMS_ACAPELLA: [f32; 4] = [0.0, 0.0, 1.0, 0.0];
+pub const STEMS_INSTRUMENTAL: [f32; 4] = [1.0, 1.0, 0.0, 1.0];
 
 fn arg_f(args: &[OscType]) -> Option<f32> {
     args.iter().find_map(|a| match a {
@@ -160,6 +179,7 @@ pub struct Core {
     pub browser_query: String,
     loader_tx: Sender<LoadJob>,
     loader_rx: Receiver<LoadResult>,
+    stems: crate::stems::StemsWorker,
     pub learn: bool,
     pub last_touched: Option<String>,
     pub status: VecDeque<(Instant, String)>,
@@ -231,6 +251,7 @@ impl Core {
             browser_query: String::new(),
             loader_tx: job_tx,
             loader_rx: res_rx,
+            stems: crate::stems::StemsWorker::new(),
             learn: false,
             last_touched: None,
             status: VecDeque::new(),
@@ -410,6 +431,9 @@ impl Core {
             return;
         }
         let overrides = self.trackdb.tracks.get(&TrackDb::key(path)).cloned();
+        self.stems.cancel(d);
+        self.decks[d].stems_progress = None;
+        self.decks[d].stems_source = None;
         self.decks[d].loading = Some(path.to_path_buf());
         self.decks[d].error = None;
         let _ = self.loader_tx.send(LoadJob::Track {
@@ -421,6 +445,9 @@ impl Core {
     }
 
     pub fn eject(&mut self, d: usize) {
+        self.stems.cancel(d);
+        self.decks[d].stems_progress = None;
+        self.decks[d].stems_source = None;
         self.send(Command::Eject { deck: d as u8 });
         self.decks[d].info = None;
         self.session.decks[d].track = None;
@@ -439,6 +466,18 @@ impl Core {
             cues: lt.track.cues.clone(),
         };
         self.send(Command::DeckMode { deck: d as u8, mode: DeckMode::Track });
+        if self.settings.stems_enabled {
+            self.decks[d].stems_progress = Some(0.0);
+            let cache = (self.settings.stems_cache_mb > 0)
+                .then(|| (crate::settings::config_dir().join("stems-cache"), self.settings.stems_cache_mb * 1024 * 1024));
+            self.stems.request(crate::stems::Request {
+                deck: d,
+                track: lt.track.clone(),
+                path: lt.path.clone(),
+                model: crate::stems::resolve_model(self.settings.stems_model.as_deref()),
+                cache,
+            });
+        }
         self.send(Command::Load { deck: d as u8, track: lt.track, start_at_first_cue: self.settings.load_at_first_cue });
         if self.settings.keylock_on_load {
             self.session.decks[d].keylock = true;
@@ -453,6 +492,34 @@ impl Core {
         self.decks[d].info = Some(info);
         self.decks[d].loading = None;
         self.mark_dirty();
+    }
+
+    fn on_stems_update(&mut self, u: crate::stems::Update) {
+        use crate::stems::Update;
+        let current = |core: &Self, d: usize, id: u64| core.decks[d].info.as_ref().is_some_and(|i| i.track_id == id);
+        match u {
+            Update::Progress { deck, track_id, fraction } if current(self, deck, track_id) => {
+                self.decks[deck].stems_progress = Some(fraction);
+            }
+            Update::Done { deck, track_id, stems, source } if current(self, deck, track_id) => {
+                self.decks[deck].stems_progress = None;
+                self.decks[deck].stems_source = Some(source);
+                self.send(Command::AttachStems { deck: deck as u8, stems });
+            }
+            Update::Failed { deck, track_id, error } if current(self, deck, track_id) => {
+                self.decks[deck].stems_progress = None;
+                self.log(format!("Deck {} stems: {error}", deck + 1));
+            }
+            _ => {} // for a track that is no longer loaded
+        }
+    }
+
+    /// Set stem gains on a deck (0 = muted, 1 = on), in `Stem` order.
+    fn set_stems(&mut self, d: usize, gains: [f32; 4]) -> Option<DeckCmd> {
+        for (i, g) in gains.iter().enumerate().skip(1) {
+            self.deck_cmd(d, DeckCmd::StemGain { stem: i as u8, gain: *g });
+        }
+        Some(DeckCmd::StemGain { stem: 0, gain: gains[0] })
     }
 
     fn persist_cue(&mut self, d: usize, idx: u8, cue: Option<Cue>) {
@@ -1243,6 +1310,12 @@ impl Core {
                 self.session.decks[d].keylock = o;
                 DeckCmd::KeyLock(o)
             }),
+            [s] if stem_switch(s).is_some() => on.map(|o| DeckCmd::StemGain {
+                stem: stem_switch(s).unwrap() as u8,
+                gain: if o { 1.0 } else { 0.0 },
+            }),
+            ["acapella"] => on.and_then(|o| self.set_stems(d, if o { STEMS_ACAPELLA } else { [1.0; 4] })),
+            ["instrumental"] => on.and_then(|o| self.set_stems(d, if o { STEMS_INSTRUMENTAL } else { [1.0; 4] })),
             ["pitchdown"] if trig => Some(DeckCmd::Semitones(self.snap.decks[d].semitones - 1.0)),
             ["pitchup"] if trig => Some(DeckCmd::Semitones(self.snap.decks[d].semitones + 1.0)),
             ["pitchreset"] if trig => Some(DeckCmd::Semitones(0.0)),
@@ -1547,6 +1620,9 @@ impl Core {
             ["deck", n, "tempomaster"] => self.snap.clock.owner == ClockOwner::Deck(idx(n)? as u8),
             ["deck", n, "loop"] => self.snap.decks[idx(n)?].loop_on,
             ["deck", n, "pitchpreserve"] => self.snap.decks[idx(n)?].keylock,
+            ["deck", n, s] if stem_switch(s).is_some() => self.snap.decks[idx(n)?].stem_gains[stem_switch(s)?] > 0.5,
+            ["deck", n, "acapella"] => self.snap.decks[idx(n)?].stem_gains == STEMS_ACAPELLA,
+            ["deck", n, "instrumental"] => self.snap.decks[idx(n)?].stem_gains == STEMS_INSTRUMENTAL,
             ["deck", n, "cueslip"] | ["deck", n, "slip"] => self.snap.decks[idx(n)?].slip,
             ["deck", n, "reverse"] => self.snap.decks[idx(n)?].reverse,
             ["deck", n, "cuemomentary"] => self.snap.decks[idx(n)?].momentary_cues,
@@ -1933,6 +2009,10 @@ impl Core {
             }
         }
 
+        while let Some(u) = self.stems.try_recv() {
+            self.on_stems_update(u);
+        }
+
         while let Ok(r) = self.loader_rx.try_recv() {
             match r {
                 LoadResult::Track { deck, path, result } => {
@@ -2064,14 +2144,18 @@ mod tests {
     use super::*;
     use collective_engine::{create, EngineConfig};
 
-    fn core() -> (collective_engine::Engine, Core) {
+    /// Tests share the process-wide `COLLECTIVE_CONFIG_DIR`; hold this for the whole test.
+    static CONFIG_DIR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn core() -> (collective_engine::Engine, Core, std::sync::MutexGuard<'static, ()>) {
+        let guard = CONFIG_DIR_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let dir = std::env::temp_dir().join(format!("collective-core-test-{}-{:?}", std::process::id(), std::thread::current().id()));
         std::env::set_var("COLLECTIVE_CONFIG_DIR", &dir);
         let (engine, ctl) = create(EngineConfig { sample_rate: 48000.0, max_block: 512, max_latency: 4096 });
         let settings = Settings { osc_enabled: false, vst3_enabled: false, library_folders: vec![], ..Default::default() };
         let mut c = Core::new(ctl, 48000.0, 512, settings, Session::default());
         c.sync_engine();
-        (engine, c)
+        (engine, c, guard)
     }
 
     fn pump(e: &mut collective_engine::Engine, c: &mut Core) {
@@ -2083,7 +2167,7 @@ mod tests {
 
     #[test]
     fn fx_chain_macros_and_presets() {
-        let (mut e, mut c) = core();
+        let (mut e, mut c, _config) = core();
         assert!(c.route("Mixer/CH1/FX/Insert", &[OscType::String("native:autofilter".into())]));
         c.route("Mixer/CH1/FX/Insert", &[OscType::String("native:echo".into()), OscType::String("post".into())]);
         pump(&mut e, &mut c);
@@ -2128,8 +2212,62 @@ mod tests {
     }
 
     #[test]
+    fn stem_switches_route_to_the_engine_and_report_state() {
+        let (mut e, mut c, _config) = core();
+        assert_eq!(addr_kind("Deck/1/StemDrums"), Kind::Switch);
+        assert_eq!(addr_kind("Deck/1/Acapella"), Kind::Switch);
+        assert!(c.route("Deck/2/StemVocals", &[OscType::Int(0)]));
+        pump(&mut e, &mut c);
+        assert_eq!(c.snap.decks[1].stem_gains, STEMS_INSTRUMENTAL);
+        assert_eq!(c.switch_state("/deck/2/stemvocals"), Some(false));
+        assert_eq!(c.switch_state("/deck/2/stembass"), Some(true));
+        assert_eq!(c.switch_state("/deck/2/instrumental"), Some(true));
+
+        assert!(c.route("Deck/2/Acapella", &[OscType::Int(1)]));
+        pump(&mut e, &mut c);
+        assert_eq!(c.snap.decks[1].stem_gains, STEMS_ACAPELLA);
+        assert_eq!(c.switch_state("/deck/2/acapella"), Some(true));
+        assert_eq!(c.switch_state("/deck/2/instrumental"), Some(false));
+
+        c.route("Deck/2/Acapella", &[OscType::Int(0)]);
+        pump(&mut e, &mut c);
+        assert_eq!(c.snap.decks[1].stem_gains, [1.0; 4]);
+    }
+
+    #[test]
+    fn loaded_tracks_get_stems_in_the_background() {
+        let (mut e, mut c, _config) = core();
+        let dir = crate::settings::config_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("stems-test.wav");
+        let spec = hound::WavSpec { channels: 2, sample_rate: 44100, bits_per_sample: 16, sample_format: hound::SampleFormat::Int };
+        let mut w = hound::WavWriter::create(&path, spec).unwrap();
+        for i in 0..44100 * 3 {
+            let t = i as f32 / 44100.0;
+            let v = 0.4 * (std::f32::consts::TAU * 60.0 * t).sin() + 0.2 * (std::f32::consts::TAU * 900.0 * t).sin();
+            let s = (v * 30000.0) as i16;
+            w.write_sample(s).unwrap();
+            w.write_sample(s).unwrap();
+        }
+        w.finalize().unwrap();
+
+        c.load_track(0, &path);
+        let deadline = Instant::now() + std::time::Duration::from_secs(60);
+        while !c.snap.decks[0].stems_ready {
+            assert!(Instant::now() < deadline, "stems never attached");
+            pump(&mut e, &mut c);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(c.decks[0].info.is_some());
+        assert_eq!(c.decks[0].stems_progress, None);
+        assert_eq!(c.decks[0].stems_source.as_deref(), Some("placeholder separator"));
+        // Cached for next time.
+        assert!(std::fs::read_dir(dir.join("stems-cache")).unwrap().count() >= 1);
+    }
+
+    #[test]
     fn osc_root_and_mixer_routes() {
-        let (mut e, mut c) = core();
+        let (mut e, mut c, _config) = core();
         assert_eq!(c.strip_root("/Collective/Deck/1/PlayPause"), Some("Deck/1/PlayPause"));
         assert_eq!(c.strip_root("/collective/mixer/ch1/volume"), Some("mixer/ch1/volume"));
         c.settings.osc_root = "/Syndicate/".into();
@@ -2154,7 +2292,7 @@ mod tests {
 
     #[test]
     fn midi_learn_and_toggle() {
-        let (mut e, mut c) = core();
+        let (mut e, mut c, _config) = core();
         c.learn = true;
         c.touch("Mixer/CH2/Mute");
         c.handle_midi(&[0x91, 36, 127]);
