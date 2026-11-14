@@ -97,6 +97,21 @@ pub fn decode(path: &Path) -> Result<AudioData> {
     Ok(AudioData { sample_rate, frames })
 }
 
+/// Track length from container headers only (no decoding).
+pub fn probe_duration(path: &Path) -> Option<f64> {
+    let file = std::fs::File::open(path).ok()?;
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut hint = Hint::new();
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        hint.with_extension(ext);
+    }
+    let format = symphonia::default::get_probe().probe(&hint, mss, FormatOptions::default(), MetadataOptions::default()).ok()?;
+    let track = format.default_track(TrackType::Audio)?;
+    let frames = track.num_frames?;
+    let sr = track.codec_params.as_ref()?.audio()?.sample_rate?;
+    Some(frames as f64 / sr as f64)
+}
+
 /// Where the beat grid of a loaded track came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GridSource {

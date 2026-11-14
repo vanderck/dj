@@ -91,6 +91,32 @@ VST3 plugins are found in the standard locations (plus folders you add in
 Settings), grouped by vendor and searchable. Parameters are edited in a generic
 editor (every automatable parameter, with the plugin's own value text).
 
+## Interface
+
+The Perform view mirrors the familiar 4-deck layout: decks 1 and 3 on the
+left, 2 and 4 on the right, channel strips in the middle, browser below.
+
+- **Deck header:** SYNC, deck badge (right-click: track/sampler, lock, grid
+  tools), title / artist / length, BAR/BEAT, REMAIN, ORIGINAL BPM, CURRENT BPM,
+  KEY (coloured on the Camelot wheel, transposed with pitch), QUANTIZE (click to
+  change), eject.
+- **Second row:** MASTER/FOLLOW, P (key lock), − 0 + transpose, a BEND strip on
+  the master deck or an EARLY ▼ LATE phase strip on followers, M (momentary
+  cues), /2, X2, SLIP, direction.
+- **Body:** tempo fader and play button on the left; zoomed and overview
+  waveforms coloured by cue section; 8 named cue pads; loop, I/O, skip, slip
+  loops 1/32–1/2 bar, D/T.
+- **Channel:** big volume knob with a dotted VU ring and trim ring
+  (Ctrl/Cmd-drag), F for fader start, FILTER (CUTOFF/RES/WIDTH; click the title
+  for EQ), CUE/MUTE/SOLO/FX, output.
+- **Browser:** ALL/HIST, search, harmonic filter, IMPORT, row zoom; ARTIST,
+  TITLE, ALBUM, LABEL, BPM, DURATION, KEY, GENRE, PLAY COUNT, DATE ADDED. Drag
+  rows onto a deck or double-click to load.
+
+The GUI is egui (immediate mode, custom-painted controls), not a game engine:
+it redraws only what's needed, starts instantly and keeps the audio thread
+completely separate.
+
 ## Other features
 
 - **Decks**: 4 decks (or 2). Key lock with a WSOLA time-stretcher and

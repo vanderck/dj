@@ -102,7 +102,7 @@ pub struct ChannelModel {
 
 impl Default for ChannelModel {
     fn default() -> Self {
-        Self { params: ChannelParams::default(), fader_start: false, xf_assign: XfAssign::Thru, fx: FxChainModel::default(), show_eq: true }
+        Self { params: ChannelParams::default(), fader_start: false, xf_assign: XfAssign::Thru, fx: FxChainModel::default(), show_eq: false }
     }
 }
 

@@ -728,7 +728,7 @@ impl Vst3Effect {
         use ProcessContext_::StatesAndFlags_ as S;
         let beat = ctx.beat + offset_beats;
         let mut pc: ProcessContext = unsafe { std::mem::zeroed() };
-        pc.state = (S::kPlaying | S::kTempoValid | S::kProjectTimeMusicValid | S::kBarPositionValid | S::kTimeSigValid);
+        pc.state = S::kPlaying | S::kTempoValid | S::kProjectTimeMusicValid | S::kBarPositionValid | S::kTimeSigValid;
         pc.sampleRate = ctx.sample_rate as f64;
         pc.projectTimeSamples = self.frames;
         pc.continousTimeSamples = self.frames;

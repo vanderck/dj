@@ -106,6 +106,17 @@ fn settings(ui: &mut Ui, core: &mut Core, st: &mut UiState) {
         }
     });
     ui.horizontal(|ui| {
+        use collective_engine::mixer::MixMode;
+        ui.label("Mix mode");
+        let m = core.session.mix_mode;
+        for (lbl, mm) in [("Off", MixMode::Off), ("Crossfader", MixMode::Crossfader { pos: 0.0, sharp: false }), ("Vector (4 decks)", MixMode::Vector { x: 0.5, y: 0.5 })] {
+            if ui.selectable_label(std::mem::discriminant(&m) == std::mem::discriminant(&mm), lbl).clicked() {
+                core.session.mix_mode = mm;
+                core.apply_mix_mode();
+            }
+        }
+    });
+    ui.horizontal(|ui| {
         ui.label("Direct outputs apply:");
         let e = &mut core.settings.ext_stages;
         changed_engine |= ui.checkbox(&mut e.trim, "Trim").changed();

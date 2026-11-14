@@ -24,6 +24,7 @@ pub struct Tags {
     pub artist: Option<String>,
     pub album: Option<String>,
     pub genre: Option<String>,
+    pub label: Option<String>,
     pub comment: Option<String>,
     pub bpm: Option<f64>,
     pub key_text: Option<String>,
@@ -71,6 +72,7 @@ impl Tags {
             "ARTIST" => self.artist = Some(v),
             "ALBUM" => self.album = Some(v),
             "GENRE" => self.genre = Some(v),
+            "LABEL" | "ORGANIZATION" | "PUBLISHER" => self.label = Some(v),
             "COMMENT" | "DESCRIPTION" => self.comment.get_or_insert(v).truncate(4096),
             "BPM" | "TEMPO" => self.bpm = self.bpm.or_else(|| v.replace(',', ".").parse().ok()),
             "INITIALKEY" | "KEY" | "INITIAL KEY" => self.key_text = Some(v),
@@ -325,6 +327,7 @@ fn id3_frame(id: &[u8], f: &[u8], tags: &mut Tags) {
         b"TPE1" => tags.set_text("ARTIST", id3_text(enc, &f[1..])),
         b"TALB" => tags.set_text("ALBUM", id3_text(enc, &f[1..])),
         b"TCON" => tags.set_text("GENRE", id3_text(enc, &f[1..])),
+        b"TPUB" => tags.set_text("LABEL", id3_text(enc, &f[1..])),
         b"TBPM" => tags.set_text("BPM", id3_text(enc, &f[1..])),
         b"TKEY" => tags.set_text("INITIALKEY", id3_text(enc, &f[1..])),
         b"TXXX" => {

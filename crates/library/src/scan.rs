@@ -14,6 +14,13 @@ pub struct Entry {
     pub artist: String,
     pub album: String,
     pub genre: String,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub duration_secs: Option<f64>,
+    /// When the file first appeared in the library (unix seconds).
+    #[serde(default)]
+    pub added: u64,
     pub bpm: Option<f64>,
     pub key: Option<Key>,
     pub energy: Option<u8>,
@@ -31,6 +38,9 @@ impl Entry {
             artist: t.artist.unwrap_or_default(),
             album: t.album.unwrap_or_default(),
             genre: t.genre.unwrap_or_default(),
+            label: t.label.unwrap_or_default(),
+            duration_secs: crate::probe_duration(path),
+            added: now(),
             bpm: t.bpm,
             key: t.key,
             energy: t.energy,
@@ -49,9 +59,14 @@ impl Entry {
                 || self.artist.to_lowercase().contains(w)
                 || self.album.to_lowercase().contains(w)
                 || self.genre.to_lowercase().contains(w)
+                || self.label.to_lowercase().contains(w)
                 || self.key.map(|k| k.camelot().eq_ignore_ascii_case(w) || k.musical().eq_ignore_ascii_case(w)).unwrap_or(false)
         })
     }
+}
+
+fn now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
 fn mtime(p: &Path) -> u64 {
@@ -102,6 +117,12 @@ pub fn scan(roots: &[PathBuf], cache: &[Entry]) -> Vec<Entry> {
                     part.iter()
                         .map(|p| match cached.get(p.as_path()) {
                             Some(e) if e.modified == mtime(p) => (*e).clone(),
+                            Some(e) => {
+                                // Re-read changed tags but keep the date it was added.
+                                let mut n = Entry::read(p);
+                                n.added = e.added;
+                                n
+                            }
                             _ => Entry::read(p),
                         })
                         .collect::<Vec<_>>()

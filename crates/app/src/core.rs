@@ -155,6 +155,8 @@ pub struct Core {
     pub library_scanning: bool,
     library_rx: Option<Receiver<Vec<Entry>>>,
     pub browser_selected: Option<usize>,
+    /// Tracks loaded this session (for the HIST view).
+    pub history: Vec<PathBuf>,
     pub browser_query: String,
     loader_tx: Sender<LoadJob>,
     loader_rx: Receiver<LoadResult>,
@@ -225,6 +227,7 @@ impl Core {
             library_scanning: false,
             library_rx: None,
             browser_selected: None,
+            history: Vec::new(),
             browser_query: String::new(),
             loader_tx: job_tx,
             loader_rx: res_rx,
@@ -445,6 +448,8 @@ impl Core {
         self.session.decks[d].mode = DeckMode::Track;
         self.session.decks[d].track = Some(lt.path.clone());
         *self.trackdb.play_counts.entry(TrackDb::key(&lt.path)).or_default() += 1;
+        self.history.retain(|p| p != &lt.path);
+        self.history.push(lt.path.clone());
         self.decks[d].info = Some(info);
         self.decks[d].loading = None;
         self.mark_dirty();
