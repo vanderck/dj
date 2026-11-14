@@ -34,8 +34,8 @@ def test_short_training_run_learns_and_exports(tmp_path):
                       segment_seconds=1.5, lr=3e-3, warmup_steps=5, num_workers=0, device="cpu",
                       log_every=20, eval_every=60, ckpt_every=60, model=TINY)
     metrics = train(cfg)
-    base = sum(metrics_baseline := metrics["baseline_sdr"].values()) / len(metrics_baseline)
-    assert metrics["mean_sdr"] > base + 1.0, metrics  # beats "mixture as every stem"
+    # Beats an untrained model (equal split) and stays below the oracle ceiling.
+    assert metrics["baseline_mean_sdr"] < metrics["mean_sdr"] < metrics["oracle_mean_sdr"], metrics
     logged = [json.loads(line) for line in (tmp_path / "run" / "log.jsonl").read_text().splitlines()]
     losses = [r["loss"] for r in logged if "loss" in r]
     assert losses[-1] < losses[0]

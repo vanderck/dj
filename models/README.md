@@ -50,8 +50,12 @@ separate real music, but it proves the whole loop (train → export → plugin) 
 python -m stems_train.train --data synthetic --out runs/synth --steps 2000 --batch-size 8
 ```
 
-`--device auto` (the default) uses the Apple GPU through MPS when available. Watch the `eval`
-lines: per-stem SDR should climb well above the "mixture baseline".
+`--device auto` (the default) uses the Apple GPU through MPS when available. Each `eval` line
+prints per-stem SDR between two references: the **equal-split floor** (every stem gets a quarter
+of the mix — what an untrained model does) and the **oracle ceiling** (ideal ratio masks computed
+from the true stems — the best any mask-based model can do). Progress is how far the mean moves
+from the floor toward the ceiling; a few hundred CPU steps barely move it, so train for tens of
+thousands of steps on a GPU.
 
 ## 2. Get training data
 

@@ -77,9 +77,16 @@ def evaluate(model, loader, device):
     model.train()
     est, tgt, mix = torch.cat(ests), torch.cat(tgts), torch.cat(mixes)
     sdr = spectral_sdr(est, tgt)
-    # Baseline: the mixture itself as every stem's estimate.
-    base = spectral_sdr(mix[:, None].expand_as(tgt), tgt)
-    return sdr, base
+    # Floor: every stem gets a quarter of the mix (what an untrained model outputs).
+    base = spectral_sdr(0.25 * mix[:, None].expand_as(tgt), tgt)
+    # Ceiling: oracle ratio masks computed from the true stems.
+    return sdr, base, spectral_sdr(apply_masks(oracle_masks(tgt), mix), tgt)
+
+
+def oracle_masks(tgt: torch.Tensor) -> torch.Tensor:
+    """Ideal ratio masks |S_s| / sum_s |S_s| from target planes [B, S, 4, F, n] -> [B, S, F, n]."""
+    mag = tgt.reshape(*tgt.shape[:2], 2, 2, *tgt.shape[-2:]).pow(2).sum(3).sum(2).sqrt()
+    return mag / (mag.sum(1, keepdim=True) + 1e-8)
 
 
 def save(path: Path, model, opt, sched, step, cfg: TrainConfig, metrics=None):
@@ -214,11 +221,13 @@ def train(cfg: TrainConfig) -> dict:
             t0, running = time.time(), 0.0
 
         if step % cfg.eval_every == 0 or step == cfg.steps:
-            sdr, base = evaluate(model, val_loader, device)
+            sdr, base, oracle = evaluate(model, val_loader, device)
             metrics = {"step": step, "sdr": dict(zip(STEMS, sdr.tolist())), "mean_sdr": sdr.mean().item(),
-                       "baseline_sdr": dict(zip(STEMS, base.tolist()))}
+                       "baseline_sdr": dict(zip(STEMS, base.tolist())), "baseline_mean_sdr": base.mean().item(),
+                       "oracle_sdr": dict(zip(STEMS, oracle.tolist())), "oracle_mean_sdr": oracle.mean().item()}
             print("  eval " + " ".join(f"{s} {v:+.2f}dB" for s, v in metrics["sdr"].items())
-                  + f" · mean {metrics['mean_sdr']:+.2f}dB (mixture baseline {base.mean():+.2f}dB)", flush=True)
+                  + f" · mean {metrics['mean_sdr']:+.2f}dB"
+                  + f" (equal-split floor {base.mean():+.2f}dB, oracle ceiling {oracle.mean():+.2f}dB)", flush=True)
             log.write(json.dumps({"eval": metrics}) + "\n")
             log.flush()
             if metrics["mean_sdr"] > best:
