@@ -40,7 +40,7 @@ docs/MODEL_CONTRACT.md  Tensor layout, STFT conventions and metadata a model mus
 
 ## Build
 
-Requires stable Rust (1.80+). On Linux, install the GUI headers first:
+Requires stable Rust (1.80+). The plugin targets macOS 13.4+ (set in `.cargo/config.toml`), Windows 10+ and Linux. On Linux, install the GUI headers first:
 
 ```bash
 sudo apt-get install -y libasound2-dev libgl-dev libjack-dev libx11-xcb-dev libxcb1-dev libxcb-dri2-0-dev libxcb-icccm4-dev libxcursor-dev libxkbcommon-dev libxcb-shape0-dev libxcb-xfixes0-dev
