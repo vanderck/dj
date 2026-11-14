@@ -6,3 +6,7 @@
 !crates/stems-core/tests/data/*.onnx
 __pycache__/
 .venv/
+models/runs/
+models/data/
+*.pt
+.pytest_cache/

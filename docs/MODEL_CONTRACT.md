@@ -73,13 +73,17 @@ The model runs only when the host rate is within 1 % of `stems.sample_rate`; oth
 plugin falls back to the placeholder separator and says why in the UI. Internal resampling is on
 the roadmap.
 
-## Training checklist
+## Training
 
-1. Compute input frames with `models/tools/stft.py` (`stft_frames` + `context_windows`).
-2. Targets: ideal ratio masks or, better, train end-to-end through the mask application:
-   `stem_hat = mask_s · mixture_spec`, loss on the reconstructed stem spectra/waveforms.
+The reference implementation is the PyTorch pipeline in [`models/`](../models/README.md): its
+`StemsNet` + `stems_train.export` produce contract-v1 files directly, and its tests check the
+STFT and the train/deploy equivalence. If you bring your own architecture:
+
+1. Compute input frames with `models/tools/stft.py` (`stft_frames` + `context_windows`) or
+   `stems_train.stft.stft_planes`.
+2. Train end-to-end through the mask application (`stem_hat = mask_s · mixture_spec`) with a
+   loss on the reconstructed stem spectra or waveforms.
 3. Respect causality: the network may only see `lookahead_frames` frames after the target.
-4. Export with a fixed batch of 1 and the shapes above (opset ≥ 17), add the metadata, then run
-   `cargo test -p stems-core --features onnx` against it (copy one of the tests in
-   `crates/stems-core/tests/onnx.rs`) and the benchmark:
+4. Export with a fixed batch of 1 and the shapes above (opset ≥ 17), add the metadata, then
+   benchmark it in the engine:
    `cargo run --release -p stems-core --features onnx --example bench -- model.onnx`.
