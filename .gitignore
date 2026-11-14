@@ -3,3 +3,6 @@
 .DS_Store
 *.onnx
 *.mlpackage
+!crates/stems-core/tests/data/*.onnx
+__pycache__/
+.venv/

@@ -50,31 +50,36 @@ PEEL-STEMS-class result is roughly 250 ms.
 - The soundfield is handed to the GUI through a `triple_buffer` (wait-free on the audio side).
   It is only computed while the editor is open.
 
-## Plugging in an ML model
+## ML model path
 
-Implement `stems_core::Separator`:
-
-```rust
-pub trait Separator: Send {
-    fn lookahead_frames(&self) -> usize { 0 }
-    fn reset(&mut self) {}
-    fn separate(&mut self, left: &[Complex32], right: &[Complex32], masks: &mut StemMasks);
-}
+```
+StemEngine ──► ThreadedSeparator (audio thread side, real-time safe)
+                  │  rtrb SPSC rings, frames tagged [generation, index]
+                  ▼
+               worker thread ──► MaskModel::infer ──► OnnxModel (ONNX Runtime via `ort`)
 ```
 
-Recommended shape for a neural model:
+- `MaskModel` (`model.rs`): any model with a `ModelSpec` (sample rate, FFT size, context,
+  lookahead) and an `infer(context, masks)` method. Runs on the worker, may allocate.
+- `ThreadedSeparator` (`threaded.rs`): implements `Separator`. Each hop it queues the new frame
+  and takes the masks for the frame `pipeline_frames` hops earlier. Late masks → the previous
+  masks are reused and `SeparatorStats::underruns` increments; the audio thread never waits.
+  In **offline** mode (host bounce, `ProcessMode::Offline`) it waits instead, so renders are
+  always fully separated.
+- `reset()` bumps a generation counter; stale in-flight frames and masks are discarded by tag,
+  so no locking with the worker is needed.
+- Model errors are latched (`SeparatorStats::failed` / `error`) and the separator degrades to
+  neutral masks, which is transparent at unity gains.
+- `OnnxModel` (`onnx.rs`): reads `ModelSpec` from ONNX metadata, does a dry run at load time to
+  catch shape errors early. Features: `onnx` (download + static link) or `onnx-dynamic`
+  (load `ORT_DYLIB_PATH` at runtime; a missing library is an error, not a panic).
 
-1. **Export** a mask-estimating network to ONNX (or Core ML) that takes a window of magnitude
-   spectra (`T × bins × 2`) and returns masks for the frame `lookahead_frames` in the past.
-   Keep the STFT outside the model — it is already done here, and STFT ops export poorly.
-2. **Worker thread**: inference runtimes allocate and their latency jitters, so do not call them
-   on the audio thread. `separate` pushes the newest frame into a lock-free SPSC ring (e.g.
-   `rtrb`) and pops the masks that are due; the worker batches frames and runs `ort::Session`.
-3. **Budget**: the worker has `hop / sample_rate` (≈ 23 ms at 44.1 kHz, hop 1024) per frame on
-   average; batching several hops trades latency for throughput. Add the batch size to
-   `lookahead_frames` so the host compensates for it.
-4. **Underruns**: if masks are not ready in time, fall back to the last masks (or pass-through)
-   rather than blocking, and surface a "CPU overload" flag in the UI.
-5. **Execution providers**: Core ML (Apple Neural Engine) on macOS, DirectML or OpenVINO (NPU) on
-   Windows, CPU everywhere else. Choose the block size per machine — slower hardware needs
-   bigger batches and therefore more latency.
+The model contract is specified in [`MODEL_CONTRACT.md`](MODEL_CONTRACT.md).
+
+### Next steps for performance
+
+- Execution providers: Core ML (Apple Neural Engine) on macOS, DirectML or OpenVINO (NPU) on
+  Windows — `ort` features `coreml`, `directml`, `openvino` plus `SessionBuilder::with_execution_providers`.
+- Batching several hops per inference trades latency for throughput on slow machines; raise
+  `pipeline_frames` accordingly.
+- Stateful (recurrent) models can avoid recomputing the whole context window every hop.

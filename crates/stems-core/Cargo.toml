@@ -5,5 +5,13 @@ edition.workspace = true
 description = "Real-time-safe STFT stem separation engine (DSP core, no plugin dependencies)"
 publish = false
 
+[features]
+# ONNX Runtime backend, downloading and statically linking ONNX Runtime at build time.
+onnx = ["dep:ort", "ort/std", "ort/ndarray", "ort/download-binaries", "ort/copy-dylibs", "ort/tls-native"]
+# ONNX Runtime backend, loading an existing libonnxruntime at runtime (ORT_DYLIB_PATH).
+onnx-dynamic = ["dep:ort", "ort/std", "ort/ndarray", "ort/load-dynamic"]
+
 [dependencies]
 realfft.workspace = true
+rtrb.workspace = true
+ort = { workspace = true, optional = true }

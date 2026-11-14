@@ -12,6 +12,10 @@ crate-type = ["cdylib", "lib"]
 default = ["vst3"]
 # VST3 export. NOTE: nih-plug's VST3 bindings are GPLv3; see README before shipping closed source.
 vst3 = ["nih_plug/vst3"]
+# Run an ONNX separation model (statically linked ONNX Runtime, downloaded at build time).
+onnx = ["stems-core/onnx"]
+# Same, but load an existing libonnxruntime at runtime (set ORT_DYLIB_PATH).
+onnx-dynamic = ["stems-core/onnx-dynamic"]
 # Debug builds panic if the audio thread allocates.
 assert-no-alloc = ["nih_plug/assert_process_allocs"]
 

@@ -10,6 +10,9 @@ use stems_core::{SoundfieldFrame, StemEngine};
 
 mod editor;
 mod params;
+mod separator_choice;
+
+use separator_choice::SeparatorInfo;
 
 pub use params::{FocusModeParam, StemsParams};
 
@@ -18,6 +21,8 @@ pub(crate) struct UiShared {
     pub soundfield: Mutex<triple_buffer::Output<SoundfieldFrame>>,
     pub latency_samples: AtomicU32,
     pub sample_rate: AtomicU32,
+    /// Only written from `initialize`, never from the audio thread.
+    pub separator: Mutex<SeparatorInfo>,
 }
 
 pub struct Stems {
@@ -41,6 +46,7 @@ impl Default for Stems {
                 soundfield: Mutex::new(soundfield_out),
                 latency_samples: AtomicU32::new(0),
                 sample_rate: AtomicU32::new(44_100),
+                separator: Mutex::new(SeparatorInfo::default()),
             }),
         }
     }
@@ -99,8 +105,17 @@ impl Plugin for Stems {
         buffer_config: &BufferConfig,
         context: &mut impl InitContext<Self>,
     ) -> bool {
-        // Allocation is fine here; `process` must never allocate.
-        let engine = StemEngine::new(buffer_config.sample_rate);
+        // Allocation (and model loading) is fine here; `process` must never allocate.
+        let offline = buffer_config.process_mode == ProcessMode::Offline;
+        let (engine, info) = separator_choice::build_engine(buffer_config.sample_rate, offline);
+        if let Some(note) = &info.note {
+            nih_log!("separator: {} ({note})", info.name);
+        } else {
+            nih_log!("separator: {}", info.name);
+        }
+        *self.ui.separator.lock().unwrap() = info;
+        // Drop the previous engine (and join its worker thread) here, not on the audio thread.
+        self.engine = None;
         let latency = engine.latency_samples() as u32;
         context.set_latency_samples(latency);
         self.ui.latency_samples.store(latency, Ordering::Relaxed);

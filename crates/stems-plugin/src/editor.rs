@@ -60,17 +60,41 @@ pub(crate) fn create(
 fn header(ui: &mut egui::Ui, shared: &UiShared) {
     let latency = shared.latency_samples.load(Ordering::Relaxed);
     let sr = shared.sample_rate.load(Ordering::Relaxed).max(1);
+    let info = shared.separator.lock().unwrap().clone();
     ui.horizontal(|ui| {
         ui.heading("Stems");
         ui.label(
             egui::RichText::new(format!(
-                "latency {} samples ({:.0} ms) · placeholder separator",
+                "latency {} samples ({:.0} ms)",
                 latency,
                 latency as f32 * 1000.0 / sr as f32
             ))
             .weak(),
         );
     });
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(format!("Separator: {}", info.name)).small());
+        if let Some(stats) = &info.stats {
+            let ms = |us: u32| us as f32 / 1000.0;
+            let text = format!(
+                "· infer {:.1} ms (max {:.1}) · underruns {}",
+                ms(stats.last_infer_us.load(Ordering::Relaxed)),
+                ms(stats.max_infer_us.load(Ordering::Relaxed)),
+                stats.underruns.load(Ordering::Relaxed),
+            );
+            ui.label(egui::RichText::new(text).small().weak());
+            if let Some(err) = stats.error.lock().unwrap().as_ref() {
+                ui.colored_label(Color32::LIGHT_RED, format!("model error: {err}"));
+            }
+        }
+    });
+    if let Some(note) = &info.note {
+        ui.label(
+            egui::RichText::new(note)
+                .small()
+                .color(Color32::from_rgb(0xE0, 0xB0, 0x40)),
+        );
+    }
 }
 
 fn soundfield(ui: &mut egui::Ui, frame: &SoundfieldFrame, params: &StemsParams) {
