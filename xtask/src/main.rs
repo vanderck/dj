@@ -244,11 +244,12 @@ fn build(o: &Options) -> Result<PathBuf, String> {
         if let Some(t) = target {
             cmd.args(["--target", t]);
         }
-        if o.no_default_features {
+        let (no_default, features) = features_for(*target, o);
+        if no_default {
             cmd.arg("--no-default-features");
         }
-        if !o.features.is_empty() {
-            cmd.args(["--features", &o.features.join(",")]);
+        if !features.is_empty() {
+            cmd.args(["--features", &features.join(",")]);
         }
         // Must match LSMinimumSystemVersion; also what the prebuilt ONNX Runtime needs.
         cmd.env("MACOSX_DEPLOYMENT_TARGET", &o.min_macos);
@@ -272,6 +273,28 @@ fn build(o: &Options) -> Result<PathBuf, String> {
         .args(&outputs))?;
     run(Command::new("lipo").arg("-info").arg(&merged))?;
     Ok(merged)
+}
+
+/// The app's default `stems-onnx` feature links a prebuilt ONNX Runtime, which exists for Apple
+/// Silicon but not for Intel Macs. The Intel slice of a universal build is therefore built without
+/// it: stem separation there uses the placeholder separator.
+const NO_PREBUILT_ORT: &[&str] = &["x86_64-apple-darwin"];
+
+fn features_for(target: Option<&str>, o: &Options) -> (bool, Vec<String>) {
+    let mut features = o.features.clone();
+    let intel = target.is_some_and(|t| NO_PREBUILT_ORT.contains(&t))
+        || (target.is_none() && on_macos() && env::consts::ARCH == "x86_64");
+    if !intel {
+        return (o.no_default_features, features);
+    }
+    features.retain(|f| f != "stems-onnx");
+    if !o.no_default_features || o.features.iter().any(|f| f == "stems-onnx") {
+        eprintln!(
+            "warning: no prebuilt ONNX Runtime for Intel Macs; the x86_64 build uses the placeholder \
+             stem separator (models run on Apple Silicon only)"
+        );
+    }
+    (true, features)
 }
 
 /// Lay out `Collective.app` (works on any OS).
@@ -515,6 +538,17 @@ mod tests {
 
     fn args(a: &[&str]) -> Vec<String> {
         a.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn intel_slice_drops_the_static_onnx_runtime() {
+        let o = Options::parse(&args(&["--features", "stems-onnx,extra"])).unwrap();
+        let (no_default, f) = features_for(Some("x86_64-apple-darwin"), &o);
+        assert!(no_default);
+        assert_eq!(f, vec!["extra"]);
+        let (no_default, f) = features_for(Some("aarch64-apple-darwin"), &o);
+        assert!(!no_default);
+        assert_eq!(f, vec!["stems-onnx", "extra"]);
     }
 
     #[test]

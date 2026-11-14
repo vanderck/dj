@@ -21,6 +21,10 @@ Run `cargo xtask help` for all options. Useful ones:
 
 Without `--universal` it builds for the Mac you are on only, which is faster.
 
+**Intel Macs:** ONNX Runtime has no prebuilt static library for `x86_64-apple-darwin`, so the
+Intel build (and the Intel half of `--universal`) is compiled without model support and separates
+stems with the low-quality placeholder. Models run on Apple Silicon.
+
 The minimum macOS version is 13.4: the statically linked ONNX Runtime used for stem separation is
 built for it. The build sets `MACOSX_DEPLOYMENT_TARGET` and `LSMinimumSystemVersion` to match.
 

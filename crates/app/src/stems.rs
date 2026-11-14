@@ -118,7 +118,13 @@ fn run(job: Request, wanted: &[AtomicU64; NUM_DECKS], tx: &Sender<Update>) {
         }
         still_wanted()
     };
-    let result = separate(&audio.frames, audio.sample_rate, job.model.as_deref(), &mut progress);
+    let mut result = separate(&audio.frames, audio.sample_rate, job.model.as_deref(), &mut progress);
+    if let (Err(OfflineError::Model(e)), Some(model)) = (&result, &job.model) {
+        // Better rough stems than none: report the problem, then use the placeholder.
+        let error = format!("{}: {e}; using the placeholder separator", model.display());
+        let _ = tx.send(Update::Failed { deck, track_id: id, error });
+        result = separate(&audio.frames, audio.sample_rate, None, &mut progress);
+    }
     match result {
         Ok((buffers, source)) => {
             // "Other" is not stored: the engine derives it as mix − drums − bass − vocals.
@@ -387,11 +393,14 @@ mod tests {
     }
 
     #[test]
-    fn model_errors_are_reported() {
+    fn model_errors_are_reported_then_fall_back_to_the_placeholder() {
         let w = StemsWorker::new();
         let bad = std::env::temp_dir().join("collective-not-a-model.onnx");
         fs::write(&bad, b"nope").unwrap();
         w.request(Request { deck: 0, track: track(31, 1.0), path: bad.clone(), model: Some(bad), cache: None });
-        assert!(matches!(wait(&w), Update::Failed { track_id: 31, .. }));
+        let Update::Failed { track_id: 31, error, .. } = wait(&w) else { panic!("expected the model error first") };
+        assert!(error.contains("placeholder"), "{error}");
+        let Update::Done { track_id: 31, source, .. } = wait(&w) else { panic!("expected placeholder stems") };
+        assert_eq!(source, "placeholder separator");
     }
 }
