@@ -180,5 +180,14 @@ impl Vst3Plugin for Stems {
         &[Vst3SubCategory::Fx, Vst3SubCategory::Tools];
 }
 
+/// The export macro lives in its own module so the lint below stays scoped: nih-plug's
+/// `vst3-com` vtable macro has a trailing semicolon that Rust 1.100+ warns about (an error with
+/// `-D warnings`). `unknown_lints` keeps older compilers, which lack the lint, quiet.
 #[cfg(feature = "vst3")]
-nih_export_vst3!(Stems);
+#[allow(unknown_lints, semicolon_in_expressions_from_non_local_macros)]
+mod vst3_export {
+    use super::Stems;
+    use nih_plug::prelude::*;
+
+    nih_export_vst3!(Stems);
+}
