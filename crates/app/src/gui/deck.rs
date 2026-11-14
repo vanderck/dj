@@ -1,41 +1,31 @@
-//! Deck panel (track or sampler), drawn into a fixed rect.
+//! Deck cards: large (focused) and compact, plus the sampler grid.
 
 use std::path::PathBuf;
 
-use eframe::egui::{self, Align2, Color32, CornerRadius, Pos2, Rect, RichText, Sense, Stroke, Ui, UiBuilder, Vec2};
+use eframe::egui::{self, Align2, Color32, CornerRadius, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 
-use collective_engine::deck::Quantize;
-use collective_engine::engine::{ClockOwner, DeckMode};
+use collective_engine::engine::{ClockOwner, DeckCmd, DeckMode};
 use collective_engine::sampler::{Direction, Rhythm, Step, LANES, STEPS};
+use collective_engine::Command;
 use collective_library::key::Compat;
 
 use super::skin::*;
 use super::{act, act_f, act_i, learnable, UiState};
 use crate::core::Core;
 
-const LEFT_W: f32 = 54.0;
-const GAP: f32 = 4.0;
-
-pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect) {
-    panel(ui, rect, PANEL);
-    let inner = rect.shrink(5.0);
-    accept_drop(ui, core, d, rect);
-    if core.session.decks[d].mode == DeckMode::Sampler {
-        sampler_deck(ui, core, d, inner);
-    } else {
-        track_deck(ui, core, st, d, inner);
-    }
+fn mmss_remain(s: f64) -> String {
+    let s = s.max(0.0);
+    format!("-{}:{:02}", (s / 60.0) as u32, (s % 60.0) as u32)
 }
 
-/// Library rows can be dragged onto a deck.
+/// Accept library rows dropped on a deck card.
 fn accept_drop(ui: &mut Ui, core: &mut Core, d: usize, rect: Rect) {
     let ctx = ui.ctx().clone();
     if !egui::DragAndDrop::has_payload_of_type::<PathBuf>(&ctx) {
         return;
     }
-    let over = ctx.pointer_hover_pos().map(|p| rect.contains(p)).unwrap_or(false);
-    if over {
-        ui.painter().rect_stroke(rect, CornerRadius::same(3), Stroke::new(2.0, RED), egui::StrokeKind::Inside);
+    if ctx.pointer_hover_pos().map(|p| rect.contains(p)).unwrap_or(false) {
+        ui.painter().rect_stroke(rect, CornerRadius::same(12), Stroke::new(2.0, DECK[d]), egui::StrokeKind::Inside);
         if ctx.input(|i| i.pointer.any_released()) {
             if let Some(p) = egui::DragAndDrop::take_payload::<PathBuf>(&ctx) {
                 if core.session.decks[d].mode == DeckMode::Sampler {
@@ -49,12 +39,24 @@ fn accept_drop(ui: &mut Ui, core: &mut Core, d: usize, rect: Rect) {
     }
 }
 
-fn badge(ui: &mut Ui, core: &mut Core, d: usize, rect: Rect) {
+/// Key chip border: green when it mixes with the master, red on a clash.
+fn key_border(core: &Core, d: usize) -> Color32 {
+    let is_master = core.snap.clock.owner == ClockOwner::Deck(d as u8);
+    match (core.deck_key(d), core.reference_key()) {
+        (Some(_), _) if is_master => GREEN,
+        (Some(k), Some(r)) => match k.compat(r) {
+            Compat::Same | Compat::Adjacent | Compat::Relative | Compat::Boost => GREEN,
+            Compat::Clash => dim(RED, 0.8),
+            Compat::Diagonal => Color32::from_gray(90),
+        },
+        _ => Color32::from_gray(70),
+    }
+}
+
+/// Badge with a context menu (deck type, lock, grid tools).
+fn badge_menu(ui: &mut Ui, core: &mut Core, d: usize, rect: Rect, size: f32) {
+    deck_badge(ui, rect, d, size);
     let r = ui.allocate_rect(rect, Sense::click()).on_hover_text("Right-click: deck type, lock, grid");
-    let p = ui.painter();
-    p.rect_filled(rect, CornerRadius::same(2), DECK[d]);
-    let tc = if d == 1 { Color32::from_gray(20) } else { Color32::WHITE };
-    p.text(rect.center(), Align2::CENTER_CENTER, format!("{}", d + 1), font(15.0), tc);
     r.context_menu(|ui| {
         let mode = core.session.decks[d].mode;
         if ui.selectable_label(mode == DeckMode::Track, "Track deck").clicked() {
@@ -65,8 +67,8 @@ fn badge(ui: &mut Ui, core: &mut Core, d: usize, rect: Rect) {
             core.set_deck_mode(d, DeckMode::Sampler);
             ui.close();
         }
-        if let Some(info) = &core.decks[d].info {
-            let locked = info.locked;
+        if core.decks[d].info.is_some() {
+            let locked = core.decks[d].info.as_ref().map(|i| i.locked).unwrap_or(false);
             ui.separator();
             if ui.button(if locked { "Unlock track" } else { "Lock track (cues not saved)" }).clicked() {
                 core.set_track_locked(d, !locked);
@@ -85,486 +87,174 @@ fn badge(ui: &mut Ui, core: &mut Core, d: usize, rect: Rect) {
                     core.nudge_grid(d, 5.0);
                 }
             });
+            if ui.button("Eject").clicked() {
+                core.eject(d);
+                ui.close();
+            }
         }
     });
 }
 
-fn quant_label(q: Quantize, global: Option<f64>) -> String {
-    let beats = match q {
-        Quantize::UseGlobal => global,
-        Quantize::Off => None,
-        Quantize::Beats(b) => Some(b),
+/// Title + artist block.
+fn title_block(ui: &Ui, core: &Core, d: usize, rect: Rect, big: bool) {
+    let p = ui.painter_at(rect);
+    let (title, artist) = match &core.decks[d].info {
+        Some(i) => (i.title(), i.tags.artist.clone().unwrap_or_default()),
+        None => match (&core.decks[d].loading, &core.decks[d].error) {
+            (Some(path), _) => (format!("Loading {}…", path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default()), String::new()),
+            (None, Some(e)) => ("Could not load".into(), e.clone()),
+            _ => ("Empty".into(), "Drag a track here".into()),
+        },
     };
-    match beats {
-        None => "—".into(),
-        Some(b) => {
-            let bars = b / 4.0;
-            if bars >= 1.0 {
-                format!("{bars}")
-            } else {
-                format!("1/{}", (1.0 / bars).round())
-            }
-        }
+    let (ts, as_) = if big { (17.0, 13.0) } else { (14.0, 12.0) };
+    p.text(Pos2::new(rect.left(), rect.center().y - 1.0), Align2::LEFT_BOTTOM, title, bold(ts), TEXT);
+    p.text(Pos2::new(rect.left(), rect.center().y + 2.0), Align2::LEFT_TOP, artist, sans(as_), TEXT_DIM);
+}
+
+/// Hold-to-preview CUE button behaviour.
+fn cue_hold(core: &mut Core, resp: &egui::Response, addr: &str) {
+    if core.learn {
+        return;
+    }
+    if resp.drag_started() || (resp.is_pointer_button_down_on() && resp.ctx.input(|i| i.pointer.primary_pressed())) {
+        act_i(core, addr, 1);
+    }
+    if resp.drag_stopped() || resp.clicked() {
+        act_i(core, addr, 0);
     }
 }
 
-fn mmss(s: f64) -> String {
-    let s = s.max(0.0);
-    format!("{:02}:{:02}", (s / 60.0) as u32, (s % 60.0) as u32)
-}
-
-fn track_deck(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, r: Rect) {
+pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect) {
+    card(ui, rect);
+    accept_drop(ui, core, d, rect);
+    if core.session.decks[d].mode == DeckMode::Sampler {
+        sampler(ui, core, d, rect);
+        return;
+    }
     let v = core.snap.decks[d];
     let n = d + 1;
     let a = |s: &str| format!("Deck/{n}/{s}");
+    let color = DECK[d];
     let is_master = core.snap.clock.owner == ClockOwner::Deck(d as u8);
-    let x0 = r.left();
-    let xr = x0 + LEFT_W + GAP * 1.5;
+    let pad = 16.0;
+    let r = rect.shrink(pad);
+    let w = r.width();
+    let gap = 8.0;
 
-    // ---------------------------------------------------------- row 1: header
-    let h1 = 28.0;
-    let y1 = r.top();
-    let sync_r = Rect::from_min_size(Pos2::new(x0, y1), Vec2::new(LEFT_W, h1));
-    let resp = btn(ui, sync_r, "SYNC", if v.sync { Look::On(SILVER) } else { Look::Normal });
+    // ---------------------------------------------------------- header
+    let hh = 44.0;
+    let badge = Rect::from_min_size(r.min, Vec2::splat(hh));
+    badge_menu(ui, core, d, badge, 22.0);
+    let time_w = 92.0;
+    let time_r = Rect::from_min_size(Pos2::new(r.right() - time_w, r.top()), Vec2::new(time_w, hh));
+    ui.painter().text(time_r.right_center(), Align2::RIGHT_CENTER, mmss_remain(v.duration_secs - v.position_secs), mono(30.0), if v.loaded && v.playing && v.duration_secs - v.position_secs < 30.0 { RED } else { TEXT });
+    let bpm_r = Rect::from_min_size(Pos2::new(time_r.left() - 88.0, r.top()), Vec2::new(80.0, hh));
+    let p = ui.painter();
+    p.text(Pos2::new(bpm_r.right(), bpm_r.top() + 4.0), Align2::RIGHT_TOP, if v.has_grid { format!("{:.2}", v.bpm) } else { "—".into() }, mono(22.0), TEXT);
+    p.text(Pos2::new(bpm_r.right(), bpm_r.bottom() - 2.0), Align2::RIGHT_BOTTOM, format!("{:+.1}%", (v.speed - 1.0) * 100.0), mono(12.0), color);
+    let key = core.key_text(core.deck_key(d));
+    let chip = Rect::from_min_size(Pos2::new(bpm_r.left() - 56.0, r.top() + 8.0), Vec2::new(46.0, 30.0));
+    if !key.is_empty() {
+        key_chip(ui, chip, &key, key_border(core, d), 15.0);
+    }
+    let title_r = Rect::from_min_max(Pos2::new(badge.right() + 14.0, r.top()), Pos2::new(chip.left() - 10.0, r.top() + hh));
+    title_block(ui, core, d, title_r, true);
+
+    // ---------------------------------------------------------- transport row
+    let y = r.top() + hh + 12.0;
+    let bh = 52.0;
+    let small_w = w * 0.14;
+    let big_w = (w - 2.0 * small_w - 5.0 * gap) / 4.0;
+    let mut x = r.left();
+    let mut big_btn = |ui: &mut Ui, label: &str, style: Style, wf: f32| -> egui::Response {
+        let rr = Rect::from_min_size(Pos2::new(x, y), Vec2::new(big_w * wf, bh));
+        x += big_w * wf + gap;
+        button(ui, rr, label, style, bold(17.0))
+    };
+    let resp = big_btn(ui, "Cue", Style::Outline(ORANGE, false), 0.86);
+    learnable(core, &resp, &a("Cue"));
+    cue_hold(core, &resp, &a("Cue"));
+    let play_style = if v.playing { Style::Fill(color) } else if v.play_pending { Style::Outline(color, true) } else { Style::Outline(color, false) };
+    let resp = big_btn(ui, if v.playing { "Pause" } else if v.play_pending { "Wait…" } else { "Play" }, play_style, 0.86);
+    learnable(core, &resp, &a("PlayPause"));
+    if resp.clicked() {
+        act_i(core, &a("PlayPause"), 1);
+    }
+    let resp = big_btn(ui, "Sync", if v.sync { Style::Light } else { Style::Dark }, 1.14);
     learnable(core, &resp, &a("TempoSync"));
     if resp.clicked() {
         act_i(core, &a("TempoSync"), 1);
     }
-    let badge_r = Rect::from_min_size(Pos2::new(xr, y1 + 3.0), Vec2::new(24.0, 24.0));
-    badge(ui, core, d, badge_r);
-
-    // Fields from the right.
-    let mut x = r.right();
-    let eject_r = Rect::from_min_max(Pos2::new(x - 28.0, y1 + 1.0), Pos2::new(x, y1 + h1 - 1.0));
-    let er = ui.allocate_rect(eject_r, Sense::click());
-    eject_icon(ui, eject_r);
-    if er.clicked() && v.loaded {
-        act_i(core, &a("Eject"), 1);
-    }
-    x -= 28.0 + 8.0;
-    let midi_r = Rect::from_min_max(Pos2::new(x - 22.0, y1), Pos2::new(x, y1 + h1));
-    let midi_on = core.midi.activity.elapsed().as_millis() < 150;
-    ui.painter().text(midi_r.left_top() + Vec2::new(0.0, 6.0), Align2::LEFT_TOP, "MIDI", font(7.5), if midi_on { TEXT } else { TEXT_DIM });
-    ui.painter().text(midi_r.left_bottom() - Vec2::new(0.0, 4.0), Align2::LEFT_BOTTOM, "OSC", font(7.5), TEXT_DIM);
-    x -= 22.0 + 6.0;
-
-    let global_q = core.session.global_quantize();
-    let q = core.session.decks[d].quantize;
-    let widths = [36.0, 40.0, 56.0, 56.0, 32.0, 42.0];
-    let total: f32 = widths.iter().sum::<f32>() + 5.0 * 6.0;
-    let mut fx_ = x - total;
-    let key = core.deck_key(d);
-    let key_txt = core.key_text(key);
-    let key_col = key.map(key_color).unwrap_or(TEXT_DIM);
-    let b = v.beat.floor() as i64;
-    let barbeat = if v.has_grid { format!("{}.{}", b.div_euclid(4) + 1, b.rem_euclid(4) + 1) } else { "—".into() };
-    let fields: [(&str, String, Color32); 6] = [
-        ("BAR / BEAT", barbeat, TEXT),
-        ("REMAIN", if v.loaded { mmss(v.duration_secs - v.position_secs) } else { "--:--".into() }, if v.loaded && v.duration_secs - v.position_secs < 30.0 && v.playing { RED } else { TEXT_DIM }),
-        ("ORIGINAL BPM", if v.has_grid { format!("{:.2}", v.track_bpm) } else { "—".into() }, TEXT_DIM),
-        ("CURRENT BPM", if v.has_grid { format!("{:.2}", v.bpm) } else { "—".into() }, TEXT_DIM),
-        ("KEY", if key_txt.is_empty() { "—".into() } else { key_txt }, key_col),
-        ("QUANTIZE", quant_label(q, global_q), TEXT_DIM),
-    ];
-    for (i, (label, value, col)) in fields.iter().enumerate() {
-        let fr = Rect::from_min_size(Pos2::new(fx_, y1 + 1.0), Vec2::new(widths[i], h1 - 2.0));
-        field(ui, fr, label, value, *col);
-        if *label == "KEY" {
-            if let (Some(k), Some(rk)) = (key, core.reference_key()) {
-                if !is_master {
-                    let hint = match k.compat(rk) {
-                        Compat::Same | Compat::Adjacent | Compat::Relative => "harmonic match with the master",
-                        Compat::Boost => "+2 energy boost",
-                        Compat::Diagonal => "diagonal",
-                        Compat::Clash => "key clash with the master",
-                    };
-                    ui.allocate_rect(fr, Sense::hover()).on_hover_text(hint);
-                }
-            }
-        }
-        if *label == "QUANTIZE" {
-            let qr = ui.allocate_rect(fr, Sense::click()).on_hover_text("Click: next value. Right-click: use global");
-            if qr.clicked() {
-                let idx = match q {
-                    Quantize::UseGlobal => 0,
-                    Quantize::Off => 1,
-                    Quantize::Beats(b) => 2 + (8.0f64 / b).log2().round() as i32,
-                };
-                act_i(core, &a("Quantize"), (idx + 1) % 9);
-            }
-            if qr.secondary_clicked() {
-                act_i(core, &a("Quantize"), 0);
-            }
-        }
-        fx_ += widths[i] + 5.0;
-    }
-    // Title / artist.
-    let title_r = Rect::from_min_max(Pos2::new(badge_r.right() + 7.0, y1), Pos2::new(x - total - 4.0, y1 + h1));
-    let (title, sub) = match &core.decks[d].info {
-        Some(i) => (
-            i.title(),
-            format!("{}  /  {}", i.tags.artist.clone().unwrap_or_default(), mmss(v.duration_secs)),
-        ),
-        None => match (&core.decks[d].loading, &core.decks[d].error) {
-            (Some(p), _) => (format!("Loading {}…", p.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default()), String::new()),
-            (None, Some(e)) => ("Could not load".into(), e.clone()),
-            _ => ("Empty".into(), String::new()),
-        },
-    };
-    let p = ui.painter_at(title_r);
-    p.text(title_r.left_top() + Vec2::new(0.0, 3.0), Align2::LEFT_TOP, title, font(12.0), TEXT);
-    p.text(title_r.left_bottom() - Vec2::new(0.0, 2.0), Align2::LEFT_BOTTOM, sub, font(9.5), TEXT_DIM);
-
-    // ---------------------------------------------------------- row 2
-    let h2 = 24.0;
-    let y2 = y1 + h1 + GAP;
-    let mr = Rect::from_min_size(Pos2::new(x0, y2), Vec2::new(LEFT_W, h2));
-    let resp = btn(ui, mr, if is_master { "MASTER" } else { "FOLLOW" }, if is_master { Look::On(RED) } else { Look::Normal });
+    let resp = big_btn(ui, if is_master { "Master" } else { "Follow" }, if is_master { Style::Fill(RED) } else { Style::Dark }, 1.14);
     learnable(core, &resp, &a("TempoMaster"));
     if resp.clicked() {
         act_i(core, &a("TempoMaster"), 1);
     }
-    let mut cx = xr;
-    let cell = 26.0;
-    let pr = Rect::from_min_size(Pos2::new(cx, y2), Vec2::new(cell, h2));
-    let resp = btn(ui, pr, "P", if v.keylock { Look::On(SILVER) } else { Look::Normal }).on_hover_text("Pitch preserve (key lock)");
-    learnable(core, &resp, &a("PitchPreserve"));
-    if resp.clicked() {
-        act_i(core, &a("PitchPreserve"), !v.keylock as i32);
-    }
-    cx += cell + 2.0;
-    let semis = if v.semitones == 0.0 { "0".to_string() } else { format!("{:+.0}", v.semitones) };
-    for (lbl, addr) in [("-", "PitchDown"), (semis.as_str(), "PitchReset"), ("+", "PitchUp")] {
-        let rr = Rect::from_min_size(Pos2::new(cx, y2), Vec2::new(cell, h2));
-        let look = if addr == "PitchReset" && v.semitones != 0.0 { Look::On(SILVER) } else { Look::Normal };
-        let resp = btn(ui, rr, lbl, look);
-        learnable(core, &resp, &a(addr));
-        if resp.clicked() {
-            act_i(core, &a(addr), 1);
+    // 2×2 toggles.
+    let sh = (bh - 6.0) / 2.0;
+    let toggles = [
+        ("Key lock", v.keylock, "PitchPreserve"),
+        ("Slip", v.slip, "Slip"),
+        ("Reverse", v.reverse, "Reverse"),
+        ("Roll", st.roll[d], ""),
+    ];
+    for (i, (label, on_, addr)) in toggles.iter().enumerate() {
+        let rr = Rect::from_min_size(Pos2::new(x + (i % 2) as f32 * (small_w + 6.0), y + (i / 2) as f32 * (sh + 6.0)), Vec2::new(small_w, sh));
+        let resp = button(ui, rr, label, if *on_ { Style::Light } else { Style::Dark }, bold(12.5));
+        if addr.is_empty() {
+            if resp.clicked() {
+                st.roll[d] = !st.roll[d];
+            }
+            resp.on_hover_text("Roll: the loop-size button repeats while held, then returns (slip)");
+            continue;
         }
-        cx += cell + 2.0;
-    }
-    // Right group: M /2 X2 SLIP →
-    let rg = ["M", "/2", "X2", "SLIP", "→"];
-    let rw = [30.0, 30.0, 30.0, 40.0, 30.0];
-    let rg_total: f32 = rw.iter().sum::<f32>() + 2.0 * 4.0;
-    let mut rx = r.right() - rg_total;
-    for (i, lbl) in rg.iter().enumerate() {
-        let rr = Rect::from_min_size(Pos2::new(rx, y2), Vec2::new(rw[i], h2));
-        let (on, addr, tip) = match *lbl {
-            "M" => (v.momentary_cues, "CueMomentary", "Momentary hot cues (play while held)"),
-            "/2" => (v.speed_mult == 0.5, "SpeedHalf", "Half speed"),
-            "X2" => (v.speed_mult == 2.0, "SpeedDouble", "Double speed"),
-            "SLIP" => (v.slip, "Slip", "Slip: the playhead keeps running underneath"),
-            _ => (v.reverse, "Reverse", "Reverse (Shift-click: backspin)"),
-        };
-        let label = if *lbl == "→" && v.reverse { "←" } else { lbl };
-        let resp = btn(ui, rr, label, if on { Look::On(SILVER) } else { Look::Normal }).on_hover_text(tip);
         learnable(core, &resp, &a(addr));
         if resp.clicked() {
-            if *lbl == "→" && ui.input(|i| i.modifiers.shift) {
+            if *addr == "Reverse" && ui.input(|i| i.modifiers.shift) {
                 act_i(core, &a("Backspin"), 1);
                 act_i(core, &a("Backspin"), 0);
             } else {
-                act_i(core, &a(addr), !on as i32);
-            }
-        }
-        rx += rw[i] + 2.0;
-    }
-    // Bend (master) or EARLY/LATE phase strip (followers).
-    let strip = Rect::from_min_max(Pos2::new(cx + 4.0, y2), Pos2::new(r.right() - rg_total - 6.0, y2 + h2));
-    if is_master || !v.sync {
-        let half = strip.width() / 2.0 - 1.0;
-        for (i, (lbl, dir)) in [("< BEND", -1), ("BEND >", 1)].iter().enumerate() {
-            let rr = Rect::from_min_size(Pos2::new(strip.left() + i as f32 * (half + 2.0), y2), Vec2::new(half, h2));
-            let resp = btn(ui, rr, lbl, Look::Normal);
-            let addr = if is_master { a("Bend") } else { a(if *dir < 0 { "PhaseMinus" } else { "PhasePlus" }) };
-            learnable(core, &resp, &addr);
-            if core.learn {
-                continue;
-            }
-            if resp.is_pointer_button_down_on() {
-                if is_master {
-                    act_i(core, &addr, *dir);
-                } else {
-                    act_i(core, &addr, 1);
-                }
-            } else if resp.drag_stopped() || resp.clicked() {
-                act_i(core, &addr, 0);
-            }
-        }
-    } else {
-        let resp = ui.allocate_rect(strip, Sense::click_and_drag());
-        let p = ui.painter();
-        p.rect_filled(strip, CornerRadius::same(3), BTN);
-        p.text(strip.left_center() + Vec2::new(8.0, 0.0), Align2::LEFT_CENTER, "EARLY", font(9.5), TEXT);
-        p.text(strip.right_center() - Vec2::new(8.0, 0.0), Align2::RIGHT_CENTER, "LATE", font(9.5), TEXT);
-        // Marker: phase offset (±0.5 beat across the strip) plus live error.
-        let off = (v.phase_offset + v.phase_error).clamp(-0.5, 0.5) as f32;
-        let mx = strip.center().x + off * (strip.width() * 0.8);
-        p.add(egui::Shape::convex_polygon(
-            vec![Pos2::new(mx - 5.0, strip.top() + 8.0), Pos2::new(mx + 5.0, strip.top() + 8.0), Pos2::new(mx, strip.top() + 15.0)],
-            TEXT,
-            Stroke::NONE,
-        ));
-        let resp = resp.on_hover_text("Hold left: early, right: late. Double-click: reset phase offset");
-        learnable(core, &resp, &a("PhaseBend"));
-        if !core.learn {
-            if resp.double_clicked() {
-                act_i(core, &a("PhaseReset"), 1);
-            } else if resp.is_pointer_button_down_on() {
-                if let Some(pos) = resp.interact_pointer_pos() {
-                    act_i(core, &a("PhaseBend"), if pos.x < strip.center().x { -1 } else { 1 });
-                }
-            } else if resp.drag_stopped() || resp.clicked() {
-                act_i(core, &a("PhaseBend"), 0);
+                act_i(core, &a(addr), !on_ as i32);
             }
         }
     }
 
-    // ---------------------------------------------------------- body
-    let h_bottom = 24.0;
-    let yb = r.bottom() - h_bottom;
-    let y3 = y2 + h2 + GAP;
-    // Play button.
-    let play_r = Rect::from_min_size(Pos2::new(x0, yb), Vec2::new(LEFT_W, h_bottom));
-    let pr = ui.allocate_rect(play_r, Sense::click());
-    ui.painter().rect_filled(play_r, CornerRadius::same(3), if pr.hovered() { BTN_HOVER } else { BTN });
-    let blink = v.play_pending && (ui.input(|i| i.time) * 4.0) as i64 % 2 == 0;
-    play_icon(ui, play_r, if blink { TEXT_DIM } else { RED }, v.playing);
-    learnable(core, &pr, &a("PlayPause"));
-    if pr.clicked() {
-        act_i(core, &a("PlayPause"), 1);
-    }
-    // Tempo fader.
-    let tf = Rect::from_min_max(Pos2::new(x0, y3), Pos2::new(x0 + LEFT_W, yb - GAP));
-    tempo_fader(ui, core, d, tf);
-
-    // Waveforms, pads, bottom row.
-    let pads_h = 28.0;
-    let ov_h = ((yb - GAP - pads_h - GAP - y3) * 0.42).clamp(24.0, 60.0);
-    let zoom_h = yb - GAP - pads_h - GAP - ov_h - GAP - y3;
-    let zoom_r = Rect::from_min_size(Pos2::new(xr, y3), Vec2::new(r.right() - xr, zoom_h));
-    let ov_r = Rect::from_min_size(Pos2::new(xr, zoom_r.bottom() + GAP), Vec2::new(r.right() - xr, ov_h));
-    let pads_r = Rect::from_min_size(Pos2::new(xr, ov_r.bottom() + GAP), Vec2::new(r.right() - xr, pads_h));
-    waveforms(ui, core, d, zoom_r, ov_r);
-    pads(ui, core, d, pads_r);
-    bottom_row(ui, core, d, Rect::from_min_max(Pos2::new(xr, yb), Pos2::new(r.right(), r.bottom())));
-    let _ = st;
-}
-
-fn tempo_fader(ui: &mut Ui, core: &mut Core, d: usize, rect: Rect) {
-    let v = core.snap.decks[d];
-    let a = format!("Deck/{}/TempoSlider", d + 1);
-    let follower = v.sync && core.snap.clock.owner != ClockOwner::Deck(d as u8);
-    let resp = ui.allocate_rect(rect, Sense::click_and_drag());
-    let p = ui.painter();
-    p.rect_filled(rect, CornerRadius::same(3), PANEL_HI);
-    let track = Rect::from_center_size(rect.center(), Vec2::new(4.0, rect.height() - 22.0));
-    p.rect_filled(track, CornerRadius::same(2), Color32::from_gray(10));
-    p.line_segment([Pos2::new(track.left() - 10.0, track.center().y), Pos2::new(track.right() + 10.0, track.center().y)], Stroke::new(1.0, TEXT_FAINT));
-    let t = ((v.tempo_fader as f32) + 1.0) / 2.0;
-    let y = track.top() + t * track.height();
-    let cap = Rect::from_center_size(Pos2::new(track.center().x, y), Vec2::new(LEFT_W - 18.0, 9.0));
-    let native = v.tempo_fader.abs() < 1e-4;
-    p.rect_filled(cap, CornerRadius::same(2), if follower { Color32::from_gray(70) } else { Color32::from_gray(150) });
-    p.line_segment([cap.left_center(), cap.right_center()], Stroke::new(1.5, if native { RED } else { Color32::from_gray(40) }));
-    let resp = resp.on_hover_text(format!("Tempo {:+.2}% · {}{}", (v.speed - 1.0) * 100.0, v.tempo_range.label(), if follower { " · following the clock" } else { "" }));
-    learnable(core, &resp, &a);
-    if core.learn || follower {
-        return;
-    }
-    if resp.double_clicked() {
-        act_f(core, &a, 0.0);
-    } else if resp.dragged() {
-        let fine = ui.input(|i| i.modifiers.shift);
-        let dv = resp.drag_delta().y / track.height() * 2.0 * if fine { 0.1 } else { 1.0 };
-        act_f(core, &a, (v.tempo_fader as f32 + dv).clamp(-1.0, 1.0));
-    }
-}
-
-/// Cue regions: (start secs, colour) sorted, for section colouring.
-fn regions(core: &Core, d: usize) -> Vec<(f64, Color32)> {
-    let v = core.snap.decks[d];
-    let mut r: Vec<(f64, Color32)> = v.hot_cues.iter().enumerate().filter_map(|(i, c)| c.map(|t| (t, CUE[i]))).collect();
-    r.sort_by(|a, b| a.0.total_cmp(&b.0));
-    r
-}
-
-fn region_color(regions: &[(f64, Color32)], t: f64) -> Color32 {
-    let mut c = Color32::from_gray(120);
-    for (s, col) in regions {
-        if t >= *s {
-            c = *col;
-        } else {
-            break;
-        }
-    }
-    c
-}
-
-fn waveforms(ui: &mut Ui, core: &mut Core, d: usize, zoom_r: Rect, ov_r: Rect) {
-    let v = core.snap.decks[d];
-    let n = d + 1;
-    let p = ui.painter();
-    p.rect_filled(zoom_r, CornerRadius::same(2), WAVE_BG);
-    p.rect_filled(ov_r, CornerRadius::same(2), WAVE_BG);
-    let Some(info) = &core.decks[d].info else {
-        p.text(zoom_r.center(), Align2::CENTER_CENTER, format!("DROP TRACK ON DECK {n}"), font(11.0), TEXT_FAINT);
-        return;
-    };
-    let wf = info.waveform.clone();
-    let regs = regions(core, d);
-    let zoom = core.session.decks[d].zoom as f64;
-    let span = 10.0 / zoom;
-    let pos = v.position_secs;
-    let bps = wf.bins_per_sec;
-    let nb = wf.len();
-
-    // ---- zoomed
-    let pz = ui.painter_at(zoom_r);
-    let cols = zoom_r.width() as usize;
-    let start = pos - span / 2.0;
-    let per = span / cols as f64;
-    let mid = zoom_r.center().y;
-    let hh = zoom_r.height() / 2.0 - 2.0;
-    for x in 0..cols {
-        let t0 = start + x as f64 * per;
-        let a0 = (t0 * bps) as i64;
-        let b0 = ((t0 + per) * bps).ceil() as i64;
-        if b0 <= 0 || a0 >= nb as i64 {
-            continue;
-        }
-        let (a0, b0) = (a0.max(0) as usize, (b0.max(a0 + 1) as usize).min(nb));
-        let (mut lo, mut mi, mut hi) = (0.0f32, 0.0f32, 0.0f32);
-        for i in a0..b0 {
-            lo = lo.max(wf.low[i]);
-            mi = mi.max(wf.mid[i]);
-            hi = hi.max(wf.high[i]);
-        }
-        let amp = (lo * 0.9 + mi + hi * 0.8).min(1.0);
-        let base = region_color(&regs, t0);
-        let col = if t0 < pos { dim(base, 0.5) } else { lighten(base, (hi * 0.5).min(0.35)) };
-        let xx = zoom_r.left() + x as f32;
-        pz.line_segment([Pos2::new(xx, mid - amp * hh), Pos2::new(xx, mid + amp * hh)], Stroke::new(1.0, col));
-    }
-    let x_of = |t: f64| zoom_r.left() + ((t - start) / span) as f32 * zoom_r.width();
-    if v.has_grid && v.track_bpm > 0.0 {
-        let spb = 60.0 / v.track_bpm;
-        let anchor = v.position_secs - v.beat * spb;
-        let first = ((start - anchor) / spb).floor() as i64;
-        let last = ((start + span - anchor) / spb).ceil() as i64;
-        for b in first..=last {
-            let xx = x_of(anchor + b as f64 * spb);
-            let bar = b.rem_euclid(4) == 0;
-            let c = if bar { Color32::from_white_alpha(70) } else { Color32::from_white_alpha(22) };
-            pz.line_segment([Pos2::new(xx, zoom_r.top()), Pos2::new(xx, zoom_r.bottom())], Stroke::new(1.0, c));
-        }
-    }
-    if v.loop_on {
-        let lr = Rect::from_min_max(Pos2::new(x_of(v.loop_start_secs), zoom_r.top()), Pos2::new(x_of(v.loop_end_secs), zoom_r.bottom()));
-        pz.rect_filled(lr, CornerRadius::ZERO, Color32::from_rgba_unmultiplied(229, 56, 59, 38));
-    }
-    for (i, c) in v.hot_cues.iter().enumerate() {
-        if let Some(t) = c {
-            let xx = x_of(*t);
-            pz.line_segment([Pos2::new(xx, zoom_r.top()), Pos2::new(xx, zoom_r.bottom())], Stroke::new(1.5, CUE[i]));
-            let flag = Rect::from_min_size(Pos2::new(xx, zoom_r.top()), Vec2::new(12.0, 12.0));
-            pz.rect_filled(flag, CornerRadius::ZERO, CUE[i]);
-            pz.text(flag.center(), Align2::CENTER_CENTER, format!("{}", i + 1), font(8.5), Color32::WHITE);
-        }
-    }
-    pz.line_segment([Pos2::new(zoom_r.center().x, zoom_r.top()), Pos2::new(zoom_r.center().x, zoom_r.bottom())], Stroke::new(2.0, Color32::WHITE));
-
-    let zr = ui.allocate_rect(zoom_r, Sense::click_and_drag());
-    if zr.dragged() && v.duration_secs > 0.0 {
-        let dt = -zr.drag_delta().x as f64 / zoom_r.width() as f64 * span;
-        act_f(core, &format!("Deck/{n}/Seek"), ((v.position_secs + dt) / v.duration_secs) as f32);
-    }
-    if zr.hovered() {
-        let s = ui.input(|i| i.smooth_scroll_delta.y);
-        if s != 0.0 {
-            act_i(core, &format!("Deck/{n}/WaveformZoom"), if s > 0.0 { 1 } else { -1 });
-        }
-    }
-
-    // ---- overview, coloured by cue section
-    let po = ui.painter_at(ov_r);
-    let ocols = ov_r.width().max(1.0) as usize;
-    let ov = wf.overview(ocols);
-    let omid = ov_r.center().y;
-    let oh = ov_r.height() / 2.0 - 1.0;
-    let dur = v.duration_secs.max(0.001);
-    let prog = (v.position_secs / dur) as f32;
-    for (x, o) in ov.iter().enumerate() {
-        let t = x as f64 / ocols as f64 * dur;
-        let amp = (o[0] * 0.9 + o[1] + o[2] * 0.8).min(1.0);
-        let base = region_color(&regs, t);
-        let col = if (x as f32) < prog * ocols as f32 { dim(base, 0.45) } else { base };
-        let xx = ov_r.left() + x as f32;
-        po.line_segment([Pos2::new(xx, omid - amp * oh), Pos2::new(xx, omid + amp * oh)], Stroke::new(1.0, col));
-    }
-    for (s, c) in &regs {
-        let xx = ov_r.left() + (*s / dur) as f32 * ov_r.width();
-        po.line_segment([Pos2::new(xx, ov_r.top()), Pos2::new(xx, ov_r.bottom())], Stroke::new(2.0, *c));
-    }
-    if v.loop_on {
-        let x0 = ov_r.left() + (v.loop_start_secs / dur) as f32 * ov_r.width();
-        let x1 = ov_r.left() + (v.loop_end_secs / dur) as f32 * ov_r.width();
-        po.rect_filled(Rect::from_min_max(Pos2::new(x0, ov_r.top()), Pos2::new(x1.max(x0 + 1.0), ov_r.bottom())), CornerRadius::ZERO, Color32::from_rgba_unmultiplied(255, 255, 255, 30));
-    }
-    let px = ov_r.left() + prog * ov_r.width();
-    po.line_segment([Pos2::new(px, ov_r.top()), Pos2::new(px, ov_r.bottom())], Stroke::new(1.5, Color32::WHITE));
-    let or = ui.allocate_rect(ov_r, Sense::click_and_drag());
-    if or.clicked() || or.dragged() {
-        if let Some(p) = or.interact_pointer_pos() {
-            act_f(core, &format!("Deck/{n}/WaveformSeek"), ((p.x - ov_r.left()) / ov_r.width()).clamp(0.0, 1.0));
-        }
-    }
-}
-
-fn pads(ui: &mut Ui, core: &mut Core, d: usize, rect: Rect) {
-    let v = core.snap.decks[d];
-    let n = d + 1;
-    let w = (rect.width() - 7.0 * 3.0) / 8.0;
+    // ---------------------------------------------------------- hot cues
+    let y = y + bh + 14.0;
+    let ph = 36.0;
+    let pw = (w - 3.0 * gap) / 4.0;
     for i in 0..8 {
-        let pr = Rect::from_min_size(Pos2::new(rect.left() + i as f32 * (w + 3.0), rect.top()), Vec2::new(w, rect.height()));
-        let resp = ui.allocate_rect(pr, Sense::click_and_drag());
+        let rr = Rect::from_min_size(Pos2::new(r.left() + (i % 4) as f32 * (pw + gap), y + (i / 4) as f32 * (ph + 8.0)), Vec2::new(pw, ph));
         let set = v.hot_cues[i].is_some();
         let name = core.decks[d].info.as_ref().and_then(|x| x.cues[i].as_ref()).map(|c| c.name.clone()).unwrap_or_default();
+        let resp = ui.allocate_rect(rr, Sense::click_and_drag());
         let p = ui.painter();
-        p.rect_filled(pr, CornerRadius::same(3), if resp.hovered() { BTN_HOVER } else { BTN });
-        p.text(pr.right_top() + Vec2::new(-5.0, 3.0), Align2::RIGHT_TOP, format!("{}", i + 1), font(8.5), if set { TEXT } else { TEXT_FAINT });
+        let rad = CornerRadius::same(8);
         if set {
-            let label = if !name.is_empty() {
-                name
-            } else if v.hot_cue_is_loop[i] {
-                "Loop".into()
-            } else {
-                format!("Cue {}", i + 1)
-            };
-            p.text(pr.center() + Vec2::new(0.0, 1.0), Align2::CENTER_CENTER, label, font(9.5), TEXT);
-            p.rect_filled(
-                Rect::from_min_max(Pos2::new(pr.left() + 8.0, pr.bottom() - 4.0), Pos2::new(pr.right() - 8.0, pr.bottom() - 2.0)),
-                CornerRadius::ZERO,
-                CUE[i],
-            );
-            if v.hot_cue_is_loop[i] {
-                p.text(pr.left_top() + Vec2::new(5.0, 2.0), Align2::LEFT_TOP, "∞", font(9.0), TEXT_DIM);
-            }
+            let c = CUE[i];
+            p.rect_filled(rr, rad, if resp.hovered() { dim(c, 0.42) } else { dim(c, 0.32) });
+            p.rect_stroke(rr, rad, Stroke::new(1.5, dim(c, 0.85)), egui::StrokeKind::Inside);
+            let label = if !name.is_empty() { name } else if v.hot_cue_is_loop[i] { "Loop".into() } else { "Cue".into() };
+            p.text(Pos2::new(rr.left() + 14.0, rr.center().y), Align2::LEFT_CENTER, format!("{}", i + 1), bold(16.0), TEXT);
+            p.text(Pos2::new(rr.left() + 32.0, rr.center().y), Align2::LEFT_CENTER, label, sans(15.0), TEXT);
+        } else {
+            p.rect_filled(rr, rad, Color32::from_rgb(0x17, 0x17, 0x1b));
+            p.rect_stroke(rr, rad, Stroke::new(1.0, Color32::from_rgb(0x2a, 0x2a, 0x30)), egui::StrokeKind::Inside);
+            p.text(Pos2::new(rr.left() + 14.0, rr.center().y), Align2::LEFT_CENTER, format!("{}", i + 1), bold(16.0), TEXT_FAINT);
+            p.text(Pos2::new(rr.left() + 32.0, rr.center().y), Align2::LEFT_CENTER, "empty", sans(15.0), TEXT_FAINT);
         }
         let resp = resp.on_hover_text("Click: set / launch · Ctrl-click: delete · Alt-click: loop to next cue");
-        let addr = format!("Deck/{n}/Cue{}", i + 1);
+        let addr = a(&format!("Cue{}", i + 1));
         learnable(core, &resp, &addr);
         if core.learn {
             continue;
         }
         let mods = ui.input(|i| i.modifiers);
-        let hc = format!("Deck/{n}/HotCue");
+        let hc = a("HotCue");
         if resp.clicked() && mods.ctrl {
-            act_i(core, &format!("Deck/{n}/DeleteCue"), i as i32 + 1);
+            act_i(core, &a("DeleteCue"), i as i32 + 1);
         } else if resp.clicked() && mods.alt {
-            act_i(core, &format!("Deck/{n}/SetCueLoop"), i as i32 + 1);
+            act_i(core, &a("SetCueLoop"), i as i32 + 1);
         } else if v.momentary_cues && set {
             if resp.is_pointer_button_down_on() && ui.input(|i| i.pointer.primary_pressed()) {
                 act(core, &hc, &[rosc::OscType::Int(i as i32 + 1), rosc::OscType::Int(1)]);
@@ -576,159 +266,293 @@ fn pads(ui: &mut Ui, core: &mut Core, d: usize, rect: Rect) {
             act_i(core, &hc, i as i32 + 1);
         }
     }
-}
 
-fn bottom_row(ui: &mut Ui, core: &mut Core, d: usize, rect: Rect) {
-    let v = core.snap.decks[d];
-    let n = d + 1;
-    let a = |s: &str| format!("Deck/{n}/{s}");
-    let dm = core.session.decks[d].clone();
-    let skip = core.settings.skip_beats;
-    let skip_txt = if skip.fract() == 0.0 { format!("{}", skip as i64) } else { format!("{skip}") };
-    // (label, weight)
-    let items: [(&str, f32); 12] = [
-        ("loop", 1.6),
-        ("I", 0.8),
-        ("O", 0.8),
-        ("back", 1.8),
-        ("fwd", 1.8),
-        ("1/32", 1.8),
-        ("1/16", 1.8),
-        ("1/8", 1.8),
-        ("1/4", 1.8),
-        ("1/2", 1.8),
-        ("D", 0.8),
-        ("T", 0.8),
-    ];
-    let total: f32 = items.iter().map(|x| x.1).sum();
-    let gap = 3.0;
-    let unit = (rect.width() - gap * (items.len() - 1) as f32) / total;
-    let mut x = rect.left();
-    let slip_names = ["ThirtySecond", "Sixteenth", "Eighth", "Quarter", "Half"];
-    for (idx, (lbl, wgt)) in items.iter().enumerate() {
-        let w = unit * wgt;
-        let r = Rect::from_min_size(Pos2::new(x, rect.top()), Vec2::new(w, rect.height()));
-        x += w + gap;
-        match *lbl {
-            "loop" => {
-                let resp = btn(ui, r, "", if v.loop_on { Look::On(RED) } else { Look::Normal });
-                loop_icon(ui, r, if v.loop_on { Color32::WHITE } else { TEXT });
-                let resp = resp.on_hover_text(format!("Loop {} (right-click: exit)", if v.loop_on { super::fmt_beats(v.loop_beats) } else { super::fmt_beats(core.settings.default_loop_beats) }));
+    // ---------------------------------------------------------- tempo
+    let y = y + 2.0 * ph + 8.0 + 14.0;
+    let th = 30.0;
+    let minus = Rect::from_min_size(Pos2::new(r.left(), y), Vec2::new(36.0, th));
+    let plus = Rect::from_min_size(Pos2::new(r.right() - 36.0, y), Vec2::new(36.0, th));
+    let follower = v.sync && !is_master;
+    for (rr, label, dir) in [(minus, "−", -1.0f32), (plus, "+", 1.0)] {
+        let resp = button(ui, rr, label, Style::Dark, bold(18.0)).on_hover_text("Fine tempo step");
+        if resp.clicked() && !follower {
+            act_f(core, &a("TempoSlider"), (v.tempo_fader as f32 + dir * 0.01).clamp(-1.0, 1.0));
+        }
+    }
+    let track = Rect::from_min_max(Pos2::new(minus.right() + gap, y), Pos2::new(plus.left() - gap, y + th));
+    let resp = ui.allocate_rect(track, Sense::click_and_drag());
+    let p = ui.painter();
+    p.rect_filled(track, CornerRadius::same(8), WELL);
+    let cx = track.center().x;
+    // Followers show where their actual speed sits on the slider.
+    let shown = if follower { v.tempo_range.fader_for_speed(v.speed / v.speed_mult.max(0.01)) } else { v.tempo_fader };
+    let hx = cx + shown as f32 * (track.width() / 2.0 - 8.0);
+    p.rect_filled(Rect::from_min_max(Pos2::new(cx.min(hx), track.top()), Pos2::new(cx.max(hx), track.bottom())), CornerRadius::same(4), alpha(color, 0.32));
+    p.line_segment([Pos2::new(cx, track.top() + 6.0), Pos2::new(cx, track.bottom() - 6.0)], Stroke::new(1.0, TEXT_FAINT));
+    p.text(Pos2::new(track.left() + 12.0, track.center().y), Align2::LEFT_CENTER, format!("Tempo {}", v.tempo_range.label()), sans(13.0), if follower { TEXT_DIM } else { TEXT });
+    let handle = Rect::from_center_size(Pos2::new(hx, track.center().y), Vec2::new(12.0, 26.0));
+    p.rect_filled(handle, CornerRadius::same(4), color);
+    p.line_segment([Pos2::new(hx, handle.top() + 6.0), Pos2::new(hx, handle.bottom() - 6.0)], Stroke::new(2.0, on(color)));
+    let resp = resp.on_hover_text(format!("{:+.2}% · drag (Shift: fine), double-click: reset, right-click: range{}", (v.speed - 1.0) * 100.0, if follower { " · following the clock" } else { "" }));
+    learnable(core, &resp, &a("TempoSlider"));
+    if !core.learn && !follower {
+        if resp.double_clicked() {
+            act_f(core, &a("TempoSlider"), 0.0);
+        } else if resp.dragged() {
+            let fine = ui.input(|i| i.modifiers.shift);
+            let dv = resp.drag_delta().x / (track.width() / 2.0) * if fine { 0.1 } else { 1.0 };
+            act_f(core, &a("TempoSlider"), (v.tempo_fader as f32 + dv).clamp(-1.0, 1.0));
+        }
+    }
+    resp.context_menu(|ui| {
+        use collective_engine::deck::TempoRange as T;
+        for (i, rg) in [T::Pct6, T::Pct10, T::Pct16, T::Pct50, T::Semitones12].iter().enumerate() {
+            if ui.selectable_label(v.tempo_range == *rg, rg.label()).clicked() {
+                act_i(core, &a("TempoRange"), i as i32);
+                ui.close();
+            }
+        }
+    });
+
+    // ---------------------------------------------------------- loops + EQ
+    let y = y + th + 12.0;
+    let lh = 30.0;
+    let size = st.loop_size[d];
+    let size_txt = if v.loop_on { beats_label(v.loop_beats) } else { beats_label(size) };
+    let lb = [("In", 1.0), ("Out", 1.0), ("÷2", 1.0), (size_txt.as_str(), 1.0), ("×2", 1.0), ("«", 1.0), ("»", 1.0)];
+    let eq_w = w * 0.42;
+    let lw = (w - eq_w - 6.0 * 6.0 - 14.0) / 7.0;
+    let mut x = r.left();
+    for (i, (label, _)) in lb.iter().enumerate() {
+        let rr = Rect::from_min_size(Pos2::new(x, y), Vec2::new(lw, lh));
+        x += lw + 6.0;
+        let style = if i == 3 && v.loop_on { Style::Light } else { Style::Dark };
+        let resp = button(ui, rr, label, style, bold(13.0));
+        match i {
+            0 => {
+                learnable(core, &resp, &a("LoopIn"));
+                if resp.clicked() {
+                    act_i(core, &a("LoopIn"), 1);
+                }
+            }
+            1 => {
+                learnable(core, &resp, &a("LoopOut"));
+                if resp.clicked() {
+                    act_i(core, &a("LoopOut"), 1);
+                }
+            }
+            2 | 4 => {
+                if resp.clicked() {
+                    let f = if i == 2 { 0.5 } else { 2.0 };
+                    st.loop_size[d] = (size * f).clamp(1.0 / 32.0, 64.0);
+                    if v.loop_on {
+                        act_i(core, &a(if i == 2 { "LoopHalve" } else { "LoopDouble" }), 1);
+                    }
+                }
+            }
+            3 => {
+                let resp = resp.on_hover_text(if st.roll[d] { "Hold to roll" } else { "Loop this many beats" });
                 learnable(core, &resp, &a("Loop"));
-                if resp.clicked() {
-                    act_i(core, &a("Loop"), 1);
-                }
-                if resp.secondary_clicked() {
-                    act_i(core, &a("LoopExit"), 1);
-                }
-            }
-            "I" | "O" => {
-                let addr = if *lbl == "I" { "LoopIn" } else { "LoopOut" };
-                let resp = btn(ui, r, lbl, Look::Normal).on_hover_text("Set loop in/out; while looping, IN halves and OUT doubles");
-                learnable(core, &resp, &a(addr));
-                if resp.clicked() {
-                    act_i(core, &a(addr), 1);
-                }
-            }
-            "back" | "fwd" => {
-                let (txt, addr) = if *lbl == "back" { (format!("← {skip_txt}"), "SkipBeatBack") } else { (format!("{skip_txt} →"), "SkipBeatForward") };
-                let resp = btn(ui, r, &txt, Look::Normal).on_hover_text(format!("Skip {skip_txt} beats (Settings → Decks to change)"));
-                learnable(core, &resp, &a(addr));
-                if resp.clicked() {
-                    act_i(core, &a(addr), 1);
-                }
-            }
-            "D" | "T" => {
-                let (on, addr) = if *lbl == "D" { (dm.slip_dotted, "SlipDotted") } else { (dm.slip_triplet, "SlipTriplet") };
-                let resp = btn(ui, r, lbl, if on { Look::On(SILVER) } else { Look::Normal }).on_hover_text("Dotted / triplet slip loops");
-                learnable(core, &resp, &a(addr));
-                if resp.clicked() {
-                    act_i(core, &a(addr), !on as i32);
-                }
-            }
-            frac => {
-                let name = slip_names[idx - 5];
-                let addr = a(&format!("SlipLoop/{name}"));
-                let resp = btn(ui, r, frac, Look::Normal).on_hover_text(format!("Slip loop {frac} bar (hold)"));
-                if resp.is_pointer_button_down_on() {
-                    ui.painter().rect_filled(r, CornerRadius::same(3), RED);
-                    ui.painter().text(r.center(), Align2::CENTER_CENTER, frac, font(11.0), Color32::WHITE);
-                }
-                learnable(core, &resp, &addr);
                 if core.learn {
                     continue;
                 }
-                if resp.is_pointer_button_down_on() {
-                    act_i(core, &addr, 1);
-                } else if resp.drag_stopped() || resp.clicked() {
-                    act_i(core, &addr, 0);
+                if st.roll[d] {
+                    if resp.drag_started() || (resp.is_pointer_button_down_on() && ui.input(|i| i.pointer.primary_pressed())) {
+                        core.send(Command::Deck { deck: d as u8, cmd: DeckCmd::SlipLoop { beats: size, pressed: true } });
+                    }
+                    if resp.drag_stopped() || resp.clicked() {
+                        core.send(Command::Deck { deck: d as u8, cmd: DeckCmd::SlipLoop { beats: size, pressed: false } });
+                    }
+                } else if resp.clicked() {
+                    if v.loop_on {
+                        act_i(core, &a("LoopExit"), 1);
+                    } else {
+                        act_f(core, &a("LoopBeats"), size as f32);
+                    }
+                }
+            }
+            _ => {
+                if resp.clicked() {
+                    let dir = if i == 5 { -1.0 } else { 1.0 };
+                    core.send(Command::Deck { deck: d as u8, cmd: DeckCmd::Skip(dir * size) });
                 }
             }
         }
     }
+    // Hi / Mid / Low / Filter.
+    let ch = core.session.channels[d].params;
+    let ew = (eq_w - 3.0 * 10.0) / 4.0;
+    let mut x = r.right() - eq_w;
+    let m = |s: &str| format!("Mixer/CH{n}/{s}");
+    for (label, addr, val, def, is_eq) in [
+        ("Hi", m("EQ/High"), ch.eq[2], 0.5, true),
+        ("Mid", m("EQ/Mid"), ch.eq[1], 0.5, true),
+        ("Low", m("EQ/Low"), ch.eq[0], 0.5, true),
+        ("Filter", m("Filter1"), ch.cutoff, 0.5, false),
+    ] {
+        let rr = Rect::from_min_size(Pos2::new(x, y + 1.0), Vec2::new(ew, 32.0));
+        x += ew + 10.0;
+        let mut vv = val;
+        let killed = is_eq && val <= 0.001;
+        let (resp, label_clicked) = mini_slider(ui, rr, &mut vv, def, label, killed, color);
+        learnable(core, &resp, &addr);
+        if resp.changed() {
+            act_f(core, &addr, vv);
+        }
+        if label_clicked {
+            act_f(core, &addr, if is_eq && !killed { 0.0 } else { def });
+        }
+    }
 }
 
-// ---------------------------------------------------------------- sampler deck
+pub fn beats_label(b: f64) -> String {
+    if b >= 1.0 {
+        format!("{}", b as i64)
+    } else {
+        format!("1/{}", (1.0 / b).round() as i64)
+    }
+}
 
-fn sampler_deck(ui: &mut Ui, core: &mut Core, d: usize, r: Rect) {
+pub fn compact(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect) {
+    card(ui, rect);
+    accept_drop(ui, core, d, rect);
+    let v = core.snap.decks[d];
+    let n = d + 1;
+    let a = |s: &str| format!("Deck/{n}/{s}");
+    let color = DECK[d];
+    let r = rect.shrink2(Vec2::new(14.0, 12.0));
+    let row_h = 38.0;
+    let badge = Rect::from_min_size(Pos2::new(r.left(), r.top() + 3.0), Vec2::splat(32.0));
+    badge_menu(ui, core, d, badge, 16.0);
+    let sampler = core.session.decks[d].mode == DeckMode::Sampler;
+
+    // Buttons from the right.
+    let bw = 72.0;
+    let gap = 8.0;
+    let mut x = r.right();
+    let mut next = |w: f32| {
+        x -= w;
+        let rr = Rect::from_min_size(Pos2::new(x, r.top()), Vec2::new(w, row_h));
+        x -= gap;
+        rr
+    };
+    let playing = if sampler { core.snap.samplers[d].playing } else { v.playing };
+    let sync_r = next(bw);
+    let play_r = next(bw + 4.0);
+    let cue_r = next(bw - 6.0);
+    if !sampler {
+        let resp = button(ui, sync_r, "Sync", if v.sync { Style::Light } else { Style::Dark }, bold(15.0));
+        learnable(core, &resp, &a("TempoSync"));
+        if resp.clicked() {
+            act_i(core, &a("TempoSync"), 1);
+        }
+        let resp = button(ui, cue_r, "Cue", Style::Outline(ORANGE, false), bold(15.0));
+        learnable(core, &resp, &a("Cue"));
+        cue_hold(core, &resp, &a("Cue"));
+    }
+    let resp = button(
+        ui,
+        play_r,
+        if playing { "Pause" } else { "Play" },
+        if playing { Style::Fill(color) } else { Style::Outline(color, false) },
+        bold(15.0),
+    );
+    let play_addr = if sampler { a("Sampler/PlayPause") } else { a("PlayPause") };
+    learnable(core, &resp, &play_addr);
+    if resp.clicked() {
+        act_i(core, &play_addr, 1);
+    }
+    let time_r = Rect::from_min_size(Pos2::new(cue_r.left() - 76.0, r.top()), Vec2::new(68.0, row_h));
+    if !sampler {
+        ui.painter().text(time_r.right_center(), Align2::RIGHT_CENTER, mmss_remain(v.duration_secs - v.position_secs), mono(19.0), TEXT);
+        let key = core.key_text(core.deck_key(d));
+        if !key.is_empty() {
+            let chip = Rect::from_min_size(Pos2::new(time_r.left() - 48.0, r.top() + 7.0), Vec2::new(40.0, 24.0));
+            key_chip(ui, chip, &key, key_border(core, d), 12.5);
+        }
+    }
+    let title_r = Rect::from_min_max(Pos2::new(badge.right() + 12.0, r.top()), Pos2::new(time_r.left() - 54.0, r.top() + row_h));
+    if sampler {
+        let p = ui.painter_at(title_r);
+        p.text(title_r.left_center(), Align2::LEFT_CENTER, format!("Sampler · {}", core.session.decks[d].sampler.name), bold(14.0), TEXT);
+    } else {
+        title_block(ui, core, d, title_r, false);
+    }
+
+    // Swap.
+    let swap = Rect::from_min_size(Pos2::new(r.left(), r.top() + row_h + 10.0), Vec2::new(96.0, 34.0));
+    let resp = button(ui, swap, "⇄  Swap", Style::Outline(Color32::from_gray(110), false), bold(14.0)).on_hover_text("Show this deck in the large view");
+    if resp.clicked() {
+        let side = d % 2;
+        st.focus[side] = d;
+    }
+}
+
+// ---------------------------------------------------------------- sampler
+
+fn sampler(ui: &mut Ui, core: &mut Core, d: usize, rect: Rect) {
     let n = d + 1;
     let sv = core.snap.samplers[d];
     let sm = core.session.decks[d].sampler.clone();
     let sel = sm.selected_lane;
     let color = DECK[d];
+    let r = rect.shrink(16.0);
 
-    // Header row like a track deck.
-    let h1 = 26.0;
-    let play_r = Rect::from_min_size(r.left_top(), Vec2::new(LEFT_W, h1));
-    let pr = ui.allocate_rect(play_r, Sense::click());
-    ui.painter().rect_filled(play_r, CornerRadius::same(3), BTN);
-    play_icon(ui, play_r, RED, sv.playing);
-    learnable(core, &pr, &format!("Deck/{n}/Sampler/PlayPause"));
-    if pr.clicked() {
+    let hh = 40.0;
+    let badge = Rect::from_min_size(r.min, Vec2::splat(hh));
+    badge_menu(ui, core, d, badge, 20.0);
+    ui.painter().text(Pos2::new(badge.right() + 12.0, badge.center().y), Align2::LEFT_CENTER, format!("Sampler · {}", sm.name), bold(16.0), TEXT);
+    let pr = Rect::from_min_size(Pos2::new(r.right() - 90.0, r.top()), Vec2::new(90.0, hh));
+    let resp = button(ui, pr, if sv.playing { "Pause" } else { "Play" }, if sv.playing { Style::Fill(color) } else { Style::Outline(color, false) }, bold(15.0));
+    learnable(core, &resp, &format!("Deck/{n}/Sampler/PlayPause"));
+    if resp.clicked() {
         act_i(core, &format!("Deck/{n}/Sampler/PlayPause"), 1);
     }
-    let badge_r = Rect::from_min_size(Pos2::new(r.left() + LEFT_W + 6.0, r.top() + 1.0), Vec2::new(24.0, 24.0));
-    badge(ui, core, d, badge_r);
-    ui.painter().text(badge_r.right_center() + Vec2::new(8.0, 0.0), Align2::LEFT_CENTER, format!("SAMPLER · {}", sm.name), font(12.0), TEXT);
-    let mut x = r.right();
-    for (lbl, i) in [("2×", 2), ("1×", 1), ("½", 0)] {
-        let br = Rect::from_min_size(Pos2::new(x - 28.0, r.top()), Vec2::new(28.0, h1));
-        let on = [0.5, 1.0, 2.0][i] == sm.speed;
-        if btn(ui, br, lbl, if on { Look::On(SILVER) } else { Look::Normal }).clicked() {
+    let mut x = pr.left() - 8.0;
+    for (lbl, i) in [("2×", 2usize), ("1×", 1), ("½", 0)] {
+        x -= 34.0;
+        let on_ = [0.5, 1.0, 2.0][i] == sm.speed;
+        if button(ui, Rect::from_min_size(Pos2::new(x, r.top() + 4.0), Vec2::new(32.0, hh - 8.0)), lbl, if on_ { Style::Light } else { Style::Dark }, bold(12.0)).clicked() {
             act_i(core, &format!("Deck/{n}/Sampler/Speed"), i as i32);
         }
-        x -= 30.0;
     }
+    x -= 10.0;
     for p in (0..8).rev() {
-        let br = Rect::from_min_size(Pos2::new(x - 22.0, r.top()), Vec2::new(22.0, h1));
-        if btn(ui, br, &format!("{}", p + 1), if sm.pattern == p { Look::On(RED) } else { Look::Normal }).on_hover_text("Pattern").clicked() {
+        x -= 26.0;
+        let style = if sm.pattern == p { Style::Fill(color) } else { Style::Dark };
+        if button(ui, Rect::from_min_size(Pos2::new(x, r.top() + 4.0), Vec2::new(24.0, hh - 8.0)), &format!("{}", p + 1), style, bold(12.0))
+            .on_hover_text("Pattern")
+            .clicked()
+        {
             act_i(core, &format!("Deck/{n}/Sampler/Pattern"), p as i32);
         }
-        x -= 24.0;
     }
 
-    // Lane grid.
-    let pattern = sm.patterns[sm.pattern];
-    let grid_top = r.top() + h1 + GAP;
-    let ctl_h = 44.0;
-    let grid_h = r.bottom() - ctl_h - GAP - grid_top;
+    let grid_top = r.top() + hh + 12.0;
+    let ctl_h = 54.0;
+    let grid_h = r.bottom() - ctl_h - 10.0 - grid_top;
     let row_h = (grid_h / LANES as f32).floor();
-    let name_w = 96.0;
-    let step_w = (r.width() - name_w - 4.0) / STEPS as f32;
+    let name_w = 110.0;
+    let step_w = (r.width() - name_w - 6.0) / STEPS as f32;
+    let pattern = sm.patterns[sm.pattern];
     for lane in 0..LANES {
         let y = grid_top + lane as f32 * row_h;
         let lp = sm.lanes[lane].params;
-        let nr = Rect::from_min_size(Pos2::new(r.left(), y), Vec2::new(name_w, row_h - 2.0));
+        let nr = Rect::from_min_size(Pos2::new(r.left(), y), Vec2::new(name_w, row_h - 3.0));
         let name = sm.lanes[lane]
             .sample
             .as_ref()
             .and_then(|p| p.file_stem())
             .map(|s| s.to_string_lossy().chars().take(14).collect::<String>())
             .unwrap_or_else(|| format!("Lane {}", lane + 1));
-        let peak = sv.lane_peak[lane].min(1.0);
-        let fill = if sel == lane { dim(color, 0.55) } else { lighten(BTN, peak * 0.4) };
-        let resp = btn_sized(ui, nr, &name, if lp.mute { Look::Off } else { Look::On(fill) }, 9.5)
-            .on_hover_text("Click: select · Ctrl-click: mute · Right-click: trigger");
+        let style = if lp.mute {
+            Style::Empty
+        } else if sel == lane {
+            Style::Fill(dim(color, 0.6))
+        } else {
+            Style::Fill(lighten(CTRL, sv.lane_peak[lane].min(1.0) * 0.35))
+        };
+        let resp = button(ui, nr, &name, style, sans(11.5)).on_hover_text("Click: select · Ctrl-click: mute · Right-click: trigger");
         if resp.clicked() {
             if ui.input(|i| i.modifiers.ctrl) {
                 core.set_lane(d, lane, |p| p.mute = !p.mute);
@@ -740,17 +564,25 @@ fn sampler_deck(ui: &mut Ui, core: &mut Core, d: usize, r: Rect) {
             core.route(&format!("Deck/{n}/Sampler/Trigger"), &[rosc::OscType::Int(lane as i32 + 1)]);
         }
         for s in 0..STEPS {
-            let sr = Rect::from_min_size(Pos2::new(r.left() + name_w + 4.0 + s as f32 * step_w, y), Vec2::new(step_w - 2.0, row_h - 2.0));
+            let sr = Rect::from_min_size(Pos2::new(r.left() + name_w + 6.0 + s as f32 * step_w, y), Vec2::new(step_w - 3.0, row_h - 3.0));
             let step = pattern[lane][s];
             let active = s < lp.steps as usize;
-            let playing = sv.playing && sv.current_step[lane] as usize == s;
             let resp = ui.allocate_rect(sr, Sense::click());
-            let base = if s % 4 == 0 { Color32::from_gray(52) } else { Color32::from_gray(40) };
-            let f = if step.on { lighten(dim(color, 0.5 + 0.5 * step.velocity), 0.0) } else if active { base } else { Color32::from_gray(22) };
             let p = ui.painter();
-            p.rect_filled(sr, CornerRadius::same(2), f);
-            if playing {
-                p.rect_stroke(sr, CornerRadius::same(2), Stroke::new(1.5, Color32::WHITE), egui::StrokeKind::Inside);
+            let fill = if step.on {
+                lighten(dim(color, 0.45 + 0.55 * step.velocity), 0.0)
+            } else if active {
+                if s % 4 == 0 {
+                    Color32::from_gray(48)
+                } else {
+                    Color32::from_gray(36)
+                }
+            } else {
+                Color32::from_gray(22)
+            };
+            p.rect_filled(sr, CornerRadius::same(3), fill);
+            if sv.playing && sv.current_step[lane] as usize == s {
+                p.rect_stroke(sr, CornerRadius::same(3), Stroke::new(1.5, Color32::WHITE), egui::StrokeKind::Inside);
             }
             if resp.clicked() {
                 core.set_step(d, lane, s, Step { on: !step.on, velocity: step.velocity });
@@ -764,37 +596,39 @@ fn sampler_deck(ui: &mut Ui, core: &mut Core, d: usize, r: Rect) {
         }
     }
 
-    // Selected lane controls.
-    let cr = Rect::from_min_max(Pos2::new(r.left(), r.bottom() - ctl_h), r.right_bottom());
+    // Lane controls as mini sliders.
     let lp = sm.lanes[sel].params;
-    let mut kx = cr.left() + 16.0;
-    let ky = cr.top() + 16.0;
-    let mut vals = [lp.attack, lp.hold, lp.release, lp.curve, lp.volume, sm.swing];
-    let names = ["ATTACK", "HOLD", "RELEASE", "CURVE", "VOLUME", "SWING"];
-    let defaults = [0.0, 1.0, 0.1, 0.5, 0.75, 0.0];
-    for i in 0..6 {
-        let resp = small_knob(ui, Pos2::new(kx, ky), 12.0, &mut vals[i], defaults[i], false, RED);
-        ui.painter().text(Pos2::new(kx, ky + 22.0), Align2::CENTER_CENTER, names[i], font(8.0), TEXT_DIM);
+    let cy = r.bottom() - ctl_h + 6.0;
+    let items: [(&str, f32, f32); 8] = [
+        ("Attack", lp.attack, 0.0),
+        ("Hold", lp.hold, 1.0),
+        ("Release", lp.release, 0.1),
+        ("Curve", lp.curve, 0.5),
+        ("Volume", lp.volume, 0.75),
+        ("Pitch", (lp.pitch + 24.0) / 48.0, 0.5),
+        ("Swing", sm.swing, 0.0),
+        ("Steps", (lp.steps as f32 - 1.0) / 15.0, 1.0),
+    ];
+    let cw = (r.width() * 0.68 - 7.0 * 10.0) / 8.0;
+    let mut x = r.left();
+    for (label, val, def) in items {
+        let rr = Rect::from_min_size(Pos2::new(x, cy), Vec2::new(cw, 32.0));
+        x += cw + 10.0;
+        let mut vv = val;
+        let (resp, _) = mini_slider(ui, rr, &mut vv, def, label, false, color);
         if resp.changed() {
-            let addr = if i == 5 { format!("Deck/{n}/Sampler/Swing") } else { format!("Deck/{n}/Sampler/{}", names[i]) };
-            core.route(&addr, &[rosc::OscType::Float(vals[i])]);
+            match label {
+                "Pitch" => core.set_lane(d, sel, |p| p.pitch = (vv * 48.0 - 24.0).round()),
+                "Steps" => core.set_lane(d, sel, |p| p.steps = (vv * 15.0 + 1.0).round() as u8),
+                "Swing" => {
+                    act_f(core, &format!("Deck/{n}/Sampler/Swing"), vv);
+                }
+                l => {
+                    core.route(&format!("Deck/{n}/Sampler/{l}"), &[rosc::OscType::Float(vv)]);
+                }
+            }
         }
-        kx += 46.0;
     }
-    let mut pitch = (lp.pitch + 24.0) / 48.0;
-    let resp = small_knob(ui, Pos2::new(kx, ky), 12.0, &mut pitch, 0.5, true, RED);
-    ui.painter().text(Pos2::new(kx, ky + 22.0), Align2::CENTER_CENTER, format!("{:+.0} ST", lp.pitch), font(8.0), TEXT_DIM);
-    if resp.changed() {
-        core.set_lane(d, sel, |p| p.pitch = (pitch * 48.0 - 24.0).round());
-    }
-    kx += 46.0;
-    let mut steps = (lp.steps as f32 - 1.0) / 15.0;
-    let resp = small_knob(ui, Pos2::new(kx, ky), 12.0, &mut steps, 1.0, false, RED);
-    ui.painter().text(Pos2::new(kx, ky + 22.0), Align2::CENTER_CENTER, format!("{} STEPS", lp.steps), font(8.0), TEXT_DIM);
-    if resp.changed() {
-        core.set_lane(d, sel, |p| p.steps = (steps * 15.0 + 1.0).round() as u8);
-    }
-    kx += 30.0;
     let dir = match lp.direction {
         Direction::Forward => "→",
         Direction::Reverse => "←",
@@ -812,21 +646,17 @@ fn sampler_deck(ui: &mut Ui, core: &mut Core, d: usize, r: Rect) {
             &[rosc::OscType::Int(sel as i32 + 1), rosc::OscType::String(ctl.into()), rosc::OscType::Float(1.0)],
         );
     };
-    let bw = 34.0;
-    let by = cr.top() + 6.0;
-    if btn(ui, Rect::from_min_size(Pos2::new(kx, by), Vec2::new(bw, 22.0)), dir, Look::Normal).on_hover_text("Direction").clicked() {
-        laneset(core, "Direction");
+    let bw = 40.0;
+    for (i, (label, what)) in [(dir, "Direction"), (rh, "Rhythm"), (if lp.mono { "Mono" } else { "Poly" }, "Mono"), ("Clear", "Clear")].iter().enumerate() {
+        let rr = Rect::from_min_size(Pos2::new(x + i as f32 * (bw + 16.0), cy), Vec2::new(bw + 12.0, 30.0));
+        if button(ui, rr, label, Style::Dark, bold(12.0)).clicked() {
+            match *what {
+                "Mono" => core.set_lane(d, sel, |p| p.mono = !p.mono),
+                "Clear" => core.clear_sample(d, sel),
+                w => laneset(core, w),
+            }
+        }
     }
-    if btn(ui, Rect::from_min_size(Pos2::new(kx + bw + 3.0, by), Vec2::new(bw, 22.0)), rh, Look::Normal).on_hover_text("Rate").clicked() {
-        laneset(core, "Rhythm");
-    }
-    if btn(ui, Rect::from_min_size(Pos2::new(kx + 2.0 * (bw + 3.0), by), Vec2::new(bw + 10.0, 22.0)), if lp.mono { "MONO" } else { "POLY" }, Look::Normal).clicked() {
-        core.set_lane(d, sel, |p| p.mono = !p.mono);
-    }
-    let clr = Rect::from_min_size(Pos2::new(kx + 3.0 * (bw + 3.0) + 10.0, by), Vec2::new(54.0, 22.0));
-    if btn(ui, clr, "CLEAR", Look::Normal).on_hover_text("Remove this lane's sample (drag a file onto the deck to load one)").clicked() {
-        core.clear_sample(d, sel);
-    }
-    let mut child = ui.new_child(UiBuilder::new().max_rect(Rect::from_min_max(Pos2::new(clr.right() + 8.0, by), cr.right_bottom())));
-    child.label(RichText::new(format!("Lane {} · drop a file here to load it", sel + 1)).small().color(TEXT_DIM));
+    let steps_txt = format!("Lane {} · {} steps", sel + 1, lp.steps);
+    ui.painter().text(Pos2::new(r.right(), cy + 44.0), Align2::RIGHT_CENTER, steps_txt, sans(11.0), TEXT_DIM);
 }

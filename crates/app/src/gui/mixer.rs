@@ -1,245 +1,440 @@
-//! Mixer channel strips drawn into fixed rects.
+//! Centre mixer: tempo bar, vertical channel strips, crossfader.
 
-use eframe::egui::{self, Align2, Color32, CornerRadius, Pos2, Rect, Sense, Ui, UiBuilder, Vec2};
+use std::time::Instant;
 
-use collective_engine::engine::NUM_DECKS;
+use eframe::egui::{self, Align2, Color32, CornerRadius, Pos2, Rect, Sense, Stroke, Ui, UiBuilder, Vec2};
+
+use collective_engine::dsp::gain_to_db;
+use collective_engine::engine::{ClockOwner, NUM_DECKS};
 use collective_engine::fx::SlotHealth;
-use collective_engine::mixer::{MixMode, Output, XfAssign};
+use collective_engine::mixer::{MixMode, Output};
 
 use super::skin::*;
 use super::{act_f, act_i, learnable, UiState};
 use crate::core::Core;
+use crate::model::{MasterModel, QUANTIZE_VALUES};
 
-pub fn channel(ui: &mut Ui, core: &mut Core, st: &mut UiState, ch: usize, rect: Rect) {
-    panel(ui, rect, PANEL);
-    let n = ch + 1;
-    let a = |s: &str| format!("Mixer/CH{n}/{s}");
-    let cm = core.session.channels[ch].clone();
-    let p = cm.params;
-    let view = core.snap.channels[ch];
-    let cx = rect.center().x;
-    let h = rect.height();
-    // Vertical rhythm scales with the available height.
-    let y = |f: f32| rect.top() + h * f;
-
-    rule_title(ui, Rect::from_min_max(Pos2::new(rect.left(), y(0.02)), Pos2::new(rect.right(), y(0.09))), &format!("CHANNEL {n}"));
-
-    // Big volume knob with trim ring and VU dots.
-    let r_big = (h * 0.15).clamp(22.0, 36.0);
-    let kc = Pos2::new(cx, y(0.30));
-    let mut vol = p.volume;
-    let mut trim = p.trim_db / 12.0 + 0.5;
-    let vu = {
-        let pk = view.post_peak[0].max(view.post_peak[1]);
-        let db = 20.0 * pk.max(1e-5).log10();
-        ((db + 48.0) / 51.0).clamp(0.0, 1.0)
-    };
-    let (resp, trim_changed, f_clicked) = volume_knob(ui, kc, r_big, &mut vol, &mut trim, vu, cm.fader_start, DECK[ch]);
-    let resp = resp.on_hover_text(format!(
-        "Volume {:.0}% ({})\nCtrl/Cmd-drag: trim {:+.1} dB · double-click: reset",
-        p.volume * 100.0,
-        core.settings.fader_curve.label(),
-        p.trim_db
-    ));
-    learnable(core, &resp, &a("Volume"));
-    if resp.changed() && vol != p.volume {
-        act_f(core, &a("Volume"), vol);
+fn db_text(g: f32) -> String {
+    if g <= 0.0 {
+        return "-∞".into();
     }
-    if trim_changed {
-        act_f(core, &a("Trim"), trim);
-    }
-    if f_clicked {
-        act_i(core, &a("FaderStart"), !cm.fader_start as i32);
-    }
-
-    // FILTER / EQ section.
-    let title_r = Rect::from_min_max(Pos2::new(rect.left(), y(0.50)), Pos2::new(rect.right(), y(0.57)));
-    let tr = ui.allocate_rect(title_r, Sense::click()).on_hover_text("Click to switch between filter and EQ");
-    rule_title(ui, title_r, if cm.show_eq { "EQ" } else { "FILTER" });
-    if tr.clicked() {
-        core.session.channels[ch].show_eq = !cm.show_eq;
-    }
-    let kr = (h * 0.065).clamp(10.0, 15.0);
-    let ky = y(0.66);
-    let xs = [rect.left() + rect.width() * 0.2, cx, rect.left() + rect.width() * 0.8];
-    let items: [(String, &str, f32, f32, bool); 3] = if cm.show_eq {
-        [
-            (a("EQ/Low"), "LOW", p.eq[0], 0.5, true),
-            (a("EQ/Mid"), "MID", p.eq[1], 0.5, true),
-            (a("EQ/High"), "HI", p.eq[2], 0.5, true),
-        ]
+    let db = gain_to_db(g);
+    if db.abs() >= 10.0 {
+        format!("{db:.0}")
     } else {
-        [
-            (a("Filter1"), "CUTOFF", p.cutoff, 0.5, true),
-            (a("Filter2"), "RES", p.res, 0.5, false),
-            (a("Filter3"), "-WIDTH+", p.width, 1.0, false),
-        ]
-    };
-    for (i, (addr, label, val, def, bip)) in items.iter().enumerate() {
-        let mut v = *val;
-        let killed = cm.show_eq && v <= 0.001;
-        let resp = small_knob(ui, Pos2::new(xs[i], ky), kr, &mut v, *def, *bip, RED);
-        learnable(core, &resp, addr);
-        if resp.changed() {
-            act_f(core, addr, v);
-        }
-        let lr = Rect::from_center_size(Pos2::new(xs[i], ky + kr + 9.0), Vec2::new(rect.width() / 3.0, 12.0));
-        let lresp = ui.allocate_rect(lr, Sense::click());
-        ui.painter().text(lr.center(), Align2::CENTER_CENTER, *label, font(8.5), if killed { RED } else { TEXT_DIM });
-        if lresp.clicked() {
-            // EQ: click the label to kill / restore. Filter: reset.
-            let nv = if cm.show_eq { if killed { 0.5 } else { 0.0 } } else { *def };
-            act_f(core, addr, nv);
+        format!("{db:.1}")
+    }
+}
+
+pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect) {
+    card(ui, rect);
+    let r = rect.shrink(16.0);
+    top_bar(ui, core, st, Rect::from_min_size(r.min, Vec2::new(r.width(), 38.0)));
+
+    let xf_h = 34.0;
+    let strips = Rect::from_min_max(Pos2::new(r.left(), r.top() + 52.0), Pos2::new(r.right(), r.bottom() - xf_h - 14.0));
+    let order: Vec<Option<usize>> = if core.deck_count() >= 4 { vec![Some(2), Some(0), None, Some(1), Some(3)] } else { vec![Some(0), None, Some(1)] };
+    let gap = 10.0;
+    let sw = (strips.width() - gap * (order.len() as f32 - 1.0)) / order.len() as f32;
+    for (i, ch) in order.iter().enumerate() {
+        let sr = Rect::from_min_size(Pos2::new(strips.left() + i as f32 * (sw + gap), strips.top()), Vec2::new(sw, strips.height()));
+        match ch {
+            Some(c) => strip(ui, core, st, *c, sr),
+            None => master_strip(ui, core, sr),
         }
     }
+    crossfader(ui, core, Rect::from_min_size(Pos2::new(r.left(), r.bottom() - xf_h), Vec2::new(r.width(), xf_h)));
+}
 
-    // CUE MUTE SOLO FX
-    let row_y = y(0.80);
-    let bh = (h * 0.085).clamp(16.0, 22.0);
-    let bw = (rect.width() - 10.0 - 6.0) / 4.0;
-    let any_solo = (0..NUM_DECKS).any(|c| core.session.channels[c].params.solo);
-    for (i, (lbl, addr, on)) in [("CUE", "Cue", p.cue), ("MUTE", "Mute", p.mute), ("SOLO", "Solo", p.solo), ("FX", "FX", false)].iter().enumerate() {
-        let br = Rect::from_min_size(Pos2::new(rect.left() + 5.0 + i as f32 * (bw + 2.0), row_y), Vec2::new(bw, bh));
-        let suppressed = *addr == "Mute" && any_solo && !p.solo && !p.mute;
-        let look = match *addr {
-            "FX" => {
-                let has = cm.fx.slots.iter().any(|s| s.is_some());
-                if has && !cm.fx.bypass_all {
-                    Look::On(SILVER)
-                } else {
-                    Look::Normal
+fn top_bar(ui: &mut Ui, core: &mut Core, st: &mut UiState, r: Rect) {
+    let s = core.snap;
+    // BPM: drag to change, double-click to type.
+    let bpm_r = Rect::from_min_size(r.min, Vec2::new(104.0, r.height()));
+    if let Some(text) = &mut st.bpm_edit {
+        let mut child = ui.new_child(UiBuilder::new().max_rect(bpm_r.shrink2(Vec2::new(0.0, 4.0))));
+        let resp = child.add(egui::TextEdit::singleline(text).font(mono(20.0)).desired_width(100.0));
+        if resp.lost_focus() {
+            if child.input(|i| i.key_pressed(egui::Key::Enter)) {
+                if let Ok(v) = text.trim().parse::<f32>() {
+                    act_f(core, "Header/BPM", v);
                 }
             }
-            _ if *on => Look::On(if *addr == "Cue" { Color32::from_rgb(0xf0, 0x8c, 0x2e) } else if *addr == "Mute" { RED } else { SILVER }),
-            _ if suppressed => Look::On(dim(RED, 0.45)),
-            _ => Look::Normal,
+            st.bpm_edit = None;
+        } else {
+            resp.request_focus();
+        }
+    } else {
+        let resp = ui.allocate_rect(bpm_r, Sense::click_and_drag());
+        let owner = match s.clock.owner {
+            ClockOwner::Header => "the header".to_string(),
+            ClockOwner::Deck(d) => format!("deck {}", d + 1),
         };
-        let resp = btn_sized(ui, br, lbl, look, 9.5);
-        learnable(core, &resp, &a(addr));
-        if *addr == "FX" {
-            // Underline: one segment per slot (lit running, dim bypassed, red failed/missing).
-            let seg_w = (br.width() - 6.0) / 4.0;
-            for s in 0..4 {
-                let col = match (&cm.fx.slots[s], view.fx[s]) {
-                    (None, _) => continue,
-                    (Some(m), _) if m.missing => RED,
-                    (Some(_), Some((_, SlotHealth::Failed, _))) => RED,
-                    (Some(_), Some((true, _, _))) => Color32::from_rgb(0x5f, 0xd0, 0x8c),
-                    _ => Color32::from_gray(90),
-                };
-                ui.painter().rect_filled(
-                    Rect::from_min_size(Pos2::new(br.left() + 3.0 + s as f32 * seg_w, br.bottom() - 3.0), Vec2::new(seg_w - 1.0, 2.0)),
-                    CornerRadius::ZERO,
-                    col,
-                );
+        let resp = resp.on_hover_text(format!("Master tempo (owned by {owner}). Drag (Shift: fine), double-click to type."));
+        ui.painter().text(bpm_r.left_center(), Align2::LEFT_CENTER, format!("{:.2}", s.clock.bpm), mono(26.0), TEXT);
+        learnable(core, &resp, "Header/BPM");
+        if resp.dragged() {
+            let fine = ui.input(|i| i.modifiers.shift);
+            let dv = resp.drag_delta().x as f64 * if fine { 0.01 } else { 0.1 };
+            if dv != 0.0 {
+                act_f(core, "Header/BPM", (s.clock.bpm + dv) as f32);
             }
-            if resp.clicked() && !core.learn {
-                st.fx_open[ch] = !st.fx_open[ch];
-            }
-            if resp.secondary_clicked() {
-                act_i(core, &a("FX"), cm.fx.bypass_all as i32);
-            }
-            continue;
         }
-        if resp.clicked() {
-            if suppressed {
-                for c in 0..NUM_DECKS {
-                    if core.session.channels[c].params.solo {
-                        act_i(core, &format!("Mixer/CH{}/Solo", c + 1), 0);
-                    }
-                }
-            } else {
-                act_i(core, &a(addr), !on as i32);
-            }
+        if resp.double_clicked() {
+            st.bpm_edit = Some(format!("{:.2}", s.clock.bpm));
         }
     }
+    // Beat dots.
+    let beat = (s.clock.beat.floor() as i64).rem_euclid(4) as usize;
+    for i in 0..4 {
+        let c = Pos2::new(bpm_r.right() + 4.0 + i as f32 * 12.0, r.center().y);
+        ui.painter().circle_filled(c, 4.5, if i == beat { RED } else { Color32::from_gray(70) });
+    }
 
-    // Output destination.
-    let out_r = Rect::from_min_max(Pos2::new(rect.left() + 5.0, y(0.80) + bh + 5.0), Pos2::new(rect.right() - 5.0, (y(0.80) + bh * 2.0 + 5.0).min(rect.bottom() - 3.0)));
-    let out_txt = match p.output {
-        Output::Master => "MASTER".to_string(),
-        Output::None => "NONE".into(),
-        Output::Pair(i) => format!("OUT {}/{}", i * 2 + 1, i * 2 + 2),
+    // Pills from the right: Menu, Rec, Quantize, Tap.
+    let h = 30.0;
+    let y = r.center().y - h / 2.0;
+    let mut x = r.right();
+    let mut place = |ui: &Ui, label: &str| {
+        let w = pill_width(ui, label, 12.0);
+        x -= w;
+        let rr = Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, h));
+        x -= 8.0;
+        rr
     };
-    let resp = btn_sized(ui, out_r, &format!("{out_txt}  ▾"), Look::On(Color32::from_gray(30)), 9.5);
-    egui::Popup::menu(&resp).show(|ui| {
-        if ui.selectable_label(p.output == Output::Master, "MASTER").clicked() {
-            act_i(core, &a("Output"), 0);
+    let menu_r = place(ui, "Menu");
+    let rec_label = match &core.recorder {
+        Some(rec) => format!("● {}", super::widgets::fmt_time(rec.started.elapsed().as_secs_f64())),
+        None => "● Rec".into(),
+    };
+    let rec_r = place(ui, &rec_label);
+    let q_label = format!("Quantize {}", QUANTIZE_VALUES[core.session.quantize].1);
+    let q_r = place(ui, &q_label);
+    let tap_r = place(ui, "Tap");
+
+    let resp = pill(ui, tap_r, "Tap", false).on_hover_text("Tap tempo");
+    if resp.clicked() {
+        let now = Instant::now();
+        st.taps.retain(|t| now.duration_since(*t).as_secs_f32() < 2.5);
+        st.taps.push(now);
+        if st.taps.len() >= 3 {
+            let n = st.taps.len();
+            let span = st.taps[n - 1].duration_since(st.taps[0]).as_secs_f64();
+            let bpm = 60.0 * (n - 1) as f64 / span;
+            act_f(core, "Header/BPM", bpm as f32);
         }
-        if ui.selectable_label(p.output == Output::None, "NONE").clicked() {
-            core.set_channel(ch, |p| p.output = Output::None);
-        }
-        for i in 0..4u8 {
-            if ui.selectable_label(p.output == Output::Pair(i), format!("Direct {}/{}", i * 2 + 1, i * 2 + 2)).clicked() {
-                act_i(core, &a("Output"), i as i32 + 1);
+    }
+    let q_on = core.session.quantize_on;
+    let resp = pill(ui, q_r, &q_label, q_on).on_hover_text("Click: on/off · right-click: value");
+    learnable(core, &resp, "Header/QuantizeOn");
+    if resp.clicked() {
+        act_i(core, "Header/QuantizeOn", !q_on as i32);
+    }
+    resp.context_menu(|ui| {
+        for (i, (_, l)) in QUANTIZE_VALUES.iter().enumerate() {
+            if ui.selectable_label(core.session.quantize == i, format!("{l} bar")).clicked() {
+                act_i(core, "Header/Quantize", i as i32 + 1);
+                ui.close();
             }
         }
-        if matches!(core.session.mix_mode, MixMode::Crossfader { .. }) {
-            ui.separator();
-            ui.label("Crossfader side");
-            for (t, asg, i) in [("A", XfAssign::A, 0), ("Thru", XfAssign::Thru, 1), ("B", XfAssign::B, 2)] {
-                if ui.selectable_label(cm.xf_assign == asg, t).clicked() {
-                    act_i(core, &a("XFader"), i);
-                }
+    });
+    let rec = core.recorder.is_some();
+    let resp = ui.allocate_rect(rec_r, Sense::click()).on_hover_text("Record the master output to WAV");
+    let p = ui.painter();
+    let rad = CornerRadius::same((h / 2.0) as u8);
+    p.rect_filled(rec_r, rad, if rec { dim(RED, 0.8) } else if resp.hovered() { CTRL_HOVER } else { CTRL });
+    let label = rec_label.trim_start_matches('●').trim().to_string();
+    p.circle_filled(Pos2::new(rec_r.left() + 15.0, rec_r.center().y), 4.5, if rec { Color32::WHITE } else { RED });
+    p.text(Pos2::new(rec_r.left() + 24.0, rec_r.center().y), Align2::LEFT_CENTER, label, bold(12.0), TEXT);
+    learnable(core, &resp, "Header/Record");
+    if resp.clicked() {
+        core.toggle_recording();
+    }
+    let resp = pill(ui, menu_r, "Menu", false);
+    egui::Popup::menu(&resp).show(|ui| menu(ui, core, st));
+}
+
+fn menu(ui: &mut Ui, core: &mut Core, st: &mut UiState) {
+    if ui.button("Settings…").clicked() {
+        st.settings_open = true;
+        ui.close();
+    }
+    if ui.button("MIDI & keyboard mapping…").clicked() {
+        st.mapping_open = true;
+        ui.close();
+    }
+    let learn = core.learn;
+    if ui.selectable_label(learn, "MIDI learn").clicked() {
+        core.learn = !learn;
+        core.last_touched = None;
+        ui.close();
+    }
+    ui.separator();
+    let met = core.session.master.metronome;
+    if ui.selectable_label(met, "Metronome").clicked() {
+        act_i(core, "Header/Metronome", !met as i32);
+    }
+    let header_owns = core.snap.clock.owner == ClockOwner::Header;
+    if ui.selectable_label(header_owns, "Header owns the clock").on_hover_text("Click to hand the clock to a playing synced deck / take it back").clicked() {
+        act_i(core, "Header/Master", 1);
+    }
+    let wc = core.session.wallclock;
+    if ui.selectable_label(wc, "Wallclock (tempo stays put)").clicked() {
+        act_i(core, "Header/Wallclock", !wc as i32);
+    }
+    ui.separator();
+    ui.horizontal(|ui| {
+        ui.label("Decks");
+        for n in [2usize, 4] {
+            if ui.selectable_label(core.settings.deck_count == n, n.to_string()).clicked() {
+                core.settings.deck_count = n;
+                st.focus = [0, 1];
+            }
+        }
+    });
+    ui.menu_button("Insert FX ▸", |ui| {
+        for c in 0..core.deck_count() {
+            if ui.button(format!("Channel {}", c + 1)).clicked() {
+                st.fx_open[c] = true;
+                ui.close();
             }
         }
     });
 }
 
-/// Crossfader or vector pad in the mixer column's spare space.
-pub fn mix_tools(ui: &mut Ui, core: &mut Core, rect: Rect) {
-    let mut child = ui.new_child(UiBuilder::new().max_rect(rect.shrink(4.0)));
-    let ui = &mut child;
-    let mode = core.session.mix_mode;
-    ui.horizontal(|ui| {
-        for (lbl, m) in [("OFF", MixMode::Off), ("X-FADER", MixMode::Crossfader { pos: 0.0, sharp: false }), ("VECTOR", MixMode::Vector { x: 0.5, y: 0.5 })] {
-            let on = std::mem::discriminant(&mode) == std::mem::discriminant(&m);
-            if ui.selectable_label(on, lbl).clicked() && !on {
-                core.session.mix_mode = m;
-                core.apply_mix_mode();
+fn strip_frame(ui: &Ui, rect: Rect, color: Color32, dashed: bool) {
+    let p = ui.painter();
+    p.rect_filled(rect, CornerRadius::same(10), Color32::from_rgb(0x15, 0x15, 0x19));
+    if dashed {
+        // Draw a dashed rounded outline (straight edges only).
+        let s = Stroke::new(1.0, Color32::from_gray(70));
+        for (a, b) in [
+            (rect.left_top() + Vec2::new(10.0, 0.0), rect.right_top() - Vec2::new(10.0, 0.0)),
+            (rect.left_bottom() + Vec2::new(10.0, 0.0), rect.right_bottom() - Vec2::new(10.0, 0.0)),
+            (rect.left_top() + Vec2::new(0.0, 10.0), rect.left_bottom() - Vec2::new(0.0, 10.0)),
+            (rect.right_top() + Vec2::new(0.0, 10.0), rect.right_bottom() - Vec2::new(0.0, 10.0)),
+        ] {
+            p.extend(egui::Shape::dashed_line(&[a, b], s, 5.0, 4.0));
+        }
+    } else {
+        p.rect_stroke(rect, CornerRadius::same(10), Stroke::new(1.5, color), egui::StrokeKind::Inside);
+    }
+}
+
+/// Vertical fader inside `track`. Returns the drag response.
+fn vfader(ui: &mut Ui, track: Rect, value: f32, color: Color32, meter: f32) -> (egui::Response, Option<f32>) {
+    let resp = ui.allocate_rect(track, Sense::click_and_drag());
+    let p = ui.painter();
+    p.rect_filled(track, CornerRadius::same(8), WELL);
+    let inner = track.shrink2(Vec2::new(0.0, 10.0));
+    let y = inner.bottom() - value.clamp(0.0, 1.0) * inner.height();
+    p.rect_filled(Rect::from_min_max(Pos2::new(track.left(), y), track.right_bottom()), CornerRadius::same(8), alpha(color, 0.28));
+    // Live meter along the right edge.
+    if meter > 0.0 {
+        let db = 20.0 * meter.max(1e-5).log10();
+        let t = ((db + 48.0) / 51.0).clamp(0.0, 1.0);
+        let my = inner.bottom() - t * inner.height();
+        p.rect_filled(
+            Rect::from_min_max(Pos2::new(track.right() - 5.0, my), Pos2::new(track.right() - 2.0, inner.bottom())),
+            CornerRadius::same(1),
+            if db > -0.5 { RED } else { lighten(color, 0.2) },
+        );
+    }
+    let hw = track.width() * 0.72;
+    let handle = Rect::from_center_size(Pos2::new(track.center().x, y), Vec2::new(hw, 18.0));
+    p.rect_filled(handle, CornerRadius::same(5), color);
+    p.line_segment([Pos2::new(handle.left() + 10.0, y), Pos2::new(handle.right() - 10.0, y)], Stroke::new(2.0, on(color)));
+    let mut new = None;
+    if resp.dragged() {
+        let fine = ui.input(|i| i.modifiers.shift);
+        new = Some((value - resp.drag_delta().y / inner.height() * if fine { 0.2 } else { 1.0 }).clamp(0.0, 1.0));
+    }
+    (resp, new)
+}
+
+fn strip(ui: &mut Ui, core: &mut Core, st: &mut UiState, ch: usize, rect: Rect) {
+    let n = ch + 1;
+    let a = |s: &str| format!("Mixer/CH{n}/{s}");
+    let cm = core.session.channels[ch].clone();
+    let p = cm.params;
+    let view = core.snap.channels[ch];
+    let color = DECK[ch];
+    let loaded = core.snap.decks[ch].loaded || core.session.decks[ch].mode == collective_engine::engine::DeckMode::Sampler;
+    strip_frame(ui, rect, color, !loaded);
+    let r = rect.shrink2(Vec2::new(8.0, 12.0));
+    let title_r = Rect::from_min_size(r.min, Vec2::new(r.width(), 16.0));
+    let tr = ui.allocate_rect(title_r, Sense::click()).on_hover_text("Right-click: mute, solo, trim, output…");
+    ui.painter().text(title_r.center(), Align2::CENTER_CENTER, format!("CH {n}"), mono(12.0), TEXT_DIM);
+    tr.context_menu(|ui| channel_menu(ui, core, ch));
+    let gain = core.settings.fader_curve.gain(p.volume);
+    let label = if p.mute { "MUTE".to_string() } else { db_text(gain) };
+    ui.painter().text(Pos2::new(r.center().x, title_r.bottom() + 16.0), Align2::CENTER_CENTER, label, mono(22.0), if p.mute { TEXT_FAINT } else { color });
+
+    // CUE pill.
+    let cue_r = Rect::from_min_size(Pos2::new(r.left() + 2.0, title_r.bottom() + 34.0), Vec2::new(r.width() - 4.0, 26.0));
+    let cue_style = if p.cue { Style::Outline(ORANGE, true) } else { Style::Outline(Color32::from_gray(64), false) };
+    let resp = button(ui, cue_r, "CUE", cue_style, mono(12.0));
+    if p.cue {
+        ui.painter().rect_filled(cue_r, CornerRadius::same(6), alpha(ORANGE, 0.16));
+    }
+    learnable(core, &resp, &a("Cue"));
+    if resp.clicked() {
+        act_i(core, &a("Cue"), !p.cue as i32);
+    }
+
+    // Fader.
+    let bottom_h = 30.0;
+    let track = Rect::from_min_max(Pos2::new(r.left() + 4.0, cue_r.bottom() + 14.0), Pos2::new(r.right() - 4.0, r.bottom() - bottom_h - 12.0));
+    let meter = view.post_peak[0].max(view.post_peak[1]);
+    let (resp, new) = vfader(ui, track, p.volume, if p.mute { Color32::from_gray(90) } else { color }, meter);
+    let resp = resp.on_hover_text(format!("Volume · {} · Ctrl-drag: trim ({:+.1} dB) · double-click: unity", core.settings.fader_curve.label(), p.trim_db));
+    learnable(core, &resp, &a("Volume"));
+    if !core.learn {
+        if let Some(v) = new {
+            if ui.input(|i| i.modifiers.command) {
+                let t = (p.trim_db / 12.0 + 0.5 + (v - p.volume)).clamp(0.0, 1.0);
+                act_f(core, &a("Trim"), t);
+            } else {
+                act_f(core, &a("Volume"), v);
             }
         }
-    });
-    match mode {
-        MixMode::Crossfader { .. } => {
-            let (r, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 20.0), Sense::click_and_drag());
-            let p = ui.painter();
-            p.rect_filled(Rect::from_center_size(r.center(), Vec2::new(r.width(), 4.0)), CornerRadius::same(2), Color32::from_gray(10));
-            let t = (core.session.crossfader + 1.0) / 2.0;
-            let x = r.left() + t * r.width();
-            p.rect_filled(Rect::from_center_size(Pos2::new(x, r.center().y), Vec2::new(12.0, 18.0)), CornerRadius::same(2), Color32::from_gray(160));
-            learnable(core, &resp, "Header/Crossfader");
-            if (resp.dragged() || resp.clicked()) && !core.learn {
-                if let Some(pos) = resp.interact_pointer_pos() {
-                    act_f(core, "Header/Crossfader", ((pos.x - r.left()) / r.width()).clamp(0.0, 1.0));
-                }
-            }
-            if resp.double_clicked() {
-                act_f(core, "Header/Crossfader", 0.5);
-            }
+        if resp.double_clicked() {
+            act_f(core, &a("Volume"), 1.0);
         }
-        MixMode::Vector { .. } => {
-            let side = ui.available_height().min(ui.available_width()) - 4.0;
-            let (r, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), side.max(30.0)), Sense::click_and_drag());
-            let p = ui.painter();
-            p.rect_filled(r, CornerRadius::same(3), WAVE_BG);
-            for (i, c) in [r.left_top(), r.right_top(), r.left_bottom(), r.right_bottom()].iter().enumerate() {
-                let off = Vec2::new(if c.x > r.center().x { -9.0 } else { 9.0 }, if c.y > r.center().y { -8.0 } else { 8.0 });
-                p.text(*c + off, Align2::CENTER_CENTER, format!("{}", i + 1), font(11.0), DECK[i]);
-            }
-            if (resp.dragged() || resp.clicked()) && !core.learn {
-                if let Some(pos) = resp.interact_pointer_pos() {
-                    core.session.vector = (((pos.x - r.left()) / r.width()).clamp(0.0, 1.0), ((pos.y - r.top()) / r.height()).clamp(0.0, 1.0));
-                    core.apply_mix_mode();
-                }
-            }
-            if resp.double_clicked() {
-                core.session.vector = (0.5, 0.5);
-                core.apply_mix_mode();
-            }
-            let (x, y) = core.session.vector;
-            ui.painter().circle_filled(Pos2::new(r.left() + x * r.width(), r.top() + y * r.height()), 5.0, RED);
+    }
+
+    // − FX +
+    let by = r.bottom() - bottom_h;
+    let bw = (r.width() - 8.0) / 3.0;
+    let minus = Rect::from_min_size(Pos2::new(r.left(), by), Vec2::new(bw, bottom_h));
+    let fx = Rect::from_min_size(Pos2::new(minus.right() + 4.0, by), Vec2::new(bw, bottom_h));
+    let plus = Rect::from_min_size(Pos2::new(fx.right() + 4.0, by), Vec2::new(bw, bottom_h));
+    if button(ui, minus, "−", Style::Dark, bold(16.0)).clicked() {
+        act_f(core, &a("Volume"), (p.volume - 0.05).max(0.0));
+    }
+    if button(ui, plus, "+", Style::Dark, bold(16.0)).clicked() {
+        act_f(core, &a("Volume"), (p.volume + 0.05).min(1.0));
+    }
+    let has = cm.fx.slots.iter().any(|s| s.is_some());
+    let fx_style = if has && !cm.fx.bypass_all { Style::Light } else { Style::Dark };
+    let resp = button(ui, fx, "FX", fx_style, bold(11.0)).on_hover_text("Insert effects (right-click: bypass all)");
+    // Slot dots.
+    let dots_y = fx.bottom() - 5.0;
+    for s in 0..4 {
+        let col = match (&cm.fx.slots[s], view.fx[s]) {
+            (None, _) => continue,
+            (Some(m), _) if m.missing => RED,
+            (Some(_), Some((_, SlotHealth::Failed, _))) => RED,
+            (Some(_), Some((true, _, _))) => GREEN,
+            _ => Color32::from_gray(110),
+        };
+        ui.painter().circle_filled(Pos2::new(fx.center().x - 9.0 + s as f32 * 6.0, dots_y), 1.8, col);
+    }
+    learnable(core, &resp, &a("FX"));
+    if resp.clicked() && !core.learn {
+        st.fx_open[ch] = !st.fx_open[ch];
+    }
+    if resp.secondary_clicked() {
+        act_i(core, &a("FX"), cm.fx.bypass_all as i32);
+    }
+}
+
+fn channel_menu(ui: &mut Ui, core: &mut Core, ch: usize) {
+    let n = ch + 1;
+    let a = |s: &str| format!("Mixer/CH{n}/{s}");
+    let p = core.session.channels[ch].params;
+    if ui.selectable_label(p.mute, "Mute").clicked() {
+        act_i(core, &a("Mute"), !p.mute as i32);
+    }
+    if ui.selectable_label(p.solo, "Solo").clicked() {
+        act_i(core, &a("Solo"), !p.solo as i32);
+    }
+    let fs = core.session.channels[ch].fader_start;
+    if ui.selectable_label(fs, "Fader start").clicked() {
+        act_i(core, &a("FaderStart"), !fs as i32);
+    }
+    ui.separator();
+    let mut trim = p.trim_db;
+    if ui.add(egui::Slider::new(&mut trim, -6.0..=6.0).text("Trim dB")).changed() {
+        act_f(core, &a("Trim"), trim / 12.0 + 0.5);
+    }
+    let mut res = p.res;
+    if ui.add(egui::Slider::new(&mut res, 0.0..=1.0).text("Filter resonance")).changed() {
+        act_f(core, &a("Filter2"), res);
+    }
+    let mut width = p.width;
+    if ui.add(egui::Slider::new(&mut width, 0.0..=1.0).text("Filter width")).changed() {
+        act_f(core, &a("Filter3"), width);
+    }
+    ui.separator();
+    ui.label("Output");
+    if ui.selectable_label(p.output == Output::Master, "Master").clicked() {
+        act_i(core, &a("Output"), 0);
+    }
+    for i in 0..4u8 {
+        if ui.selectable_label(p.output == Output::Pair(i), format!("Direct {}/{}", i * 2 + 1, i * 2 + 2)).clicked() {
+            act_i(core, &a("Output"), i as i32 + 1);
         }
-        _ => {}
+    }
+}
+
+fn master_strip(ui: &mut Ui, core: &mut Core, rect: Rect) {
+    strip_frame(ui, rect, Color32::from_gray(150), false);
+    let r = rect.shrink2(Vec2::new(8.0, 12.0));
+    let m = core.session.master.clone();
+    let s = core.snap;
+    let title_r = Rect::from_min_size(r.min, Vec2::new(r.width(), 16.0));
+    ui.painter().text(title_r.center(), Align2::CENTER_CENTER, "MASTER", mono(12.0), TEXT_DIM);
+    ui.painter().text(Pos2::new(r.center().x, title_r.bottom() + 16.0), Align2::CENTER_CENTER, db_text(MasterModel::knob_gain(m.volume)), mono(22.0), TEXT);
+    let lim_r = Rect::from_min_size(Pos2::new(r.left() + 2.0, title_r.bottom() + 34.0), Vec2::new(r.width() - 4.0, 26.0));
+    let style = if m.limiter { Style::Outline(LIGHT, true) } else { Style::Outline(Color32::from_gray(64), false) };
+    let resp = button(ui, lim_r, "LIMIT", style, mono(12.0)).on_hover_text(format!("Master limiter · reduction {:.1} dB", s.limiter_db));
+    learnable(core, &resp, "Header/Limiter");
+    if resp.clicked() {
+        act_i(core, "Header/Limiter", !m.limiter as i32);
+    }
+    let bottom_h = 30.0;
+    let track = Rect::from_min_max(Pos2::new(r.left() + 4.0, lim_r.bottom() + 14.0), Pos2::new(r.right() - 4.0, r.bottom() - bottom_h - 12.0));
+    let (resp, new) = vfader(ui, track, m.volume, Color32::from_gray(200), s.master.peak[0].max(s.master.peak[1]));
+    learnable(core, &resp, "Header/MasterVolume");
+    if let (Some(v), false) = (new, core.learn) {
+        act_f(core, "Header/MasterVolume", v);
+    }
+    if resp.double_clicked() {
+        act_f(core, "Header/MasterVolume", 0.85);
+    }
+    let by = r.bottom() - bottom_h;
+    let bw = (r.width() - 4.0) / 2.0;
+    if button(ui, Rect::from_min_size(Pos2::new(r.left(), by), Vec2::new(bw, bottom_h)), "−", Style::Dark, bold(16.0)).clicked() {
+        act_f(core, "Header/MasterVolume", (m.volume - 0.03).max(0.0));
+    }
+    if button(ui, Rect::from_min_size(Pos2::new(r.left() + bw + 4.0, by), Vec2::new(bw, bottom_h)), "+", Style::Dark, bold(16.0)).clicked() {
+        act_f(core, "Header/MasterVolume", (m.volume + 0.03).min(1.0));
+    }
+    let _ = NUM_DECKS;
+}
+
+fn crossfader(ui: &mut Ui, core: &mut Core, r: Rect) {
+    let resp = ui.allocate_rect(r, Sense::click_and_drag());
+    let p = ui.painter();
+    p.rect_filled(r, CornerRadius::same(8), WELL);
+    let active = matches!(core.session.mix_mode, MixMode::Crossfader { .. });
+    p.text(Pos2::new(r.left() + 14.0, r.center().y), Align2::LEFT_CENTER, "Crossfader", sans(13.0), if active { TEXT } else { TEXT_DIM });
+    let t = (core.session.crossfader + 1.0) / 2.0;
+    let x = r.left() + 10.0 + t * (r.width() - 20.0);
+    let h = Rect::from_center_size(Pos2::new(x, r.center().y), Vec2::new(14.0, r.height() - 6.0));
+    p.rect_filled(h, CornerRadius::same(4), if active { LIGHT } else { Color32::from_gray(120) });
+    p.line_segment([Pos2::new(x, h.top() + 6.0), Pos2::new(x, h.bottom() - 6.0)], Stroke::new(2.0, Color32::from_gray(30)));
+    let resp = resp.on_hover_text("Deck 1/3 ← → deck 2/4 (assign per channel in Settings). Double-click: centre.");
+    learnable(core, &resp, "Header/Crossfader");
+    if core.learn {
+        return;
+    }
+    if resp.dragged() || resp.clicked() {
+        if let Some(pos) = resp.interact_pointer_pos() {
+            act_f(core, "Header/Crossfader", ((pos.x - r.left() - 10.0) / (r.width() - 20.0)).clamp(0.0, 1.0));
+        }
+    }
+    if resp.double_clicked() {
+        act_f(core, "Header/Crossfader", 0.5);
     }
 }
