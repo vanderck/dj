@@ -1,0 +1,22 @@
+[project]
+name = "stems-train"
+version = "0.1.0"
+description = "Training and ONNX export for the Stems real-time separation model"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.26",
+    "torch>=2.3",
+    "soundfile>=0.12",
+    "onnx>=1.16",
+    "onnxruntime>=1.20",
+    "onnxscript>=0.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.setuptools]
+packages = ["stems_train"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

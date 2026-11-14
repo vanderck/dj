@@ -33,7 +33,7 @@ crates/stems-core     DSP engine: STFT, Separator trait, stem mixing, Focus EQ, 
                       threaded model runner, ONNX backend. No plugin dependencies; tested.
 crates/stems-plugin   nih-plug glue: parameters, IO layouts, latency, egui editor.
 xtask                 `cargo xtask bundle` → .clap / .vst3 bundles.
-models/tools          Reference STFT for training, test-model generator.
+models/               PyTorch training pipeline, ONNX export, teacher-distillation tool.
 docs/ARCHITECTURE.md  Signal flow, real-time rules, threading.
 docs/MODEL_CONTRACT.md  Tensor layout, STFT conventions and metadata a model must follow.
 ```
@@ -125,8 +125,9 @@ trained on MUSDB18, which is for non-commercial research only.
 
 1. ~~**Model integration**~~ — done: `ThreadedSeparator` + `OnnxModel`, see
    [docs/MODEL_CONTRACT.md](docs/MODEL_CONTRACT.md). Next: Core ML / DirectML execution providers.
-2. **Streaming low-latency model** — train a causal/limited-lookahead 4-stem model (~250 ms total
-   latency target) on commercially licensed data.
+2. **Streaming low-latency model** — pipeline in place ([models/README.md](models/README.md)):
+   band-split network with ~209 ms total latency, trainable on licensed multitracks or distilled
+   from HT-Demucs FT. Next: train on real data and evaluate.
 3. **Fixed internal sample rate** — resample to the model rate (e.g. 44.1 kHz) internally so
    quality and latency are independent of the host rate.
 4. **AU** via clap-wrapper, code signing and notarization, installers.
