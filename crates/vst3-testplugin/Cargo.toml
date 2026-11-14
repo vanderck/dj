@@ -1,0 +1,14 @@
+[package]
+name = "collective-vst3-testplugin"
+version.workspace = true
+edition.workspace = true
+license = "MIT OR Apache-2.0"
+publish = false
+description = "Test fixture: a tiny VST3 gain plugin used by the host's integration tests"
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+vst3 = "0.3.0"

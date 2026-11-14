@@ -1,0 +1,11 @@
+[package]
+name = "collective-vst3"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Minimal VST3 effect host for Collective's channel inserts"
+
+[dependencies]
+collective-engine.workspace = true
+vst3 = "0.3.0"
+libloading = "0.9.1"

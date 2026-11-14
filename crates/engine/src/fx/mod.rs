@@ -52,6 +52,11 @@ pub trait Effect: Send {
         0
     }
     fn reset(&mut self) {}
+    /// True if the effect reported an error during the last `process`
+    /// (e.g. a plugin returning an error code). The slot is then bypassed.
+    fn failed(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -204,7 +209,7 @@ impl FxSlot {
 
         let effect = &mut self.effect;
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| effect.process(buf, ctx)));
-        let mut ok = result.is_ok();
+        let mut ok = result.is_ok() && !self.effect.failed();
         if ok {
             for f in buf.iter() {
                 if !f[0].is_finite() || !f[1].is_finite() || f[0].abs() > 1000.0 || f[1].abs() > 1000.0 {
