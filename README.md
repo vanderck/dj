@@ -117,29 +117,38 @@ editor (every automatable parameter, with the plugin's own value text).
 
 ## Interface
 
-The Perform view mirrors the familiar 4-deck layout: decks 1 and 3 on the
-left, 2 and 4 on the right, channel strips in the middle, browser below.
+One screen, scaled to the window (1600×1000 design baseline; Settings → Scale
+adjusts it further):
 
-- **Deck header:** SYNC, deck badge (right-click: track/sampler, lock, grid
-  tools), title / artist / length, BAR/BEAT, REMAIN, ORIGINAL BPM, CURRENT BPM,
-  KEY (coloured on the Camelot wheel, transposed with pitch), QUANTIZE (click to
-  change), eject.
-- **Second row:** MASTER/FOLLOW, P (key lock), − 0 + transpose, a BEND strip on
-  the master deck or an EARLY ▼ LATE phase strip on followers, M (momentary
-  cues), /2, X2, SLIP, direction.
-- **Body:** tempo fader and play button on the left; zoomed and overview
-  waveforms coloured by cue section; 8 named cue pads; loop, I/O, skip, slip
-  loops 1/32–1/2 bar, D/T.
-- **Channel:** big volume knob with a dotted VU ring and trim ring
-  (Ctrl/Cmd-drag), F for fader start, FILTER (CUTOFF/RES/WIDTH; click the title
-  for EQ), CUE/MUTE/SOLO/FX, output.
-- **Browser:** ALL/HIST, search, harmonic filter, IMPORT, row zoom; ARTIST,
-  TITLE, ALBUM, LABEL, BPM, DURATION, KEY, GENRE, PLAY COUNT, DATE ADDED. Drag
-  rows onto a deck or double-click to load.
+- **Waveform lanes** across the top for all four decks, **beat-aligned**: every
+  lane uses the same pixels-per-beat, so synced decks line up vertically.
+  Played audio is dimmed; bar lines, named cue flags and loops are drawn on the
+  lane, and a progress strip with cue ticks sits under each. Drag a lane to
+  scrub, scroll to zoom, click the strip to jump.
+- **Two large decks** (left and right) and **two compact decks** below them.
+  **Swap** brings a compact deck into the large view.
+  - Large: title/artist, Camelot key chip (green border = mixes with the
+    master, red = clash), BPM and pitch %, remaining time; Cue (hold),
+    Play/Pause, Sync, Master/Follow, Key lock, Slip, Reverse (Shift-click:
+    backspin), Roll; 8 named cue pads; tempo slider (right-click: range);
+    In / Out / ÷2 / loop size / ×2 / « » jump; Hi / Mid / Low / Filter (click a
+    label to kill/reset). With **Roll** on, the loop-size button rolls while
+    held.
+  - Right-click a deck's number for track/sampler mode, lock, grid tools and
+    eject. Sampler decks show their step grid in the large view.
+- **Mixer** in the middle: tempo (drag or double-click), beat dots, Tap,
+  Quantize (right-click for the value), Rec, Menu; strips ordered
+  CH 3 · CH 1 · MASTER · CH 2 · CH 4 with level in dB, CUE (LIMIT on master),
+  fader with live meter (Ctrl/Cmd-drag: trim), and − FX +; right-click a strip
+  title for mute, solo, trim, filter resonance/width and output; crossfader
+  (decks 1/3 left, 2/4 right).
+- **Browser**: search, All tracks / History, *Fits deck N (key)* harmonic
+  filter, track stats, Import folder; Title, Artist, BPM, Key (Camelot +
+  musical), Match/Boost tag, Energy, Time, Genre; a deck badge marks loaded
+  tracks; hover a row for load-to buttons, or drag it onto a deck or lane.
 
-The GUI is egui (immediate mode, custom-painted controls), not a game engine:
-it redraws only what's needed, starts instantly and keeps the audio thread
-completely separate.
+Fonts: Inter and JetBrains Mono, bundled under the SIL Open Font License (see
+`crates/app/assets/fonts`). The GUI is egui with custom-painted controls.
 
 ## Other features
 
