@@ -666,8 +666,8 @@ name = "collective"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "collective-analysis",
  "collective-engine",
+ "collective-library",
  "cpal",
  "crossbeam-channel",
  "dirs",
@@ -681,24 +681,22 @@ dependencies = [
 ]
 
 [[package]]
-name = "collective-analysis"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "collective-engine",
- "hound",
- "rustfft",
- "serde",
- "serde_json",
- "symphonia",
-]
-
-[[package]]
 name = "collective-engine"
 version = "0.1.0"
 dependencies = [
  "rtrb",
  "serde",
+]
+
+[[package]]
+name = "collective-library"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "collective-engine",
+ "serde",
+ "serde_json",
+ "symphonia",
 ]
 
 [[package]]

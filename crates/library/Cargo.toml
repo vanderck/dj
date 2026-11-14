@@ -1,15 +1,13 @@
 [package]
-name = "collective-analysis"
+name = "collective-library"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Audio decoding and track analysis (BPM, beat grid, key, waveform, loudness)"
+description = "Track loading: decoding, Mixed In Key / Serato tag reading, waveforms, library scanning"
 
 [dependencies]
 collective-engine.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
-rustfft.workspace = true
 symphonia.workspace = true
-hound.workspace = true

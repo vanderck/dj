@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/engine", "crates/analysis", "crates/vst3host", "crates/vst3-testplugin", "crates/app"]
+members = ["crates/engine", "crates/library", "crates/vst3host", "crates/vst3-testplugin", "crates/app"]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,12 +10,12 @@ rust-version = "1.80"
 
 [workspace.dependencies]
 collective-engine = { path = "crates/engine" }
-collective-analysis = { path = "crates/analysis" }
+collective-library = { path = "crates/library" }
+collective-vst3 = { path = "crates/vst3host" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 anyhow = "1.0.104"
 rtrb = "0.4.1"
-rustfft = "6.4.1"
 symphonia = { version = "0.6.1", features = ["all"] }
 cpal = "0.18.2"
 midir = "0.11.1"
