@@ -58,11 +58,12 @@ def make_loader(ds, cfg: TrainConfig, shuffle_workers: bool) -> DataLoader:
     )
 
 
-def step_loss(model: StemsNet, mix, tgt):
+def step_loss(model: StemsNet, mix, tgt, sdr_weight: float = 0.05):
     masks = model(mix)
     frames = model.target_frames(mix.shape[-1])
-    est = apply_masks(masks, mix[..., frames])
-    return separation_loss(est, tgt[..., frames]), est, tgt[..., frames], mix[..., frames]
+    mix, tgt = mix[..., frames], tgt[..., frames]
+    est = apply_masks(masks, mix)
+    return separation_loss(est, tgt, mix, sdr_weight), est, tgt, mix
 
 
 @torch.no_grad()
@@ -120,6 +121,8 @@ def parse_args(argv=None) -> TrainConfig:
     p.add_argument("--eval-every", type=int, default=d.eval_every)
     p.add_argument("--ckpt-every", type=int, default=d.ckpt_every)
     p.add_argument("--remix-prob", type=float, default=d.remix_prob)
+    p.add_argument("--sdr-weight", type=float, default=d.sdr_weight,
+                   help="weight of the negative-SDR loss term (0 = compressed L1 only)")
     p.add_argument("--resume", default=None, help="checkpoint to continue from")
     p.add_argument("--sample-rate", type=int, default=m.sample_rate)
     p.add_argument("--fft-size", type=int, default=m.fft_size)
@@ -142,7 +145,8 @@ def parse_args(argv=None) -> TrainConfig:
         data=a.data, out=a.out, steps=a.steps, batch_size=a.batch_size,
         segment_seconds=a.segment_seconds, lr=a.lr, warmup_steps=a.warmup_steps,
         num_workers=a.num_workers, device=a.device, seed=a.seed, log_every=a.log_every,
-        eval_every=a.eval_every, ckpt_every=a.ckpt_every, remix_prob=a.remix_prob, model=model,
+        eval_every=a.eval_every, ckpt_every=a.ckpt_every, remix_prob=a.remix_prob,
+        sdr_weight=a.sdr_weight, model=model,
     )
     cfg.resume = a.resume
     return cfg
@@ -203,7 +207,7 @@ def train(cfg: TrainConfig) -> dict:
         if step >= cfg.steps:
             break
         mix, tgt = mix.to(device, non_blocking=True), tgt.to(device, non_blocking=True)
-        loss, *_ = step_loss(model, mix, tgt)
+        loss, *_ = step_loss(model, mix, tgt, cfg.sdr_weight)
         opt.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)

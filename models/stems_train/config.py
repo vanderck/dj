@@ -69,4 +69,5 @@ class TrainConfig:
     eval_every: int = 1000
     ckpt_every: int = 1000
     remix_prob: float = 0.5  # probability of mixing stems from different tracks
+    sdr_weight: float = 0.05  # weight of the negative-SDR term in the loss
     model: ModelConfig = field(default_factory=ModelConfig)

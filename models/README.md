@@ -110,6 +110,7 @@ Useful knobs (all CLI flags):
 | `--dilations` | `4,2,2,1` | temporal receptive field: 19 frames ≈ 440 ms |
 | `--fft-size` | 4096 | frequency resolution vs latency |
 | `--remix-prob` | 0.5 | mix stems from different songs (strong augmentation) |
+| `--sdr-weight` | 0.05 | weight of the negative-SDR loss term (see below) |
 
 ## 4. Export and try it in the plugin
 
@@ -138,6 +139,10 @@ export STEMS_MODEL=$PWD/models/stems-v1.onnx
   frame only for the same reason.
 - **Lookahead is structural.** The model sees `context_frames − 1 − lookahead` past frames and
   `lookahead` future frames; residual connections carry the target frame through.
+- **Loss.** Compressed-spectrum L1 (quiet detail) + 0.05 × negative SDR (loud, audible
+  content). The compressed term alone correlated poorly with separation quality: on a
+  single-batch overfit test it plateaued at +5 dB while the SDR term reached +13.5 dB in the same
+  150 steps. The SDR epsilon scales with the mixture energy so silent stems stay bounded.
 - **No complex tensors on device.** STFTs run on CPU in the data-loader workers; the model and
   loss work on real/imaginary planes, which keeps Apple MPS happy.
 - **Speed.** Bands of equal width are batched into single matmuls, which cut the exported graph
