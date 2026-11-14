@@ -1,0 +1,10 @@
+[package]
+name = "collective-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Realtime-safe DJ / live-performance audio engine"
+
+[dependencies]
+serde.workspace = true
+rtrb.workspace = true

@@ -1,0 +1,25 @@
+[package]
+name = "collective"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Collective: live performance DJ software"
+
+[[bin]]
+name = "collective"
+path = "src/main.rs"
+
+[dependencies]
+collective-engine.workspace = true
+collective-analysis.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+rtrb.workspace = true
+cpal.workspace = true
+midir.workspace = true
+rosc.workspace = true
+hound.workspace = true
+crossbeam-channel.workspace = true
+eframe.workspace = true
+dirs.workspace = true
