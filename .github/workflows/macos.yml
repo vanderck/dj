@@ -1,0 +1,89 @@
+name: macOS
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
+
+  package:
+    runs-on: macos-latest
+    permissions:
+      contents: write # to attach the .dmg to a release on tags
+    env:
+      # Optional. Without these the app is ad-hoc signed and not notarized.
+      MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+      # Optional repository variable: URL of an ONNX stem-separation model to bundle.
+      STEMS_MODEL_URL: ${{ vars.STEMS_MODEL_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: package
+
+      - name: Import signing certificate
+        if: env.MACOS_SIGN_IDENTITY != ''
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          echo "$MACOS_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/cert.p12" -P "$MACOS_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          rm "$RUNNER_TEMP/cert.p12"
+
+      - name: Download stem-separation model
+        if: env.STEMS_MODEL_URL != ''
+        run: curl -fsSL "$STEMS_MODEL_URL" -o "$RUNNER_TEMP/stems-model.onnx"
+
+      - name: Build and package
+        run: |
+          ARGS=(--universal)
+          [ -f "$RUNNER_TEMP/stems-model.onnx" ] && ARGS+=(--model "$RUNNER_TEMP/stems-model.onnx")
+          [ -n "$MACOS_SIGN_IDENTITY" ] && [ -n "$APPLE_ID" ] && ARGS+=(--notarize)
+          cargo xtask package-macos "${ARGS[@]}"
+
+      - name: Check the bundle
+        run: |
+          APP=target/package/Collective.app
+          plutil -lint "$APP/Contents/Info.plist"
+          codesign --verify --strict --verbose=2 "$APP"
+          lipo -info "$APP/Contents/MacOS/Collective" | tee /dev/stderr | grep -q "x86_64 arm64"
+          "$APP/Contents/MacOS/Collective" --help > /dev/null
+          hdiutil verify target/package/*.dmg
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Collective-macos
+          path: target/package/*.dmg
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" target/package/*.dmg --generate-notes || gh release upload "$GITHUB_REF_NAME" target/package/*.dmg --clobber

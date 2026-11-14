@@ -75,11 +75,22 @@ impl StemsWorker {
     }
 }
 
-/// Model from the settings, else `STEMS_MODEL`.
+/// Model from the settings, else `STEMS_MODEL`, else one bundled with the app.
 pub fn resolve_model(setting: Option<&Path>) -> Option<PathBuf> {
     setting
         .map(Path::to_path_buf)
         .or_else(|| std::env::var_os("STEMS_MODEL").filter(|v| !v.is_empty()).map(PathBuf::from))
+        .or_else(bundled_model)
+}
+
+/// File name of a model shipped with the app (see `cargo xtask package-macos --model`).
+pub const BUNDLED_MODEL: &str = "stems-model.onnx";
+
+/// `Collective.app/Contents/Resources/stems-model.onnx` on macOS, or next to the executable.
+pub fn bundled_model() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    [dir.join("../Resources").join(BUNDLED_MODEL), dir.join(BUNDLED_MODEL)].into_iter().find(|p| p.is_file())
 }
 
 fn run(job: Request, wanted: &[AtomicU64; NUM_DECKS], tx: &Sender<Update>) {

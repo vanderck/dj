@@ -23,6 +23,12 @@ cargo build --release
 ./target/release/collective --list-devices
 ```
 
+macOS app bundle and disk image (see [packaging/macos](packaging/macos/README.md)):
+
+```bash
+cargo xtask package-macos --universal
+```
+
 Linux needs the ALSA development headers to build (`libasound2-dev` on
 Debian/Ubuntu). The GUI uses wgpu and falls back to OpenGL automatically; set
 `COLLECTIVE_RENDERER=glow` to force OpenGL.
