@@ -132,3 +132,28 @@ fn realtime_paced_processing_has_no_underruns() {
     assert_eq!(stats.underruns.load(Relaxed), 0, "worker missed deadlines");
     assert!(!stats.failed.load(Relaxed));
 }
+
+#[test]
+fn offline_separation_with_the_model() {
+    use stems_core::offline::{separate_with_model, OfflineError};
+    for rate in [44_100u32, 48_000] {
+        let x: Vec<[f32; 2]> = (0..rate as usize)
+            .map(|i| {
+                let t = i as f32 / rate as f32;
+                let v = 0.4 * (std::f32::consts::TAU * 55.0 * t).sin()
+                    + 0.2 * (std::f32::consts::TAU * 1_200.0 * t).sin();
+                [v, v]
+            })
+            .collect();
+        let stems = separate_with_model(&x, rate, load(), &mut |_| true).unwrap();
+        assert!(stems.iter().all(|s| s.len() == x.len()));
+        let energy = |v: &[[f32; 2]]| v.iter().map(|f| f[0] * f[0]).sum::<f32>();
+        let (bass, total) = (energy(&stems[Stem::Bass as usize]), energy(&x));
+        assert!(
+            bass > 0.5 * total * 0.8,
+            "{rate} Hz: bass {bass} of {total}"
+        );
+    }
+    let cancelled = separate_with_model(&vec![[0.0; 2]; 100_000], 44_100, load(), &mut |_| false);
+    assert_eq!(cancelled.unwrap_err(), OfflineError::Cancelled);
+}

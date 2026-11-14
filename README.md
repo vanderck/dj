@@ -109,6 +109,30 @@ python models/tools/make_test_model.py crates/stems-core/tests/data/test_model.o
 If ONNX Runtime can't be downloaded at build time, use `--features onnx-dynamic` and set
 `ORT_DYLIB_PATH` to an existing `libonnxruntime` (e.g. from the `onnxruntime` pip package).
 
+## Using stems-core in other apps (offline separation)
+
+`stems-core` has no plugin dependencies. For software that has the whole track up front (DJ
+software separating on load, batch tools), `stems_core::offline` returns each stem as its own
+buffer, sample-aligned with the input, with the latency removed:
+
+```rust
+use stems_core::{offline, OnnxModel};
+
+let model = OnnxModel::from_file("model.onnx", &Default::default())?;
+let stems = offline::separate_with_model(&frames, sample_rate, model, &mut |progress| {
+    println!("{:.0}%", progress * 100.0);
+    true // return false to cancel
+})?;
+// stems[Stem::Vocals as usize] is a Vec<[f32; 2]> the same length as `frames`
+```
+
+- Input at any sample rate: it is resampled to the model's rate and the stems back.
+- The stems sum to the input (exactly when no resampling is needed), so an app can store three
+  stems and derive the fourth.
+- `offline::separate_with_heuristic` works without a model (placeholder quality).
+- Speed: `cargo run --release -p stems-core --features onnx --example offline -- model.onnx 60`.
+  The default-size model ran at 3.5x real time on a 4-core cloud CPU.
+
 ## Licensing note (read before shipping)
 
 nih-plug itself is ISC, but its **VST3 bindings (`vst3-sys`) are GPLv3**, so any binary built with

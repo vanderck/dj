@@ -7,14 +7,19 @@
 //! It has no dependency on any plugin framework so it can be unit-tested, benchmarked and reused
 //! from other front-ends (an offline CLI, a Swift/AUv3 shell over a C ABI, ...).
 //!
+//! For whole tracks (e.g. DJ software separating on load) use [`offline`], which returns each stem
+//! as its own sample-aligned buffer.
+//!
 //! Real-time contract: after [`StemEngine::new`] returns, [`StemEngine::process`] and
 //! [`StemEngine::reset`] never allocate, lock or block.
 
 mod engine;
 mod focus;
 mod model;
+pub mod offline;
 #[cfg(any(feature = "onnx", feature = "onnx-dynamic"))]
 mod onnx;
+mod resample;
 mod separator;
 mod settings;
 mod soundfield;
@@ -25,6 +30,7 @@ pub use focus::focus_weight;
 pub use model::{MaskModel, ModelError, ModelSpec, INPUT_PLANES};
 #[cfg(any(feature = "onnx", feature = "onnx-dynamic"))]
 pub use onnx::{OnnxModel, OnnxOptions};
+pub use resample::resample;
 pub use separator::{HeuristicSeparator, Separator, StemMasks};
 pub use settings::{FocusMode, FocusSettings, Settings, StemSettings};
 pub use soundfield::{
