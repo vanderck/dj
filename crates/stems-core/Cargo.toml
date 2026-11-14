@@ -2,6 +2,7 @@
 name = "stems-core"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "Real-time-safe STFT stem separation engine (DSP core, no plugin dependencies)"
 publish = false
 

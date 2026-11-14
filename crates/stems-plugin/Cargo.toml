@@ -2,6 +2,7 @@
 name = "stems-plugin"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "Real-time stem separation plugin (CLAP / VST3)"
 publish = false
 
