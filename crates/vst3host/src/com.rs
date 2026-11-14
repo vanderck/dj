@@ -271,6 +271,7 @@ impl ParamChanges {
         self.count.set(0);
     }
 
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.count.get()
     }
@@ -294,6 +295,7 @@ impl ParamChanges {
         }
     }
 
+    #[allow(dead_code)]
     pub fn get(&self, i: usize) -> Option<(u32, f64)> {
         (i < self.count.get()).then(|| {
             let q = &self.queues[i];
