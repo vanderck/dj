@@ -124,17 +124,9 @@ impl StemData {
             .fold(1.0f32, f32::max);
         let scale = peak / i16::MAX as f32;
         let q = |s: &[Frame]| -> Vec<[i16; 2]> {
-            s.iter()
-                .map(|f| [(f[0] / scale).round() as i16, (f[1] / scale).round() as i16])
-                .collect()
+            s.iter().map(|f| [(f[0] / scale).round() as i16, (f[1] / scale).round() as i16]).collect()
         };
-        Self {
-            track_id,
-            scale,
-            drums: q(drums),
-            bass: q(bass),
-            vocals: q(vocals),
-        }
+        Self { track_id, scale, drums: q(drums), bass: q(bass), vocals: q(vocals) }
     }
 
     pub fn len(&self) -> usize {
@@ -175,19 +167,12 @@ mod stem_tests {
     fn stems() -> (Vec<Frame>, [Vec<Frame>; 4]) {
         let n = 1000;
         let gen = |f: f32, a: f32| -> Vec<Frame> {
-            (0..n)
-                .map(|i| {
-                    let v = a * (i as f32 * f).sin();
-                    [v, 0.5 * v]
-                })
-                .collect()
+            (0..n).map(|i| {
+                let v = a * (i as f32 * f).sin();
+                [v, 0.5 * v]
+            }).collect()
         };
-        let s = [
-            gen(0.01, 0.3),
-            gen(0.002, 0.5),
-            gen(0.05, 0.2),
-            gen(0.13, 0.25),
-        ];
+        let s = [gen(0.01, 0.3), gen(0.002, 0.5), gen(0.05, 0.2), gen(0.13, 0.25)];
         let mix = (0..n)
             .map(|i| {
                 let mut f = [0.0; 2];

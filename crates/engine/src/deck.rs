@@ -102,22 +102,12 @@ impl DeckCtx {
 /// Notifications produced by a deck (forwarded to UI / OSC feedback).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum DeckEvent {
-    PlayState {
-        playing: bool,
-    },
+    PlayState { playing: bool },
     /// A hot cue was created in Perform. The UI decides whether to persist it.
-    CueSet {
-        idx: u8,
-        secs: f64,
-        end_secs: Option<f64>,
-    },
-    CueDeleted {
-        idx: u8,
-    },
+    CueSet { idx: u8, secs: f64, end_secs: Option<f64> },
+    CueDeleted { idx: u8 },
     /// A (possibly quantized) cue actually launched.
-    CueFire {
-        idx: u8,
-    },
+    CueFire { idx: u8 },
     EndOfTrack,
 }
 
@@ -398,22 +388,15 @@ impl Deck {
     }
 
     fn src_rate(&self) -> f64 {
-        self.track
-            .as_ref()
-            .map(|t| t.audio.sample_rate as f64)
-            .unwrap_or(self.out_rate)
+        self.track.as_ref().map(|t| t.audio.sample_rate as f64).unwrap_or(self.out_rate)
     }
 
     fn len_frames(&self) -> f64 {
-        self.track
-            .as_ref()
-            .map(|t| t.audio.frames.len() as f64)
-            .unwrap_or(0.0)
+        self.track.as_ref().map(|t| t.audio.frames.len() as f64).unwrap_or(0.0)
     }
 
     pub fn grid(&self) -> Option<BeatGrid> {
-        self.grid_override
-            .or_else(|| self.track.as_ref().and_then(|t| t.grid))
+        self.grid_override.or_else(|| self.track.as_ref().and_then(|t| t.grid))
     }
 
     fn frames_per_beat(&self) -> Option<f64> {
@@ -478,21 +461,12 @@ impl Deck {
             }
         }
         let speed = self.base_speed(ctx);
-        let lr = self.loop_region.unwrap_or(LoopRegion {
-            start: 0.0,
-            end: 0.0,
-        });
+        let lr = self.loop_region.unwrap_or(LoopRegion { start: 0.0, end: 0.0 });
         DeckView {
             track_id: self.track.as_ref().map(|t| t.id).unwrap_or(0),
             loaded: self.track.is_some(),
             playing: self.playing,
-            play_pending: matches!(
-                self.pending,
-                Some(Pending {
-                    action: PendingAction::Play,
-                    ..
-                })
-            ),
+            play_pending: matches!(self.pending, Some(Pending { action: PendingAction::Play, .. })),
             position_secs: self.pos / sr,
             duration_secs: self.len_frames() / sr,
             beat: self.beat().unwrap_or(0.0),
@@ -537,11 +511,7 @@ impl Deck {
             if let Some(c) = c {
                 self.hot_cues[i] = Some(LoopRegionOrPoint {
                     start: c.secs * sr,
-                    end: if c.kind == CueKind::Loop {
-                        c.end_secs.map(|e| e * sr)
-                    } else {
-                        None
-                    },
+                    end: if c.kind == CueKind::Loop { c.end_secs.map(|e| e * sr) } else { None },
                 });
             }
         }
@@ -593,11 +563,7 @@ impl Deck {
 
     fn boundary(&self, ctx: &DeckCtx, on_clock: bool) -> Option<f64> {
         let q = self.quantize_beats(ctx)?;
-        let b = if on_clock {
-            ctx.clock_beat
-        } else {
-            self.beat()?
-        };
+        let b = if on_clock { ctx.clock_beat } else { self.beat()? };
         let tol = 0.002;
         let next = ((b - tol) / q).ceil() * q;
         Some(next.max(b))
@@ -605,20 +571,8 @@ impl Deck {
 
     fn schedule(&mut self, ctx: &DeckCtx, action: PendingAction, on_clock: bool) -> bool {
         match self.boundary(ctx, on_clock) {
-            Some(at)
-                if (at
-                    - if on_clock {
-                        ctx.clock_beat
-                    } else {
-                        self.beat().unwrap_or(at)
-                    })
-                    > 0.002 =>
-            {
-                self.pending = Some(Pending {
-                    action,
-                    at_beat: at,
-                    on_clock,
-                });
+            Some(at) if (at - if on_clock { ctx.clock_beat } else { self.beat().unwrap_or(at) }) > 0.002 => {
+                self.pending = Some(Pending { action, at_beat: at, on_clock });
                 true
             }
             _ => false,
@@ -650,13 +604,7 @@ impl Deck {
 
     /// Pause immediately (tape stop, no quantize).
     pub fn pause(&mut self) {
-        if matches!(
-            self.pending,
-            Some(Pending {
-                action: PendingAction::Play,
-                ..
-            })
-        ) {
+        if matches!(self.pending, Some(Pending { action: PendingAction::Play, .. })) {
             self.pending = None;
         }
         if self.playing {
@@ -781,22 +729,12 @@ impl Deck {
                 let sr = self.src_rate();
                 let cue = if self.loop_on {
                     let l = self.loop_region.unwrap();
-                    LoopRegionOrPoint {
-                        start: l.start,
-                        end: Some(l.end),
-                    }
+                    LoopRegionOrPoint { start: l.start, end: Some(l.end) }
                 } else {
-                    LoopRegionOrPoint {
-                        start: self.snap(self.pos, ctx),
-                        end: None,
-                    }
+                    LoopRegionOrPoint { start: self.snap(self.pos, ctx), end: None }
                 };
                 self.hot_cues[i] = Some(cue);
-                self.emit(DeckEvent::CueSet {
-                    idx,
-                    secs: cue.start / sr,
-                    end_secs: cue.end.map(|e| e / sr),
-                });
+                self.emit(DeckEvent::CueSet { idx, secs: cue.start / sr, end_secs: cue.end.map(|e| e / sr) });
             }
             Some(_) => {
                 self.held_cue = Some(idx);
@@ -814,9 +752,7 @@ impl Deck {
     }
 
     fn fire_cue(&mut self, idx: u8, force_loop: bool, ctx: &DeckCtx) {
-        let Some(c) = self.hot_cues[idx as usize] else {
-            return;
-        };
+        let Some(c) = self.hot_cues[idx as usize] else { return };
         if self.slip && self.playing {
             // Keep the underlying playhead running.
             if !self.was_slip_engaged {
@@ -825,10 +761,7 @@ impl Deck {
         }
         self.jump_to(c.start);
         if let Some(end) = c.end {
-            self.loop_region = Some(LoopRegion {
-                start: c.start,
-                end,
-            });
+            self.loop_region = Some(LoopRegion { start: c.start, end });
             self.loop_on = true;
         } else if force_loop {
             // Loop from this cue to the next cue in time (or end of track).
@@ -839,10 +772,7 @@ impl Deck {
                 .map(|o| o.start)
                 .filter(|&s| s > c.start + 1.0)
                 .fold(self.len_frames(), f64::min);
-            self.loop_region = Some(LoopRegion {
-                start: c.start,
-                end: next,
-            });
+            self.loop_region = Some(LoopRegion { start: c.start, end: next });
             self.loop_on = true;
         }
         let _ = ctx;
@@ -879,11 +809,7 @@ impl Deck {
         if let Some(slot) = self.hot_cues.get_mut(idx as usize) {
             *slot = cue.map(|c| LoopRegionOrPoint {
                 start: c.secs * sr,
-                end: if c.kind == CueKind::Loop {
-                    c.end_secs.map(|e| e * sr)
-                } else {
-                    None
-                },
+                end: if c.kind == CueKind::Loop { c.end_secs.map(|e| e * sr) } else { None },
             });
         }
     }
@@ -903,10 +829,7 @@ impl Deck {
         let Some(fpb) = self.frames_per_beat() else {
             // No grid: assume 120 BPM so loops still work.
             let fpb = self.src_rate() * 0.5;
-            self.loop_region = Some(LoopRegion {
-                start: self.pos,
-                end: self.pos + beats * fpb,
-            });
+            self.loop_region = Some(LoopRegion { start: self.pos, end: self.pos + beats * fpb });
             self.loop_on = true;
             return;
         };
@@ -917,10 +840,7 @@ impl Deck {
         } else {
             self.pos
         };
-        self.loop_region = Some(LoopRegion {
-            start,
-            end: start + beats * fpb,
-        });
+        self.loop_region = Some(LoopRegion { start, end: start + beats * fpb });
         self.loop_on = true;
     }
 
@@ -971,22 +891,13 @@ impl Deck {
     /// Free-loop knob: `ms` sets a very short loop in milliseconds.
     pub fn free_loop(&mut self, ms: f64) {
         let len = (ms.clamp(5.0, 2000.0) * 0.001 * self.src_rate()).max(32.0);
-        let start = self
-            .loop_region
-            .filter(|_| self.loop_on)
-            .map(|l| l.start)
-            .unwrap_or(self.pos);
-        self.loop_region = Some(LoopRegion {
-            start,
-            end: start + len,
-        });
+        let start = self.loop_region.filter(|_| self.loop_on).map(|l| l.start).unwrap_or(self.pos);
+        self.loop_region = Some(LoopRegion { start, end: start + len });
         self.loop_on = true;
     }
 
     pub fn loop_move(&mut self, beats: f64) {
-        let Some(fpb) = self.frames_per_beat() else {
-            return;
-        };
+        let Some(fpb) = self.frames_per_beat() else { return };
         if let Some(mut l) = self.loop_region {
             let d = beats * fpb;
             l.start += d;
@@ -1003,15 +914,10 @@ impl Deck {
     pub fn slip_loop(&mut self, beats: f64, pressed: bool, ctx: &DeckCtx) {
         if pressed {
             if self.roll.is_none() {
-                self.roll = Some(Roll {
-                    saved_loop: self.loop_region,
-                    saved_loop_on: self.loop_on,
-                });
+                self.roll = Some(Roll { saved_loop: self.loop_region, saved_loop_on: self.loop_on });
                 self.slip_pos = self.pos;
             }
-            let Some(fpb) = self.frames_per_beat() else {
-                return;
-            };
+            let Some(fpb) = self.frames_per_beat() else { return };
             let b = self.beat().unwrap();
             let start = if self.quantize_beats(ctx).is_some() || true {
                 let unit = beats.min(1.0);
@@ -1019,10 +925,7 @@ impl Deck {
             } else {
                 self.pos
             };
-            self.loop_region = Some(LoopRegion {
-                start,
-                end: start + beats * fpb,
-            });
+            self.loop_region = Some(LoopRegion { start, end: start + beats * fpb });
             self.loop_on = true;
         } else if let Some(r) = self.roll.take() {
             self.loop_region = r.saved_loop;
@@ -1157,10 +1060,7 @@ impl Deck {
     /// Move the grid so that a downbeat sits at the current position.
     pub fn grid_start_here(&mut self) -> Option<BeatGrid> {
         let g = self.grid()?;
-        let ng = BeatGrid {
-            bpm: g.bpm,
-            anchor_secs: self.position_secs(),
-        };
+        let ng = BeatGrid { bpm: g.bpm, anchor_secs: self.position_secs() };
         self.replace_grid(Some(ng));
         Some(ng)
     }
@@ -1177,10 +1077,7 @@ impl Deck {
     fn slip_engaged(&self) -> bool {
         self.roll.is_some()
             || (self.slip
-                && (self.loop_on
-                    || self.reverse
-                    || self.backspin.is_some()
-                    || (self.momentary_cues && self.held_cue.is_some())))
+                && (self.loop_on || self.reverse || self.backspin.is_some() || (self.momentary_cues && self.held_cue.is_some())))
     }
 
     /// Render one block. `out` is overwritten.
@@ -1305,10 +1202,8 @@ impl Deck {
                 stems: stems_mix,
             };
 
-            let want_stretch = (self.keylock || self.semitones != 0.0)
-                && self.motor >= 1.0
-                && v > 0.0
-                && self.backspin.is_none();
+            let want_stretch =
+                (self.keylock || self.semitones != 0.0) && self.motor >= 1.0 && v > 0.0 && self.backspin.is_none();
             if want_stretch != self.stretch_active {
                 self.stretch_active = want_stretch;
                 self.stretcher.reset();
@@ -1322,10 +1217,7 @@ impl Deck {
                 if self.xfade > 0 {
                     let t = self.xfade as f32 / XFADE_FRAMES as f32;
                     self.xfade -= 1;
-                    [
-                        s[0] * (1.0 - t) + vari[0] * t,
-                        s[1] * (1.0 - t) + vari[1] * t,
-                    ]
+                    [s[0] * (1.0 - t) + vari[0] * t, s[1] * (1.0 - t) + vari[1] * t]
                 } else {
                     s
                 }
@@ -1361,10 +1253,7 @@ impl Deck {
             if self.loop_on {
                 if let Some(l) = self.loop_region {
                     let ll = l.len().max(1.0);
-                    if d > 0.0
-                        && self.pos >= l.end
-                        && self.pos < l.end + ll.max(fpb.unwrap_or(0.0)) * 4.0
-                    {
+                    if d > 0.0 && self.pos >= l.end && self.pos < l.end + ll.max(fpb.unwrap_or(0.0)) * 4.0 {
                         self.pos -= ll * ((self.pos - l.start) / ll).floor();
                     } else if d < 0.0 && self.pos < l.start && self.pos > l.start - ll {
                         self.pos += ll;

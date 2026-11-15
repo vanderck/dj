@@ -31,11 +31,7 @@ pub struct ParamSpec {
 
 impl ParamSpec {
     const fn new(name: &'static str, default: f32, kind: ParamKind) -> Self {
-        Self {
-            name,
-            default,
-            kind,
-        }
+        Self { name, default, kind }
     }
 
     pub fn steps(&self) -> Option<usize> {
@@ -97,13 +93,9 @@ pub enum NativeFx {
     Utility,
 }
 
-const NOTE_DIVS: &[&str] = &[
-    "1/32", "1/16", "1/8", "1/8D", "1/4", "1/4D", "1/2", "1 bar", "2 bars",
-];
+const NOTE_DIVS: &[&str] = &["1/32", "1/16", "1/8", "1/8D", "1/4", "1/4D", "1/2", "1 bar", "2 bars"];
 const NOTE_BEATS: &[f64] = &[0.125, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 4.0, 8.0];
-const LFO_DIVS: &[&str] = &[
-    "1/4", "1/2", "1 beat", "2 beats", "1 bar", "2 bars", "4 bars", "8 bars",
-];
+const LFO_DIVS: &[&str] = &["1/4", "1/2", "1 beat", "2 beats", "1 bar", "2 bars", "4 bars", "8 bars"];
 const LFO_BEATS: &[f64] = &[0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0];
 
 impl NativeFx {
@@ -174,132 +166,124 @@ impl NativeFx {
                 #[allow(unused_imports)]
                 use ParamKind::*;
                 const P: &[ParamSpec] = &[
-                    ParamSpec::new("Time", 4.0 / 8.0, Choice(NOTE_DIVS)),
-                    ParamSpec::new("Feedback", 0.45, Percent),
-                    ParamSpec::new("Tone", 0.5, Linear(-1.0, 1.0, "")),
-                    ParamSpec::new("Ping-Pong", 1.0, Choice(&["Off", "On"])),
-                    ParamSpec::new("Level", 0.6, Percent),
-                ];
+                ParamSpec::new("Time", 4.0 / 8.0, Choice(NOTE_DIVS)),
+                ParamSpec::new("Feedback", 0.45, Percent),
+                ParamSpec::new("Tone", 0.5, Linear(-1.0, 1.0, "")),
+                ParamSpec::new("Ping-Pong", 1.0, Choice(&["Off", "On"])),
+                ParamSpec::new("Level", 0.6, Percent),
+            ];
                 P
             }
             NativeFx::Reverb => {
                 #[allow(unused_imports)]
                 use ParamKind::*;
                 const P: &[ParamSpec] = &[
-                    ParamSpec::new("Size", 0.7, Percent),
-                    ParamSpec::new("Damping", 0.5, Percent),
-                    ParamSpec::new("Width", 1.0, Percent),
-                    ParamSpec::new("Level", 0.4, Percent),
-                    ParamSpec::new("Low Cut", 0.2, Hz(20.0, 1000.0)),
-                ];
+                ParamSpec::new("Size", 0.7, Percent),
+                ParamSpec::new("Damping", 0.5, Percent),
+                ParamSpec::new("Width", 1.0, Percent),
+                ParamSpec::new("Level", 0.4, Percent),
+                ParamSpec::new("Low Cut", 0.2, Hz(20.0, 1000.0)),
+            ];
                 P
             }
             NativeFx::Flanger => {
                 #[allow(unused_imports)]
                 use ParamKind::*;
                 const P: &[ParamSpec] = &[
-                    ParamSpec::new("Rate", 4.0 / 7.0, Choice(LFO_DIVS)),
-                    ParamSpec::new("Depth", 0.7, Percent),
-                    ParamSpec::new("Feedback", 0.75, Linear(-0.95, 0.95, "")),
-                    ParamSpec::new("Delay", 0.3, Ms(0.5, 10.0)),
-                ];
+                ParamSpec::new("Rate", 4.0 / 7.0, Choice(LFO_DIVS)),
+                ParamSpec::new("Depth", 0.7, Percent),
+                ParamSpec::new("Feedback", 0.75, Linear(-0.95, 0.95, "")),
+                ParamSpec::new("Delay", 0.3, Ms(0.5, 10.0)),
+            ];
                 P
             }
             NativeFx::Phaser => {
                 #[allow(unused_imports)]
                 use ParamKind::*;
                 const P: &[ParamSpec] = &[
-                    ParamSpec::new("Rate", 4.0 / 7.0, Choice(LFO_DIVS)),
-                    ParamSpec::new("Depth", 0.8, Percent),
-                    ParamSpec::new("Feedback", 0.5, Percent),
-                    ParamSpec::new("Stages", 1.0 / 3.0, Choice(&["2", "4", "6", "8"])),
-                ];
+                ParamSpec::new("Rate", 4.0 / 7.0, Choice(LFO_DIVS)),
+                ParamSpec::new("Depth", 0.8, Percent),
+                ParamSpec::new("Feedback", 0.5, Percent),
+                ParamSpec::new("Stages", 1.0 / 3.0, Choice(&["2", "4", "6", "8"])),
+            ];
                 P
             }
             NativeFx::AutoFilter => {
                 #[allow(unused_imports)]
                 use ParamKind::*;
                 const P: &[ParamSpec] = &[
-                    ParamSpec::new("Cutoff", 0.6, Hz(40.0, 18000.0)),
-                    ParamSpec::new("Resonance", 0.4, Percent),
-                    ParamSpec::new("Mode", 0.0, Choice(&["Low-pass", "Band-pass", "High-pass"])),
-                    ParamSpec::new("LFO Depth", 0.5, Percent),
-                    ParamSpec::new("LFO Rate", 2.0 / 7.0, Choice(LFO_DIVS)),
-                    ParamSpec::new(
-                        "LFO Shape",
-                        0.0,
-                        Choice(&["Sine", "Triangle", "Saw Down", "Square"]),
-                    ),
-                ];
+                ParamSpec::new("Cutoff", 0.6, Hz(40.0, 18000.0)),
+                ParamSpec::new("Resonance", 0.4, Percent),
+                ParamSpec::new("Mode", 0.0, Choice(&["Low-pass", "Band-pass", "High-pass"])),
+                ParamSpec::new("LFO Depth", 0.5, Percent),
+                ParamSpec::new("LFO Rate", 2.0 / 7.0, Choice(LFO_DIVS)),
+                ParamSpec::new("LFO Shape", 0.0, Choice(&["Sine", "Triangle", "Saw Down", "Square"])),
+            ];
                 P
             }
             NativeFx::Bitcrusher => {
                 #[allow(unused_imports)]
                 use ParamKind::*;
                 const P: &[ParamSpec] = &[
-                    ParamSpec::new("Bits", 0.5, Linear(2.0, 16.0, " bit")),
-                    ParamSpec::new("Downsample", 0.2, Linear(1.0, 32.0, "x")),
-                ];
+                ParamSpec::new("Bits", 0.5, Linear(2.0, 16.0, " bit")),
+                ParamSpec::new("Downsample", 0.2, Linear(1.0, 32.0, "x")),
+            ];
                 P
             }
             NativeFx::TranceGate => {
                 #[allow(unused_imports)]
                 use ParamKind::*;
                 const P: &[ParamSpec] = &[
-                    ParamSpec::new("Division", 1.0 / 8.0, Choice(NOTE_DIVS)),
-                    ParamSpec::new("Depth", 1.0, Percent),
-                    ParamSpec::new("Duty", 0.5, Percent),
-                    ParamSpec::new("Smooth", 0.2, Ms(0.5, 30.0)),
-                    ParamSpec::new(
-                        "Pattern",
-                        0.0,
-                        Choice(&["Straight", "Offbeat", "Tresillo", "Skip", "Build"]),
-                    ),
-                ];
+                ParamSpec::new("Division", 1.0 / 8.0, Choice(NOTE_DIVS)),
+                ParamSpec::new("Depth", 1.0, Percent),
+                ParamSpec::new("Duty", 0.5, Percent),
+                ParamSpec::new("Smooth", 0.2, Ms(0.5, 30.0)),
+                ParamSpec::new("Pattern", 0.0, Choice(&["Straight", "Offbeat", "Tresillo", "Skip", "Build"])),
+            ];
                 P
             }
             NativeFx::BeatRepeat => {
                 #[allow(unused_imports)]
                 use ParamKind::*;
                 const P: &[ParamSpec] = &[
-                    ParamSpec::new("Slice", 2.0 / 8.0, Choice(NOTE_DIVS)),
-                    ParamSpec::new("Decay", 0.0, Percent),
-                    ParamSpec::new("Pitch", 0.5, Linear(-12.0, 12.0, " st")),
-                ];
+                ParamSpec::new("Slice", 2.0 / 8.0, Choice(NOTE_DIVS)),
+                ParamSpec::new("Decay", 0.0, Percent),
+                ParamSpec::new("Pitch", 0.5, Linear(-12.0, 12.0, " st")),
+            ];
                 P
             }
             NativeFx::Distortion => {
                 #[allow(unused_imports)]
                 use ParamKind::*;
                 const P: &[ParamSpec] = &[
-                    ParamSpec::new("Drive", 0.3, Db(0.0, 36.0)),
-                    ParamSpec::new("Tone", 0.8, Hz(800.0, 18000.0)),
-                    ParamSpec::new("Output", 0.75, Db(-24.0, 6.0)),
-                    ParamSpec::new("Shape", 0.0, Choice(&["Soft", "Hard", "Fold"])),
-                ];
+                ParamSpec::new("Drive", 0.3, Db(0.0, 36.0)),
+                ParamSpec::new("Tone", 0.8, Hz(800.0, 18000.0)),
+                ParamSpec::new("Output", 0.75, Db(-24.0, 6.0)),
+                ParamSpec::new("Shape", 0.0, Choice(&["Soft", "Hard", "Fold"])),
+            ];
                 P
             }
             NativeFx::Compressor => {
                 #[allow(unused_imports)]
                 use ParamKind::*;
                 const P: &[ParamSpec] = &[
-                    ParamSpec::new("Threshold", 0.6, Db(-48.0, 0.0)),
-                    ParamSpec::new("Ratio", 0.2, Linear(1.0, 20.0, ":1")),
-                    ParamSpec::new("Attack", 0.1, Ms(0.1, 100.0)),
-                    ParamSpec::new("Release", 0.2, Ms(10.0, 1000.0)),
-                    ParamSpec::new("Makeup", 0.0, Db(0.0, 24.0)),
-                ];
+                ParamSpec::new("Threshold", 0.6, Db(-48.0, 0.0)),
+                ParamSpec::new("Ratio", 0.2, Linear(1.0, 20.0, ":1")),
+                ParamSpec::new("Attack", 0.1, Ms(0.1, 100.0)),
+                ParamSpec::new("Release", 0.2, Ms(10.0, 1000.0)),
+                ParamSpec::new("Makeup", 0.0, Db(0.0, 24.0)),
+            ];
                 P
             }
             NativeFx::Utility => {
                 #[allow(unused_imports)]
                 use ParamKind::*;
                 const P: &[ParamSpec] = &[
-                    ParamSpec::new("Gain", 60.0 / 72.0, Db(-60.0, 12.0)),
-                    ParamSpec::new("Width", 0.5, Linear(0.0, 2.0, "x")),
-                    ParamSpec::new("Pan", 0.5, Linear(-1.0, 1.0, "")),
-                    ParamSpec::new("Bass Mono", 0.0, Choice(&["Off", "On"])),
-                ];
+                ParamSpec::new("Gain", 60.0 / 72.0, Db(-60.0, 12.0)),
+                ParamSpec::new("Width", 0.5, Linear(0.0, 2.0, "x")),
+                ParamSpec::new("Pan", 0.5, Linear(-1.0, 1.0, "")),
+                ParamSpec::new("Bass Mono", 0.0, Choice(&["Off", "On"])),
+            ];
                 P
             }
         }
@@ -366,16 +350,8 @@ impl Echo {
 
     fn update_tone(&mut self) {
         // Negative tone darkens the repeats, positive thins them out.
-        let lp = if self.tone < 0.0 {
-            log_map(18000.0, 1200.0, -self.tone)
-        } else {
-            18000.0
-        };
-        let hp = if self.tone > 0.0 {
-            log_map(20.0, 1500.0, self.tone)
-        } else {
-            20.0
-        };
+        let lp = if self.tone < 0.0 { log_map(18000.0, 1200.0, -self.tone) } else { 18000.0 };
+        let hp = if self.tone > 0.0 { log_map(20.0, 1500.0, self.tone) } else { 20.0 };
         self.lp.set_lowpass(self.sr, lp, 0.7);
         self.hp.set_highpass(self.sr, hp, 0.7);
     }
@@ -416,15 +392,9 @@ impl Effect for Echo {
             let input = *f;
             let w = if self.ping {
                 // Cross-feed for ping-pong; mono-sum input enters left only.
-                [
-                    undenormal((input[0] + input[1]) * 0.5 + fb[1] * self.feedback),
-                    undenormal(fb[0] * self.feedback),
-                ]
+                [undenormal((input[0] + input[1]) * 0.5 + fb[1] * self.feedback), undenormal(fb[0] * self.feedback)]
             } else {
-                [
-                    undenormal(input[0] + fb[0] * self.feedback),
-                    undenormal(input[1] + fb[1] * self.feedback),
-                ]
+                [undenormal(input[0] + fb[0] * self.feedback), undenormal(input[1] + fb[1] * self.feedback)]
             };
             self.buf[self.pos] = [w[0].clamp(-4.0, 4.0), w[1].clamp(-4.0, 4.0)];
             self.pos = (self.pos + 1) % n;
@@ -448,11 +418,7 @@ struct Comb {
 
 impl Comb {
     fn new(len: usize) -> Self {
-        Self {
-            buf: vec![0.0; len],
-            pos: 0,
-            store: 0.0,
-        }
+        Self { buf: vec![0.0; len], pos: 0, store: 0.0 }
     }
 
     #[inline]
@@ -472,10 +438,7 @@ struct Allpass {
 
 impl Allpass {
     fn new(len: usize) -> Self {
-        Self {
-            buf: vec![0.0; len],
-            pos: 0,
-        }
+        Self { buf: vec![0.0; len], pos: 0 }
     }
 
     #[inline]
@@ -506,13 +469,8 @@ impl Reverb {
         let s = sr / 44100.0;
         let mk = |spread: usize| -> (Vec<Comb>, Vec<Allpass>) {
             (
-                COMBS
-                    .iter()
-                    .map(|&l| Comb::new(((l + spread) as f32 * s) as usize))
-                    .collect(),
-                APS.iter()
-                    .map(|&l| Allpass::new(((l + spread) as f32 * s) as usize))
-                    .collect(),
+                COMBS.iter().map(|&l| Comb::new(((l + spread) as f32 * s) as usize)).collect(),
+                APS.iter().map(|&l| Allpass::new(((l + spread) as f32 * s) as usize)).collect(),
             )
         };
         let (cl, al) = mk(0);
@@ -594,15 +552,7 @@ struct Flanger {
 
 impl Flanger {
     fn new(sr: f32) -> Self {
-        Self {
-            sr,
-            buf: vec![[0.0; 2]; (sr * 0.03) as usize],
-            pos: 0,
-            rate: 4.0,
-            depth: 0.7,
-            feedback: 0.7,
-            delay_ms: 3.0,
-        }
+        Self { sr, buf: vec![[0.0; 2]; (sr * 0.03) as usize], pos: 0, rate: 4.0, depth: 0.7, feedback: 0.7, delay_ms: 3.0 }
     }
 }
 
@@ -654,15 +604,7 @@ struct Phaser {
 
 impl Phaser {
     fn new(sr: f32) -> Self {
-        Self {
-            sr,
-            state: [[0.0; 8]; 2],
-            last: [0.0; 2],
-            rate: 4.0,
-            depth: 0.8,
-            feedback: 0.5,
-            stages: 4,
-        }
+        Self { sr, state: [[0.0; 8]; 2], last: [0.0; 2], rate: 4.0, depth: 0.8, feedback: 0.5, stages: 4 }
     }
 }
 
@@ -713,16 +655,7 @@ struct AutoFilter {
 
 impl AutoFilter {
     fn new(sr: f32) -> Self {
-        Self {
-            sr,
-            svf: Svf::default(),
-            cutoff: 0.6,
-            res: 0.4,
-            mode: 0,
-            depth: 0.5,
-            rate: 2.0,
-            shape: 0,
-        }
+        Self { sr, svf: Svf::default(), cutoff: 0.6, res: 0.4, mode: 0, depth: 0.5, rate: 2.0, shape: 0 }
     }
 }
 
@@ -756,8 +689,7 @@ impl Effect for AutoFilter {
                     }
                 };
                 let v = (self.cutoff + lfo * self.depth * 0.5).clamp(0.0, 1.0);
-                self.svf
-                    .set(self.sr, log_map(40.0, 18000.0, v), self.res * 0.9);
+                self.svf.set(self.sr, log_map(40.0, 18000.0, v), self.res * 0.9);
             }
             for ch in 0..2 {
                 let o = self.svf.tick(ch, f[ch]);
@@ -800,10 +732,7 @@ impl Effect for Bitcrusher {
             self.counter += 1.0;
             if self.counter >= self.down {
                 self.counter -= self.down;
-                self.hold = [
-                    (f[0] * levels).round() / levels,
-                    (f[1] * levels).round() / levels,
-                ];
+                self.hold = [(f[0] * levels).round() / levels, (f[1] * levels).round() / levels];
             }
             *f = self.hold;
         }
@@ -823,19 +752,12 @@ struct TranceGate {
 
 impl TranceGate {
     fn new(sr: f32) -> Self {
-        Self {
-            sr,
-            div: 0.25,
-            depth: 1.0,
-            duty: 0.5,
-            smooth: Smoother::new(1.0, 5.0, sr),
-            pattern: 0,
-        }
+        Self { sr, div: 0.25, depth: 1.0, duty: 0.5, smooth: Smoother::new(1.0, 5.0, sr), pattern: 0 }
     }
 }
 
 const GATE_PATTERNS: [u16; 5] = [
-    0xFFFF,                // straight
+    0xFFFF,              // straight
     0b0101_0101_0101_0101, // offbeat (steps 1,3,5... when counting from 0)
     0b0100_1001_0100_1001, // tresillo-ish (3-3-2)
     0b1011_0110_1101_1011, // skip
@@ -970,13 +892,7 @@ struct Distortion {
 
 impl Distortion {
     fn new(sr: f32) -> Self {
-        Self {
-            sr,
-            drive: 1.0,
-            out: 1.0,
-            shape: 0,
-            lp: Biquad::lowpass(sr, 12000.0, 0.7),
-        }
+        Self { sr, drive: 1.0, out: 1.0, shape: 0, lp: Biquad::lowpass(sr, 12000.0, 0.7) }
     }
 }
 
@@ -984,9 +900,7 @@ impl Effect for Distortion {
     fn set_param(&mut self, i: usize, v: f32) {
         match i {
             0 => self.drive = db_to_gain(v * 36.0),
-            1 => self
-                .lp
-                .set_lowpass(self.sr, log_map(800.0, 18000.0, v), 0.7),
+            1 => self.lp.set_lowpass(self.sr, log_map(800.0, 18000.0, v), 0.7),
             2 => self.out = db_to_gain(-24.0 + v * 30.0),
             3 => self.shape = choice_index(v, 3),
             _ => {}
@@ -1023,15 +937,7 @@ struct Compressor {
 
 impl Compressor {
     fn new(sr: f32) -> Self {
-        Self {
-            sr,
-            thresh_db: -18.0,
-            ratio: 4.0,
-            att: 0.0,
-            rel: 0.0,
-            makeup: 1.0,
-            env_db: 0.0,
-        }
+        Self { sr, thresh_db: -18.0, ratio: 4.0, att: 0.0, rel: 0.0, makeup: 1.0, env_db: 0.0 }
     }
 
     fn coef(&self, ms: f32) -> f32 {
@@ -1056,11 +962,7 @@ impl Effect for Compressor {
             let peak = f[0].abs().max(f[1].abs()).max(1e-6);
             let over = (20.0 * peak.log10() - self.thresh_db).max(0.0);
             let target = over * (1.0 - 1.0 / self.ratio);
-            let c = if target > self.env_db {
-                self.att
-            } else {
-                self.rel
-            };
+            let c = if target > self.env_db { self.att } else { self.rel };
             self.env_db = target + (self.env_db - target) * c;
             let g = db_to_gain(-self.env_db) * self.makeup;
             f[0] *= g;
@@ -1081,13 +983,7 @@ struct Utility {
 
 impl Utility {
     fn new(sr: f32) -> Self {
-        Self {
-            gain: Smoother::new(1.0, 10.0, sr),
-            width: 1.0,
-            pan: 0.0,
-            bass_mono: false,
-            xo: crate::dsp::Lr4Crossover::new(sr, 150.0),
-        }
+        Self { gain: Smoother::new(1.0, 10.0, sr), width: 1.0, pan: 0.0, bass_mono: false, xo: crate::dsp::Lr4Crossover::new(sr, 150.0) }
     }
 }
 
@@ -1096,8 +992,7 @@ impl Effect for Utility {
         match i {
             0 => {
                 let db = -60.0 + v * 72.0;
-                self.gain
-                    .set(if db <= -59.9 { 0.0 } else { db_to_gain(db) });
+                self.gain.set(if db <= -59.9 { 0.0 } else { db_to_gain(db) });
             }
             1 => self.width = v * 2.0,
             2 => self.pan = v * 2.0 - 1.0,
@@ -1142,23 +1037,12 @@ mod tests {
             }
             let mut rng = crate::dsp::Rng::new(7);
             for block in 0..200 {
-                let mut buf: Vec<Frame> = (0..256)
-                    .map(|_| [rng.bipolar() * 0.5, rng.bipolar() * 0.5])
-                    .collect();
+                let mut buf: Vec<Frame> = (0..256).map(|_| [rng.bipolar() * 0.5, rng.bipolar() * 0.5]).collect();
                 e.process(&mut buf, &ctx);
                 ctx.beat += 256.0 * ctx.beats_per_frame;
                 for f in &buf {
-                    assert!(
-                        f[0].is_finite() && f[1].is_finite(),
-                        "{} produced NaN",
-                        fx.name()
-                    );
-                    assert!(
-                        f[0].abs() < 16.0,
-                        "{} blew up at block {block}: {}",
-                        fx.name(),
-                        f[0]
-                    );
+                    assert!(f[0].is_finite() && f[1].is_finite(), "{} produced NaN", fx.name());
+                    assert!(f[0].abs() < 16.0, "{} blew up at block {block}: {}", fx.name(), f[0]);
                 }
             }
         }

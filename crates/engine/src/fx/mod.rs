@@ -32,12 +32,7 @@ pub struct FxCtx {
 
 impl FxCtx {
     pub fn new(sample_rate: f32) -> Self {
-        Self {
-            sample_rate,
-            bpm: 120.0,
-            beat: 0.0,
-            beats_per_frame: 120.0 / 60.0 / sample_rate as f64,
-        }
+        Self { sample_rate, bpm: 120.0, beat: 0.0, beats_per_frame: 120.0 / 60.0 / sample_rate as f64 }
     }
 
     pub fn frames_per_beat(&self) -> f64 {
@@ -108,11 +103,7 @@ pub struct DelayLine {
 
 impl DelayLine {
     pub fn new(capacity: usize) -> Self {
-        Self {
-            buf: vec![[0.0; 2]; capacity.max(1) + 1],
-            pos: 0,
-            delay: 0,
-        }
+        Self { buf: vec![[0.0; 2]; capacity.max(1) + 1], pos: 0, delay: 0 }
     }
 
     pub fn capacity(&self) -> usize {
@@ -168,12 +159,7 @@ pub enum SlotOutcome {
 }
 
 impl FxSlot {
-    pub fn new(
-        effect: Box<dyn Effect>,
-        pos: InsertPos,
-        sample_rate: f32,
-        max_latency: usize,
-    ) -> Self {
+    pub fn new(effect: Box<dyn Effect>, pos: InsertPos, sample_rate: f32, max_latency: usize) -> Self {
         let latency = effect.latency();
         let mut dry_delay = DelayLine::new(max_latency);
         dry_delay.set_delay(latency);
@@ -209,11 +195,7 @@ impl FxSlot {
 
     /// Process in place. `scratch` must be at least `buf.len()` long.
     fn process(&mut self, buf: &mut [Frame], scratch: &mut [Frame], ctx: &FxCtx, bypass_all: bool) {
-        let target = if self.active(bypass_all) {
-            self.mix
-        } else {
-            0.0
-        };
+        let target = if self.active(bypass_all) { self.mix } else { 0.0 };
         self.gain.set(target);
         if self.gain.is_settled() && self.gain.current == 0.0 {
             // Fully bypassed: keep latency consistent so toggling ON doesn't shift time.
@@ -226,16 +208,11 @@ impl FxSlot {
         self.dry_delay.process(dry);
 
         let effect = &mut self.effect;
-        let result =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| effect.process(buf, ctx)));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| effect.process(buf, ctx)));
         let mut ok = result.is_ok() && !self.effect.failed();
         if ok {
             for f in buf.iter() {
-                if !f[0].is_finite()
-                    || !f[1].is_finite()
-                    || f[0].abs() > 1000.0
-                    || f[1].abs() > 1000.0
-                {
+                if !f[0].is_finite() || !f[1].is_finite() || f[0].abs() > 1000.0 || f[1].abs() > 1000.0 {
                     ok = false;
                     break;
                 }
@@ -289,12 +266,7 @@ impl FxChain {
     }
 
     /// Install an effect into a slot, returning whatever was there.
-    pub fn insert(
-        &mut self,
-        slot: usize,
-        effect: Box<dyn Effect>,
-        pos: InsertPos,
-    ) -> Option<FxSlot> {
+    pub fn insert(&mut self, slot: usize, effect: Box<dyn Effect>, pos: InsertPos) -> Option<FxSlot> {
         let s = FxSlot::new(effect, pos, self.sample_rate, self.max_latency);
         self.slots.get_mut(slot)?.replace(s)
     }
@@ -342,9 +314,7 @@ impl FxChain {
 
     /// Set a macro and push its value to every target parameter.
     pub fn set_macro(&mut self, idx: usize, value: f32) {
-        let Some(m) = self.macros.get_mut(idx) else {
-            return;
-        };
+        let Some(m) = self.macros.get_mut(idx) else { return };
         m.value = value.clamp(0.0, 1.0);
         let m = *m;
         for t in m.targets.iter().flatten() {
@@ -428,11 +398,7 @@ mod tests {
         fn process(&mut self, buf: &mut [Frame], _: &FxCtx) {
             for f in buf {
                 self.0.push(*f);
-                *f = if self.0.len() > self.1 {
-                    self.0[self.0.len() - 1 - self.1]
-                } else {
-                    [0.0; 2]
-                };
+                *f = if self.0.len() > self.1 { self.0[self.0.len() - 1 - self.1] } else { [0.0; 2] };
             }
         }
         fn latency(&self) -> usize {
@@ -472,18 +438,8 @@ mod tests {
         let mut c = FxChain::new(48000.0, 64, 512);
         c.insert(0, Box::new(Gain(1.0)), InsertPos::Pre);
         c.insert(1, Box::new(Gain(1.0)), InsertPos::Pre);
-        c.macros[0].targets[0] = Some(MacroTarget {
-            slot: 0,
-            param: 0,
-            min: 0.5,
-            max: 0.5,
-        });
-        c.macros[0].targets[1] = Some(MacroTarget {
-            slot: 1,
-            param: 0,
-            min: 0.0,
-            max: 1.0,
-        });
+        c.macros[0].targets[0] = Some(MacroTarget { slot: 0, param: 0, min: 0.5, max: 0.5 });
+        c.macros[0].targets[1] = Some(MacroTarget { slot: 1, param: 0, min: 0.0, max: 1.0 });
         c.set_macro(0, 0.25);
         let mut buf = vec![[1.0, 1.0]; 64];
         for _ in 0..20 {
@@ -526,18 +482,8 @@ mod tests {
         for i in 0..3 {
             c.insert(i, Box::new(Gain(1.0)), InsertPos::Pre);
         }
-        c.macros[0].targets[0] = Some(MacroTarget {
-            slot: 0,
-            param: 0,
-            min: 0.0,
-            max: 1.0,
-        });
-        c.macros[1].targets[0] = Some(MacroTarget {
-            slot: 2,
-            param: 0,
-            min: 0.0,
-            max: 1.0,
-        });
+        c.macros[0].targets[0] = Some(MacroTarget { slot: 0, param: 0, min: 0.0, max: 1.0 });
+        c.macros[1].targets[0] = Some(MacroTarget { slot: 2, param: 0, min: 0.0, max: 1.0 });
         c.move_slot(0, 2);
         assert_eq!(c.macros[0].targets[0].unwrap().slot, 2);
         assert_eq!(c.macros[1].targets[0].unwrap().slot, 1);

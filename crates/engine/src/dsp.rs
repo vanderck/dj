@@ -55,11 +55,7 @@ pub struct Smoother {
 
 impl Smoother {
     pub fn new(value: f32, time_ms: f32, sample_rate: f32) -> Self {
-        let mut s = Self {
-            current: value,
-            target: value,
-            coef: 0.0,
-        };
+        let mut s = Self { current: value, target: value, coef: 0.0 };
         s.set_time(time_ms, sample_rate);
         s
     }
@@ -131,42 +127,21 @@ impl Biquad {
         let w0 = 2.0 * PI * (freq / sr).clamp(1e-5, 0.49);
         let (s, c) = w0.sin_cos();
         let alpha = s / (2.0 * q);
-        self.set_coefs(
-            (1.0 - c) / 2.0,
-            1.0 - c,
-            (1.0 - c) / 2.0,
-            1.0 + alpha,
-            -2.0 * c,
-            1.0 - alpha,
-        );
+        self.set_coefs((1.0 - c) / 2.0, 1.0 - c, (1.0 - c) / 2.0, 1.0 + alpha, -2.0 * c, 1.0 - alpha);
     }
 
     pub fn set_highpass(&mut self, sr: f32, freq: f32, q: f32) {
         let w0 = 2.0 * PI * (freq / sr).clamp(1e-5, 0.49);
         let (s, c) = w0.sin_cos();
         let alpha = s / (2.0 * q);
-        self.set_coefs(
-            (1.0 + c) / 2.0,
-            -(1.0 + c),
-            (1.0 + c) / 2.0,
-            1.0 + alpha,
-            -2.0 * c,
-            1.0 - alpha,
-        );
+        self.set_coefs((1.0 + c) / 2.0, -(1.0 + c), (1.0 + c) / 2.0, 1.0 + alpha, -2.0 * c, 1.0 - alpha);
     }
 
     pub fn set_allpass(&mut self, sr: f32, freq: f32, q: f32) {
         let w0 = 2.0 * PI * (freq / sr).clamp(1e-5, 0.49);
         let (s, c) = w0.sin_cos();
         let alpha = s / (2.0 * q);
-        self.set_coefs(
-            1.0 - alpha,
-            -2.0 * c,
-            1.0 + alpha,
-            1.0 + alpha,
-            -2.0 * c,
-            1.0 - alpha,
-        );
+        self.set_coefs(1.0 - alpha, -2.0 * c, 1.0 + alpha, 1.0 + alpha, -2.0 * c, 1.0 - alpha);
     }
 
     pub fn set_bandpass(&mut self, sr: f32, freq: f32, q: f32) {
@@ -181,14 +156,7 @@ impl Biquad {
         let w0 = 2.0 * PI * (freq / sr).clamp(1e-5, 0.49);
         let (s, c) = w0.sin_cos();
         let alpha = s / (2.0 * q);
-        self.set_coefs(
-            1.0 + alpha * a,
-            -2.0 * c,
-            1.0 - alpha * a,
-            1.0 + alpha / a,
-            -2.0 * c,
-            1.0 - alpha / a,
-        );
+        self.set_coefs(1.0 + alpha * a, -2.0 * c, 1.0 - alpha * a, 1.0 + alpha / a, -2.0 * c, 1.0 - alpha / a);
     }
 
     pub fn reset(&mut self) {
@@ -281,11 +249,7 @@ impl Svf {
         let v2 = self.ic2[ch] + self.a2 * self.ic1[ch] + self.a3 * v3;
         self.ic1[ch] = undenormal(2.0 * v1 - self.ic1[ch]);
         self.ic2[ch] = undenormal(2.0 * v2 - self.ic2[ch]);
-        SvfOut {
-            low: v2,
-            band: v1,
-            high: v0 - self.k * v1 - v2,
-        }
+        SvfOut { low: v2, band: v1, high: v0 - self.k * v1 - v2 }
     }
 
     pub fn reset(&mut self) {
@@ -361,11 +325,7 @@ impl Limiter {
             for &p in &self.peaks {
                 wmax = wmax.max(p);
             }
-            let target = if wmax > self.ceiling {
-                self.ceiling / wmax
-            } else {
-                1.0
-            };
+            let target = if wmax > self.ceiling { self.ceiling / wmax } else { 1.0 };
             if target < self.gain {
                 self.gain = target + (self.gain - target) * self.attack;
                 // Never let a peak through: hard floor at target when the
@@ -458,9 +418,7 @@ mod tests {
     use super::*;
 
     fn sine(sr: f32, f: f32, n: usize) -> Vec<f32> {
-        (0..n)
-            .map(|i| (2.0 * PI * f * i as f32 / sr).sin())
-            .collect()
+        (0..n).map(|i| (2.0 * PI * f * i as f32 / sr).sin()).collect()
     }
 
     fn rms(x: &[f32]) -> f32 {
@@ -499,10 +457,7 @@ mod tests {
     fn limiter_holds_ceiling() {
         let sr = 48000.0;
         let mut lim = Limiter::new(sr);
-        let mut buf: Vec<Frame> = sine(sr, 100.0, 48000)
-            .iter()
-            .map(|v| [v * 4.0, v * 4.0])
-            .collect();
+        let mut buf: Vec<Frame> = sine(sr, 100.0, 48000).iter().map(|v| [v * 4.0, v * 4.0]).collect();
         lim.process(&mut buf);
         let peak = buf.iter().map(|f| f[0].abs()).fold(0.0, f32::max);
         assert!(peak <= lim.ceiling + 1e-4, "peak {peak}");
