@@ -398,7 +398,7 @@ mod tests {
         let w = StemsWorker::new();
         let t = track(11, 2.0);
         w.request(Request { deck: 1, track: t.clone(), path: song.clone(), model: None, cache: cache.clone() });
-        let Update::Done { deck, track_id, stems, source } = wait(&w) else { panic!("expected stems") };
+        let Update::Done { deck, track_id, stems, source, .. } = wait(&w) else { panic!("expected stems") };
         assert_eq!((deck, track_id, source.as_str()), (1, 11, "placeholder separator"));
         assert_eq!(stems.len(), t.audio.frames.len());
         // Unity gains reproduce the mix; all three stored stems plus "other" sum back to it.
