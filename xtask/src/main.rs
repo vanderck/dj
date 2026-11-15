@@ -471,16 +471,35 @@ fn make_dmg(app: &Path, dmg: &Path, o: &Options) -> Result<(), String> {
     std::os::unix::fs::symlink("/Applications", staging.join("Applications"))
         .map_err(|e| format!("symlink: {e}"))?;
     let _ = fs::remove_file(dmg);
-    run(Command::new("hdiutil")
-        .args([
-            "create",
-            "-volname",
-            &format!("{APP_NAME} {}", version()),
-            "-srcfolder",
-        ])
-        .arg(&staging)
-        .args(["-ov", "-format", "UDZO"])
-        .arg(dmg))?;
+    // hdiutil's own size estimate for -srcfolder is sometimes too small ("No space left on
+    // device" inside the image, seen on CI), so give it an explicit size with headroom.
+    let size_mb = dmg_size_mb(dir_size(&staging));
+    let create = |attempt: u32| {
+        if attempt > 1 {
+            step(&format!("retrying hdiutil (attempt {attempt})"));
+            let _ = fs::remove_file(dmg);
+        }
+        run(Command::new("hdiutil")
+            .args([
+                "create",
+                "-volname",
+                &format!("{APP_NAME} {}", version()),
+                "-srcfolder",
+            ])
+            .arg(&staging)
+            .args([
+                "-fs",
+                "HFS+",
+                "-size",
+                &format!("{size_mb}m"),
+                "-ov",
+                "-format",
+                "UDZO",
+            ])
+            .arg(dmg))
+    };
+    // hdiutil also fails transiently on CI runners ("Resource busy"); one retry covers it.
+    create(1).or_else(|_| create(2))?;
     let _ = fs::remove_dir_all(&staging);
     if !o.no_sign && o.identity() != "-" {
         run(Command::new("codesign")
@@ -488,6 +507,23 @@ fn make_dmg(app: &Path, dmg: &Path, o: &Options) -> Result<(), String> {
             .arg(dmg))?;
     }
     Ok(())
+}
+
+/// Total size of the regular files under `dir` (symlinks are not followed).
+fn dir_size(dir: &Path) -> u64 {
+    let Ok(rd) = fs::read_dir(dir) else { return 0 };
+    rd.filter_map(|e| e.ok())
+        .map(|e| match e.file_type() {
+            Ok(t) if t.is_dir() => dir_size(&e.path()),
+            Ok(t) if t.is_file() => e.metadata().map(|m| m.len()).unwrap_or(0),
+            _ => 0,
+        })
+        .sum()
+}
+
+/// Uncompressed image size for `bytes` of content: +30 % and 32 MB for filesystem overhead.
+fn dmg_size_mb(bytes: u64) -> u64 {
+    (bytes as f64 * 1.3 / 1_048_576.0).ceil() as u64 + 32
 }
 
 fn notarize(dmg: &Path) -> Result<(), String> {
@@ -549,6 +585,22 @@ mod tests {
         let (no_default, f) = features_for(Some("aarch64-apple-darwin"), &o);
         assert!(!no_default);
         assert_eq!(f, vec!["stems-onnx", "extra"]);
+    }
+
+    #[test]
+    fn dmg_size_has_headroom() {
+        assert_eq!(dmg_size_mb(0), 32);
+        let mb = 1_048_576;
+        assert!(dmg_size_mb(100 * mb) >= 130 + 32);
+        let dir = env::temp_dir().join(format!("xtask-size-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("a/b")).unwrap();
+        fs::write(dir.join("x"), vec![0u8; 1000]).unwrap();
+        fs::write(dir.join("a/b/y"), vec![0u8; 500]).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("/", dir.join("root-link")).unwrap(); // must not be followed
+        assert_eq!(dir_size(&dir), 1500);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
