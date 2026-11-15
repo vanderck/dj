@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use collective_engine::deck::{DeckEvent, Quantize, TempoRange};
 use collective_engine::engine::{ClockOwner, DeckCmd, DeckMode, SamplerCmd, NUM_DECKS};
 use collective_engine::fx::{InsertPos, MacroTarget, MACRO_TARGETS, MAX_SLOTS, NUM_MACROS};
-use collective_engine::mixer::{ChannelParams, MixMode, Output, XfAssign};
+use collective_engine::mixer::{ChannelParams, ExtStages, MixMode, Output, XfAssign};
 use collective_engine::sampler::{LaneParams, Step, LANES, STEPS};
 use collective_engine::track::{Cue, CueKind, NUM_HOT_CUES};
 use collective_engine::{Command, Controller, Event, Garbage, Snapshot};
@@ -196,6 +196,8 @@ pub struct Core {
     pub recorder: Option<Recorder>,
     pub beat_flash: (i64, u8, Instant),
     pub midi_led: HashMap<MidiSource, u8>,
+    /// Output channels of the open audio device (set at startup).
+    pub audio_channels: usize,
     dirty_since: Option<Instant>,
 }
 
@@ -268,6 +270,7 @@ impl Core {
             recorder: None,
             beat_flash: (0, 1, Instant::now()),
             midi_led: HashMap::new(),
+            audio_channels: 2,
             dirty_since: None,
         };
         // VST3 catalog from cache immediately; refresh in the background.
@@ -345,7 +348,7 @@ impl Core {
         let s = self.settings.clone();
         self.send(Command::FaderCurve(s.fader_curve));
         self.send(Command::Crossovers { low_hz: s.crossover_low_hz, high_hz: s.crossover_high_hz });
-        self.send(Command::ExtStages(s.ext_stages));
+        self.send(Command::ExtStages(self.ext_stages()));
         self.send(Command::SplitCue(s.audio.split_cue));
         let ses = self.session.clone();
         self.send(Command::Wallclock(ses.wallclock));
@@ -355,7 +358,7 @@ impl Core {
         self.apply_mix_mode();
         for ch in 0..NUM_DECKS {
             let c = &ses.channels[ch];
-            self.send(Command::Channel { ch: ch as u8, params: c.params });
+            self.send(Command::Channel { ch: ch as u8, params: self.engine_params(ch, c.params) });
             self.send(Command::FaderStart { ch: ch as u8, on: c.fader_start });
             self.send(Command::XfAssign { ch: ch as u8, assign: c.xf_assign });
             self.restore_chain(ch, c.fx.clone());
@@ -628,9 +631,64 @@ impl Core {
         }
         let p = &mut self.session.channels[ch].params;
         f(p);
-        let params = *p;
+        let p = *p;
+        let params = self.engine_params(ch, p);
         self.send(Command::Channel { ch: ch as u8, params });
         self.mark_dirty();
+    }
+
+    // ------------------------------------------------------------ output routing
+
+    /// Stereo output pairs of the audio device.
+    pub fn output_pairs(&self) -> usize {
+        (self.audio_channels / 2).max(1)
+    }
+
+    /// External-mixer mode is active (and the device has more than one stereo pair to use).
+    pub fn external_routing(&self) -> bool {
+        self.settings.external_mixer && self.output_pairs() >= 2
+    }
+
+    /// Output pair a channel uses in external-mixer mode: one pair per deck when there are enough,
+    /// otherwise left decks (1, 3) share the first pair and right decks (2, 4) the second.
+    pub fn external_pair(&self, ch: usize) -> usize {
+        ch % self.output_pairs()
+    }
+
+    /// The params actually sent to the engine: in external-mixer mode the output is forced to the
+    /// deck's own pair. The session keeps the user's own routing for when the mode is turned off.
+    fn engine_params(&self, ch: usize, mut p: ChannelParams) -> ChannelParams {
+        if self.external_routing() {
+            p.output = Output::Pair(self.external_pair(ch) as u8);
+        }
+        p
+    }
+
+    /// Stages applied on directly routed channels: none when an external mixer does the mixing.
+    fn ext_stages(&self) -> ExtStages {
+        if self.external_routing() {
+            ExtStages { trim: false, eq: false, filter: false, volume: false }
+        } else {
+            self.settings.ext_stages
+        }
+    }
+
+    /// Turn external-mixer mode on or off and re-route every channel.
+    pub fn set_external_mixer(&mut self, on: bool) {
+        self.settings.external_mixer = on;
+        self.send(Command::ExtStages(self.ext_stages()));
+        for ch in 0..NUM_DECKS {
+            let params = self.engine_params(ch, self.session.channels[ch].params);
+            self.send(Command::Channel { ch: ch as u8, params });
+        }
+        self.mark_dirty();
+        self.log(if self.external_routing() {
+            format!("External mixer: decks routed to {} output pairs", self.output_pairs())
+        } else if on {
+            "External mixer: the audio device has only one stereo output, so decks are mixed internally".to_string()
+        } else {
+            "Internal mixer".to_string()
+        });
     }
 
     // ------------------------------------------------------------ FX inserts (§7.4)
@@ -2283,6 +2341,35 @@ mod tests {
         assert_eq!(c.decks[0].stems_source.as_deref(), Some("placeholder separator"));
         // Cached for next time.
         assert!(std::fs::read_dir(dir.join("stems-cache")).unwrap().count() >= 1);
+    }
+
+    #[test]
+    fn external_mixer_routes_each_deck_to_an_output_pair() {
+        let (_e, mut c, _config) = core();
+        // Xone:K2 style: 4 outputs = 2 stereo pairs. Left decks share pair 0, right decks pair 1.
+        c.audio_channels = 4;
+        c.set_external_mixer(true);
+        assert!(c.external_routing());
+        assert_eq!((0..4).map(|d| c.external_pair(d)).collect::<Vec<_>>(), vec![0, 1, 0, 1]);
+        let p = c.engine_params(1, c.session.channels[1].params);
+        assert_eq!(p.output, Output::Pair(1));
+        let st = c.ext_stages();
+        assert!(!st.trim && !st.eq && !st.filter && !st.volume, "no internal processing");
+        // The session keeps the user's own routing.
+        assert_eq!(c.session.channels[1].params.output, Output::Master);
+
+        // 8 outputs: one pair per deck.
+        c.audio_channels = 8;
+        assert_eq!((0..4).map(|d| c.external_pair(d)).collect::<Vec<_>>(), vec![0, 1, 2, 3]);
+
+        // A stereo-only device cannot do it: everything stays on the internal mixer.
+        c.audio_channels = 2;
+        assert!(!c.external_routing());
+        assert_eq!(c.engine_params(1, c.session.channels[1].params).output, Output::Master);
+
+        c.set_external_mixer(false);
+        c.audio_channels = 4;
+        assert!(!c.external_routing());
     }
 
     #[test]

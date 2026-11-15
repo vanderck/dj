@@ -87,6 +87,27 @@ fn settings(ui: &mut Ui, core: &mut Core, st: &mut UiState) {
         core.log("Audio settings saved; restart to apply");
     }
 
+    let mut ext = core.settings.external_mixer;
+    if ui
+        .checkbox(&mut ext, "External mixer: send each deck to its own output and hide the mixer section")
+        .changed()
+    {
+        core.set_external_mixer(ext);
+    }
+    let pairs = core.output_pairs();
+    let routing: Vec<String> = (0..core.deck_count())
+        .map(|d| {
+            let p = core.external_pair(d);
+            format!("deck {} → {}/{}", d + 1, p * 2 + 1, p * 2 + 2)
+        })
+        .collect();
+    let info = if pairs >= 2 {
+        format!("The device has {} outputs. With an external mixer: {}.", core.audio_channels, routing.join(", "))
+    } else {
+        format!("The device has {} outputs; an external mixer needs at least 4 (two stereo pairs).", core.audio_channels)
+    };
+    ui.label(RichText::new(info).small().weak());
+
     section(ui, "MIXER");
     egui::ComboBox::from_label("Fader curve").selected_text(core.settings.fader_curve.label()).show_ui(ui, |ui| {
         for c in FaderCurve::ALL {

@@ -218,7 +218,8 @@ impl eframe::App for App {
             waves::show(ui, &mut self.core, &mut self.ui, lanes);
 
             let mid = Rect::from_min_max(Pos2::new(area.left(), lanes.bottom() + gap), Pos2::new(area.right(), area.bottom() - browser_h - gap));
-            let mixer_w = (area.width() * 0.31).clamp(360.0, 640.0);
+            // With an external mixer the centre column only holds the clock and routing.
+            let mixer_w = if self.core.external_routing() { 240.0 } else { (area.width() * 0.31).clamp(360.0, 640.0) };
             let deck_w = (area.width() - mixer_w - 2.0 * gap) / 2.0;
             let four = self.core.deck_count() >= 4;
             // One row: badge, title, key, Swap, Cue, Play, Sync.

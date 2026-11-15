@@ -96,6 +96,9 @@ pub struct Settings {
     pub stems_model: Option<PathBuf>,
     /// Disk cache for separated stems (MB); 0 disables it.
     pub stems_cache_mb: u64,
+    /// Mixing happens on an external (hardware) mixer: every deck goes to its own output pair,
+    /// Collective's volume / trim / EQ / filter and the mixer section are bypassed and hidden.
+    pub external_mixer: bool,
 }
 
 impl Default for Settings {
@@ -132,6 +135,7 @@ impl Default for Settings {
             stems_enabled: true,
             stems_model: None,
             stems_cache_mb: 4096,
+            external_mixer: false,
         }
     }
 }

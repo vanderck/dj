@@ -113,6 +113,7 @@ pub fn boot() -> (audio::AudioHost, Core) {
     let session = Session::load();
     let (host, ctl, sr) = audio::start(&settings.audio).expect("audio");
     let mut core = Core::new(ctl, sr, audio::MAX_BLOCK, settings, session);
+    core.audio_channels = host.channels;
     core.log(format!("Audio: {} @ {} Hz, {} channels", host.device_name, host.sample_rate, host.channels));
     core.sync_engine();
     if core.library.is_empty() {

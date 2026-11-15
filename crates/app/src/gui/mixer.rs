@@ -29,7 +29,10 @@ fn db_text(g: f32) -> String {
 pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect) {
     card(ui, rect);
     let r = rect.shrink(16.0);
-    top_bar(ui, core, st, Rect::from_min_size(r.min, Vec2::new(r.width(), 38.0)));
+    if core.external_routing() {
+        return external_panel(ui, core, st, r);
+    }
+    top_bar(ui, core, st, Rect::from_min_size(r.min, Vec2::new(r.width(), 38.0)), false);
 
     let strips = Rect::from_min_max(Pos2::new(r.left(), r.top() + 52.0), r.right_bottom());
     let order: Vec<Option<usize>> = if core.deck_count() >= 4 { vec![Some(2), Some(0), None, Some(1), Some(3)] } else { vec![Some(0), None, Some(1)] };
@@ -44,10 +47,12 @@ pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect) {
     }
 }
 
-fn top_bar(ui: &mut Ui, core: &mut Core, st: &mut UiState, r: Rect) {
+/// BPM, beat dots, Tap, Quantize, Rec and Menu. `stacked` lays them out in three short rows for
+/// the slim column used in external-mixer mode.
+fn top_bar(ui: &mut Ui, core: &mut Core, st: &mut UiState, r: Rect, stacked: bool) {
     let s = core.snap;
     // BPM: drag to change, double-click to type.
-    let bpm_r = Rect::from_min_size(r.min, Vec2::new(104.0, r.height()));
+    let bpm_r = Rect::from_min_size(r.min, Vec2::new(104.0, if stacked { 38.0 } else { r.height() }));
     if let Some(text) = &mut st.bpm_edit {
         let mut child = ui.new_child(UiBuilder::new().max_rect(bpm_r.shrink2(Vec2::new(0.0, 4.0))));
         let resp = child.add(egui::TextEdit::singleline(text).font(mono(20.0)).desired_width(100.0));
@@ -84,30 +89,45 @@ fn top_bar(ui: &mut Ui, core: &mut Core, st: &mut UiState, r: Rect) {
     // Beat dots.
     let beat = (s.clock.beat.floor() as i64).rem_euclid(4) as usize;
     for i in 0..4 {
-        let c = Pos2::new(bpm_r.right() + 4.0 + i as f32 * 12.0, r.center().y);
+        let c = Pos2::new(bpm_r.right() + 4.0 + i as f32 * 12.0, bpm_r.center().y);
         ui.painter().circle_filled(c, 4.5, if i == beat { RED } else { Color32::from_gray(70) });
     }
 
-    // Pills from the right: Menu, Rec, Quantize, Tap.
     let h = 30.0;
-    let y = r.center().y - h / 2.0;
-    let mut x = r.right();
-    let mut place = |ui: &Ui, label: &str| {
-        let w = pill_width(ui, label, 12.0);
-        x -= w;
-        let rr = Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, h));
-        x -= 8.0;
-        rr
-    };
-    let menu_r = place(ui, "Menu");
     let rec_label = match &core.recorder {
         Some(rec) => format!("● {}", super::widgets::fmt_time(rec.started.elapsed().as_secs_f64())),
         None => "● Rec".into(),
     };
-    let rec_r = place(ui, &rec_label);
     let q_label = format!("Quantize {}", QUANTIZE_VALUES[core.session.quantize].1);
-    let q_r = place(ui, &q_label);
-    let tap_r = place(ui, "Tap");
+    let (tap_r, q_r, rec_r, menu_r) = if stacked {
+        // Two rows under the BPM: Tap · Quantize, then Rec · Menu.
+        let y1 = bpm_r.bottom() + 8.0;
+        let y2 = y1 + h + 8.0;
+        let tap_w = pill_width(ui, "Tap", 12.0);
+        let rec_w = (r.width() - 8.0) / 2.0;
+        (
+            Rect::from_min_size(Pos2::new(r.left(), y1), Vec2::new(tap_w, h)),
+            Rect::from_min_max(Pos2::new(r.left() + tap_w + 8.0, y1), Pos2::new(r.right(), y1 + h)),
+            Rect::from_min_size(Pos2::new(r.left(), y2), Vec2::new(rec_w, h)),
+            Rect::from_min_max(Pos2::new(r.left() + rec_w + 8.0, y2), Pos2::new(r.right(), y2 + h)),
+        )
+    } else {
+        // One row, from the right: Menu, Rec, Quantize, Tap.
+        let y = r.center().y - h / 2.0;
+        let mut x = r.right();
+        let mut place = |ui: &Ui, label: &str| {
+            let w = pill_width(ui, label, 12.0);
+            x -= w;
+            let rr = Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, h));
+            x -= 8.0;
+            rr
+        };
+        let menu_r = place(ui, "Menu");
+        let rec_r = place(ui, &rec_label);
+        let q_r = place(ui, &q_label);
+        let tap_r = place(ui, "Tap");
+        (tap_r, q_r, rec_r, menu_r)
+    };
 
     let resp = pill(ui, tap_r, "Tap", false).on_hover_text("Tap tempo");
     if resp.clicked() {
@@ -151,6 +171,37 @@ fn top_bar(ui: &mut Ui, core: &mut Core, st: &mut UiState, r: Rect) {
     egui::Popup::menu(&resp).show(|ui| menu(ui, core, st));
 }
 
+/// External-mixer mode: no channel strips, just the clock controls and where each deck goes.
+fn external_panel(ui: &mut Ui, core: &mut Core, st: &mut UiState, r: Rect) {
+    top_bar(ui, core, st, Rect::from_min_size(r.min, Vec2::new(r.width(), 114.0)), true);
+    let mut y = r.top() + 136.0;
+    let p = ui.painter();
+    p.text(Pos2::new(r.left(), y), Align2::LEFT_TOP, "OUTPUTS", mono(11.0), TEXT_DIM);
+    y += 22.0;
+    for d in 0..core.deck_count() {
+        let pair = core.external_pair(d);
+        let row = Rect::from_min_size(Pos2::new(r.left(), y), Vec2::new(r.width(), 34.0));
+        p.rect_filled(row, CornerRadius::same(8), WELL);
+        p.circle_filled(Pos2::new(row.left() + 16.0, row.center().y), 6.0, DECK[d]);
+        p.text(Pos2::new(row.left() + 30.0, row.center().y), Align2::LEFT_CENTER, format!("Deck {}", d + 1), bold(13.0), TEXT);
+        p.text(Pos2::new(row.right() - 12.0, row.center().y), Align2::RIGHT_CENTER, format!("Out {}/{}", pair * 2 + 1, pair * 2 + 2), mono(13.0), TEXT);
+        y += 40.0;
+    }
+    y += 6.0;
+    let note = format!(
+        "{} outputs on the audio device. Volume, EQ and filter happen on your mixer; Collective sends each deck unprocessed.",
+        core.audio_channels
+    );
+    let galley = p.layout(note, sans(11.5), TEXT_DIM, r.width());
+    let gh = galley.size().y;
+    p.galley(Pos2::new(r.left(), y), galley, TEXT_DIM);
+    y += gh + 14.0;
+    let br = Rect::from_min_size(Pos2::new(r.left(), y), Vec2::new(r.width(), 32.0));
+    if button(ui, br, "Use internal mixer", Style::Outline(Color32::from_gray(110), false), bold(12.5)).clicked() {
+        core.set_external_mixer(false);
+    }
+}
+
 fn menu(ui: &mut Ui, core: &mut Core, st: &mut UiState) {
     if ui.button("Settings…").clicked() {
         st.settings_open = true;
@@ -158,6 +209,15 @@ fn menu(ui: &mut Ui, core: &mut Core, st: &mut UiState) {
     }
     if ui.button("MIDI & keyboard mapping…").clicked() {
         st.mapping_open = true;
+        ui.close();
+    }
+    let ext = core.settings.external_mixer;
+    if ui
+        .selectable_label(ext, "External mixer")
+        .on_hover_text("Each deck to its own output, mixer section hidden (needs a device with 4+ outputs)")
+        .clicked()
+    {
+        core.set_external_mixer(!ext);
         ui.close();
     }
     let learn = core.learn;

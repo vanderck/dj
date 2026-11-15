@@ -431,3 +431,34 @@ fn key_lock_does_not_delay_audio_against_the_playhead() {
         assert!((locked - plain).abs() < 6.0, "key lock at tempo {tempo}: {locked:+.1} ms vs {plain:+.1} ms without");
     }
 }
+
+// ------------------------------------------------------------------ direct outputs
+
+#[test]
+fn decks_routed_to_direct_pairs_reach_only_their_own_outputs() {
+    use collective_engine::mixer::{ExtStages, Output};
+    let (mut e, mut c) = setup();
+    let (tones, _) = stem_track(61); // deck 1: 60 Hz + 1 kHz
+    send(&mut c, Command::Load { deck: 0, track: tones, start_at_first_cue: false });
+    send(&mut c, Command::Load { deck: 1, track: click_track(62, 120.0, 10.0, SR as u32), start_at_first_cue: false });
+    send(&mut c, Command::GlobalQuantize(None));
+    // External mixer: no internal stages, each channel to its own stereo pair.
+    send(&mut c, Command::ExtStages(ExtStages { trim: false, eq: false, filter: false, volume: false }));
+    for ch in 0..2u8 {
+        send(&mut c, Command::Channel { ch, params: ChannelParams { output: Output::Pair(ch), volume: 0.0, ..Default::default() } });
+        deck(&mut c, ch, DeckCmd::Play);
+    }
+    let energy = |x: &[Frame]| x.iter().map(|f| f[0] * f[0]).sum::<f32>();
+    let (mut master, mut p0, mut p1) = (0.0, Vec::new(), Vec::new());
+    for _ in 0..80 {
+        e.process(BLOCK);
+        master += energy(e.master(BLOCK));
+        p0.extend_from_slice(e.pair(0, BLOCK).expect("pair 0 in use"));
+        p1.extend_from_slice(e.pair(1, BLOCK).expect("pair 1 in use"));
+    }
+    assert!(master < 1e-6, "nothing on the master bus: {master}");
+    // Channel volume is at 0 but bypassed, so both decks are heard at full level.
+    assert!(tone_energy(&p0[4096..], 1000.0, SR) > 1e-3, "deck 1 tone on outputs 1/2");
+    assert!(tone_energy(&p1[4096..], 1000.0, SR) < 1e-4 * tone_energy(&p0[4096..], 1000.0, SR), "deck 1 not on 3/4");
+    assert!(p1.iter().any(|f| f[0] > 0.5), "deck 2 clicks on outputs 3/4");
+}
