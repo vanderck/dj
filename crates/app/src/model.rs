@@ -233,6 +233,8 @@ impl Default for Session {
         let mut channels: [ChannelModel; 4] = Default::default();
         channels[0].xf_assign = XfAssign::A;
         channels[1].xf_assign = XfAssign::B;
+        channels[2].xf_assign = XfAssign::A;
+        channels[3].xf_assign = XfAssign::B;
         Self {
             channels,
             decks: Default::default(),

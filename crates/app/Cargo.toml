@@ -17,7 +17,7 @@ stems-onnx = ["stems-core/onnx"]
 stems-onnx-dynamic = ["stems-core/onnx-dynamic"]
 
 [dependencies]
-stems-core = { git = "https://github.com/vanderck/stems", rev = "c63416ce4975ce2327cf3fe34ec9b43e649688b2" }
+stems-core = { git = "https://github.com/vanderck/stems", rev = "8b728e31c608bdccde8b04082b74442135a25566" }
 collective-engine.workspace = true
 collective-library.workspace = true
 serde.workspace = true
