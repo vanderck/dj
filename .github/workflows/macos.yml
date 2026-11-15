@@ -72,6 +72,7 @@ jobs:
         run: |
           APP=target/package/Collective.app
           plutil -lint "$APP/Contents/Info.plist"
+          test -s "$APP/Contents/Resources/stems-model.onnx" && echo "bundled model: $(du -h "$APP/Contents/Resources/stems-model.onnx" | cut -f1)"
           codesign --verify --strict --verbose=2 "$APP"
           lipo -info "$APP/Contents/MacOS/Collective" | tee /dev/stderr | grep -q "x86_64 arm64"
           "$APP/Contents/MacOS/Collective" --help > /dev/null
