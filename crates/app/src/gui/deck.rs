@@ -220,8 +220,10 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
     }
 
     // ---------------------------------------------------------- hot cues
-    let y = y + bh + 14.0;
-    let ph = 36.0;
+    // With stems enabled the pads are a little shorter to make room for the stems row.
+    let stems_on = core.settings.stems_enabled;
+    let y = y + bh + if stems_on { 10.0 } else { 14.0 };
+    let ph = if stems_on { 30.0 } else { 36.0 };
     let pw = (w - 3.0 * gap) / 4.0;
     for i in 0..8 {
         let rr = Rect::from_min_size(Pos2::new(r.left() + (i % 4) as f32 * (pw + gap), y + (i / 4) as f32 * (ph + 8.0)), Vec2::new(pw, ph));
@@ -267,8 +269,17 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
         }
     }
 
+    // ---------------------------------------------------------- stems
+    let after_cues = y + 2.0 * ph + 8.0;
+    let y = if stems_on {
+        let stems_h = 26.0;
+        stems_row(ui, core, d, Rect::from_min_size(Pos2::new(r.left(), after_cues + 10.0), Vec2::new(w, stems_h)));
+        after_cues + 10.0 + stems_h + 10.0
+    } else {
+        after_cues + 14.0
+    };
+
     // ---------------------------------------------------------- tempo
-    let y = y + 2.0 * ph + 8.0 + 14.0;
     let th = 30.0;
     let minus = Rect::from_min_size(Pos2::new(r.left(), y), Vec2::new(36.0, th));
     let plus = Rect::from_min_size(Pos2::new(r.right() - 36.0, y), Vec2::new(36.0, th));
@@ -402,6 +413,71 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
         if label_clicked {
             act_f(core, &addr, if is_eq && !killed { 0.0 } else { def });
         }
+    }
+}
+
+/// Stem toggles (light = audible), Acapella / Instr shortcuts, and separation status.
+fn stems_row(ui: &mut Ui, core: &mut Core, d: usize, r: Rect) {
+    let v = core.snap.decks[d];
+    let n = d + 1;
+    let a = |s: &str| format!("Deck/{n}/{s}");
+    let color = DECK[d];
+    let ready = v.stems_ready;
+    let gap = 6.0;
+    let status_w = (r.width() * 0.22).clamp(80.0, 150.0);
+    let items: [(&str, &str, f32); 6] = [
+        ("Drums", "StemDrums", 1.0),
+        ("Bass", "StemBass", 1.0),
+        ("Vocals", "StemVocals", 1.0),
+        ("Other", "StemOther", 1.0),
+        ("Acapella", "Acapella", 1.2),
+        ("Instr", "Instrumental", 1.0),
+    ];
+    let unit = (r.width() - status_w - gap * items.len() as f32) / items.iter().map(|i| i.2).sum::<f32>();
+    let mut x = r.left();
+    for (i, (label, addr, weight)) in items.iter().enumerate() {
+        let rr = Rect::from_min_size(Pos2::new(x, r.top()), Vec2::new(unit * weight, r.height()));
+        x += unit * weight + gap;
+        let on_ = match i {
+            0..=3 => v.stem_gains[i] > 0.5,
+            4 => v.stem_gains == crate::core::STEMS_ACAPELLA,
+            _ => v.stem_gains == crate::core::STEMS_INSTRUMENTAL,
+        };
+        // Until the stems are ready, settings are shown in outline: they apply once separated.
+        let style = match (on_, ready, i < 4) {
+            (true, true, true) => Style::Light,
+            (true, true, false) => Style::Fill(color),
+            (true, false, _) => Style::Outline(TEXT_FAINT, false),
+            (false, _, _) => Style::Dark,
+        };
+        let tip = if ready { "Lit = audible" } else { "Still separating: the setting applies as soon as stems are ready" };
+        let resp = button(ui, rr, label, style, bold(11.5)).on_hover_text(tip);
+        learnable(core, &resp, &a(addr));
+        if resp.clicked() && v.loaded {
+            act_i(core, &a(addr), !on_ as i32);
+        }
+    }
+
+    // Status pill: progress while separating, then where the stems came from.
+    let sr = Rect::from_min_max(Pos2::new(r.right() - status_w, r.top()), r.right_bottom());
+    let rad = CornerRadius::same(6);
+    let p = ui.painter_at(sr);
+    p.rect_filled(sr, rad, WELL);
+    let placeholder = core.decks[d].stems_source.as_deref().is_some_and(|s| s.contains("placeholder"));
+    let (text, col) = match (core.decks[d].stems_progress, &core.decks[d].stems_source, v.loaded) {
+        (Some(f), _, true) => {
+            let fill = Rect::from_min_size(sr.min, Vec2::new(sr.width() * f.clamp(0.0, 1.0), sr.height()));
+            p.rect_filled(fill, rad, alpha(color, 0.35));
+            (format!("Separating {:.0}%", f * 100.0), TEXT)
+        }
+        (None, Some(src), true) if ready => (src.clone(), if placeholder { RED } else { TEXT_DIM }),
+        (None, _, true) => ("No stems".into(), TEXT_FAINT),
+        _ => ("Stems".into(), TEXT_FAINT),
+    };
+    p.text(sr.center(), Align2::CENTER_CENTER, text, bold(11.0), col);
+    if placeholder {
+        ui.allocate_rect(sr, Sense::hover())
+            .on_hover_text("No separation model is configured, so a low-quality placeholder is used. Set one in Settings → Stems.");
     }
 }
 

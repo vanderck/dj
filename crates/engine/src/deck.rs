@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::dsp::Frame;
 use crate::stretch::{Source, Stretcher};
-use crate::track::{BeatGrid, Cue, CueKind, Track, NUM_HOT_CUES};
+use crate::track::{BeatGrid, Cue, CueKind, StemData, Track, NUM_HOT_CUES, NUM_STEMS};
 
 /// Quantize setting. Values are in beats (4 beats = 1 bar).
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, Default)]
@@ -148,6 +148,8 @@ struct Roll {
 struct Reader<'a> {
     frames: &'a [Frame],
     looping: Option<LoopRegion>,
+    /// Separated stems and the current per-stem gains; `None` plays the plain mix.
+    stems: Option<(&'a StemData, [f32; NUM_STEMS])>,
 }
 
 impl Source for Reader<'_> {
@@ -162,6 +164,8 @@ impl Source for Reader<'_> {
         }
         if i < 0 || i as usize >= self.frames.len() {
             [0.0; 2]
+        } else if let Some((stems, gains)) = &self.stems {
+            stems.mix(i as usize, self.frames[i as usize], gains)
         } else {
             self.frames[i as usize]
         }
@@ -204,6 +208,10 @@ pub struct DeckView {
     pub hot_cue_is_loop: [bool; NUM_HOT_CUES],
     pub phase_offset: f64,
     pub phase_error: f64,
+    /// Stems have been separated and attached for the loaded track.
+    pub stems_ready: bool,
+    /// Requested per-stem gains in [`crate::track::Stem`] order.
+    pub stem_gains: [f32; NUM_STEMS],
 }
 
 pub struct Deck {
@@ -248,7 +256,15 @@ pub struct Deck {
     last_phase_error: f64,
     events: [Option<DeckEvent>; 8],
     n_events: usize,
+    stems: Option<Arc<StemData>>,
+    /// Requested per-stem gains.
+    stem_target: [f32; NUM_STEMS],
+    /// Smoothed per-stem gains actually applied (avoids clicks on mute).
+    stem_gain: [f32; NUM_STEMS],
 }
+
+/// Time constant for stem gain changes.
+const STEM_SMOOTH_SECS: f64 = 0.004;
 
 #[derive(Clone, Copy, Debug)]
 struct LoopRegionOrPoint {
@@ -300,7 +316,40 @@ impl Deck {
             last_phase_error: 0.0,
             events: [None; 8],
             n_events: 0,
+            stems: None,
+            stem_target: [1.0; NUM_STEMS],
+            stem_gain: [1.0; NUM_STEMS],
         }
+    }
+
+    // ------------------------------------------------------------ stems
+
+    /// Attach separated stems. Accepted only if they belong to the loaded track; returns whatever
+    /// must be released off the audio thread (the previous stems, or the rejected ones).
+    pub fn attach_stems(&mut self, stems: Arc<StemData>) -> Option<Arc<StemData>> {
+        match &self.track {
+            Some(t) if t.id == stems.track_id => self.stems.replace(stems),
+            _ => Some(stems),
+        }
+    }
+
+    /// Remove the stems (on load / eject); the caller disposes of them off the audio thread.
+    pub fn detach_stems(&mut self) -> Option<Arc<StemData>> {
+        self.stems.take()
+    }
+
+    pub fn stems_ready(&self) -> bool {
+        self.stems.is_some()
+    }
+
+    pub fn set_stem_gain(&mut self, stem: usize, gain: f32) {
+        if let Some(g) = self.stem_target.get_mut(stem) {
+            *g = gain.clamp(0.0, 2.0);
+        }
+    }
+
+    pub fn stem_gains(&self) -> [f32; NUM_STEMS] {
+        self.stem_target
     }
 
     fn emit(&mut self, e: DeckEvent) {
@@ -445,6 +494,8 @@ impl Deck {
             hot_cue_is_loop: hot_loop,
             phase_offset: self.phase_offset,
             phase_error: self.last_phase_error,
+            stems_ready: self.stems.is_some(),
+            stem_gains: self.stem_target,
         }
     }
 
@@ -489,6 +540,9 @@ impl Deck {
         self.stretcher.reset();
         self.slip_pos = self.pos;
         self.grid_override = None;
+        // A new track starts with every stem on.
+        self.stem_target = [1.0; NUM_STEMS];
+        self.stem_gain = [1.0; NUM_STEMS];
         self.track.replace(track)
     }
 
@@ -1033,6 +1087,8 @@ impl Deck {
             return;
         };
         let frames = &track.audio.frames[..];
+        let stems = self.stems.clone();
+        let stem_coeff = (1.0 - (-1.0 / (STEM_SMOOTH_SECS * self.out_rate)).exp()) as f32;
         let len = frames.len() as f64;
         let sr = track.audio.sample_rate as f64;
         let grid = self.grid();
@@ -1130,7 +1186,21 @@ impl Deck {
                 continue;
             }
 
-            let reader = Reader { frames, looping: if self.loop_on { self.loop_region } else { None } };
+            let stems_mix = stems.as_deref().and_then(|st| {
+                for (g, t) in self.stem_gain.iter_mut().zip(self.stem_target) {
+                    *g += (t - *g) * stem_coeff;
+                    if (t - *g).abs() < 1e-5 {
+                        *g = t;
+                    }
+                }
+                // All stems at unity is exactly the original mix: skip the extra work.
+                (self.stem_gain != [1.0; NUM_STEMS]).then_some((st, self.stem_gain))
+            });
+            let reader = Reader {
+                frames,
+                looping: if self.loop_on { self.loop_region } else { None },
+                stems: stems_mix,
+            };
 
             let want_stretch =
                 (self.keylock || self.semitones != 0.0) && self.motor >= 1.0 && v > 0.0 && self.backspin.is_none();

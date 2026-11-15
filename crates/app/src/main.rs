@@ -8,6 +8,7 @@ mod midi;
 mod model;
 mod osc;
 mod settings;
+mod stems;
 
 use std::path::PathBuf;
 use std::time::Duration;

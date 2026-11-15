@@ -9,7 +9,15 @@ description = "Collective: live performance DJ software"
 name = "collective"
 path = "src/main.rs"
 
+[features]
+default = ["stems-onnx"]
+# Run ONNX stem-separation models: downloads ONNX Runtime at build time and links it statically.
+stems-onnx = ["stems-core/onnx"]
+# Same, but loads an existing libonnxruntime at runtime (set ORT_DYLIB_PATH).
+stems-onnx-dynamic = ["stems-core/onnx-dynamic"]
+
 [dependencies]
+stems-core = { git = "https://github.com/vanderck/stems", rev = "8b728e31c608bdccde8b04082b74442135a25566" }
 collective-engine.workspace = true
 collective-library.workspace = true
 serde.workspace = true
