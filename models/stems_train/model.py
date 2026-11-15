@@ -94,8 +94,12 @@ class GroupLinear(nn.Module):
         self.bias = nn.Parameter(torch.zeros(count, d_out))
 
     def forward(self, x):
-        y = torch.matmul(x.unsqueeze(-2), self.weight).squeeze(-2)  # broadcast over B, N
-        return y + self.bias
+        # One batched matmul per band: [c, B*N, i] @ [c, i, o]. (Broadcasting x[..., None, :] against
+        # the weight instead materialised a copy of the weight for every frame: gigabytes at
+        # training batch sizes, and out-of-memory on Apple GPUs.)
+        b, n, c, i = x.shape
+        y = torch.bmm(x.reshape(b * n, c, i).transpose(0, 1), self.weight)  # [c, B*N, o]
+        return y.transpose(0, 1).reshape(b, n, c, -1) + self.bias
 
 
 class StemsNet(nn.Module):
