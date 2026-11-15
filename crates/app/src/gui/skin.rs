@@ -31,6 +31,21 @@ pub const DECK: [Color32; 4] = [
 ];
 
 /// Hot-cue palette by pad number.
+/// Stem colours (waveform lanes and the deck stem buttons): drums, bass, vocals, other.
+pub const STEM: [Color32; 4] = [
+    Color32::from_rgb(0xfb, 0xbf, 0x24),
+    Color32::from_rgb(0xa7, 0x8b, 0xfa),
+    Color32::from_rgb(0x22, 0xd3, 0xee),
+    Color32::from_rgb(0x4a, 0xde, 0x80),
+];
+
+/// Mixed In Key energy level (1..=10) as a heat colour: dark grey (calm) to red (peak).
+pub fn energy_color(level: u8) -> Color32 {
+    let t = (level.clamp(1, 10) - 1) as f32 / 9.0;
+    let lerp = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
+    Color32::from_rgb(lerp(0x3a, 0xff), lerp(0x3a, 0x3b), lerp(0x44, 0x30))
+}
+
 pub const CUE: [Color32; 8] = [
     Color32::from_rgb(0xe5, 0x48, 0x4d),
     Color32::from_rgb(0xe8, 0x8a, 0x2c),

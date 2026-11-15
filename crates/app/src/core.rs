@@ -64,6 +64,8 @@ pub struct DeckUi {
     pub stems_source: Option<String>,
     /// `LoopInOut` set a loop start and is waiting for the end.
     pub loop_in_pending: bool,
+    /// Per-stem loudness of the loaded track, for the waveform lanes (once separated).
+    pub stem_wave: Option<std::sync::Arc<crate::stems::StemWave>>,
     /// Bar/beat last reported over OSC.
     last_beat: i64,
 }
@@ -436,6 +438,7 @@ impl Core {
         self.stems.cancel(d);
         self.decks[d].stems_progress = None;
         self.decks[d].stems_source = None;
+        self.decks[d].stem_wave = None;
         self.decks[d].loop_in_pending = false;
         self.decks[d].loading = Some(path.to_path_buf());
         self.decks[d].error = None;
@@ -451,6 +454,7 @@ impl Core {
         self.stems.cancel(d);
         self.decks[d].stems_progress = None;
         self.decks[d].stems_source = None;
+        self.decks[d].stem_wave = None;
         self.send(Command::Eject { deck: d as u8 });
         self.decks[d].info = None;
         self.session.decks[d].track = None;
@@ -504,8 +508,9 @@ impl Core {
             Update::Progress { deck, track_id, fraction } if current(self, deck, track_id) => {
                 self.decks[deck].stems_progress = Some(fraction);
             }
-            Update::Done { deck, track_id, stems, source } if current(self, deck, track_id) => {
+            Update::Done { deck, track_id, stems, wave, source } if current(self, deck, track_id) => {
                 self.decks[deck].stems_progress = None;
+                self.decks[deck].stem_wave = Some(wave);
                 self.decks[deck].stems_source = Some(source);
                 self.send(Command::AttachStems { deck: deck as u8, stems });
             }

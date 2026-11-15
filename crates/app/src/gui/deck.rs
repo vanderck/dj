@@ -194,7 +194,9 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
     // With stems enabled the pads are a little shorter to make room for the stems row.
     let stems_on = core.settings.stems_enabled;
     let y = y + bh + if stems_on { 10.0 } else { 14.0 };
-    let ph = if stems_on { 30.0 } else { 36.0 };
+    // Pads take whatever height is left (rows below: stems 26+10+10, tempo 30+12, loops 30).
+    let below = if stems_on { 10.0 + 26.0 + 10.0 } else { 14.0 } + 30.0 + 12.0 + 30.0;
+    let ph = ((r.bottom() - y - 8.0 - below) / 2.0).clamp(28.0, 46.0);
     let pw = (w - 3.0 * gap) / 4.0;
     for i in 0..8 {
         let rr = Rect::from_min_size(Pos2::new(r.left() + (i % 4) as f32 * (pw + gap), y + (i / 4) as f32 * (ph + 8.0)), Vec2::new(pw, ph));
@@ -389,6 +391,11 @@ fn stems_row(ui: &mut Ui, core: &mut Core, d: usize, r: Rect) {
         };
         let tip = if ready { "Lit = audible" } else { "Still separating: the setting applies as soon as stems are ready" };
         let resp = button(ui, rr, label, style, bold(11.5)).on_hover_text(tip);
+        if i < 4 {
+            // Colour mark: the stem's colour in the waveform lanes.
+            let mark = Rect::from_min_size(Pos2::new(rr.left() + 6.0, rr.bottom() - 4.0), Vec2::new(rr.width() - 12.0, 2.0));
+            ui.painter().rect_filled(mark, CornerRadius::same(1), if on_ { STEM[i] } else { dim(STEM[i], 0.5) });
+        }
         learnable(core, &resp, &a(addr));
         if resp.clicked() && v.loaded {
             act_i(core, &a(addr), !on_ as i32);

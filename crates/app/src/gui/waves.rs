@@ -62,6 +62,8 @@ fn draw_lane(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, lane: Rec
     }
     let wf = info.unwrap().waveform.clone();
     let names: Vec<String> = info.unwrap().cues.iter().map(|c| c.as_ref().map(|c| c.name.clone()).unwrap_or_default()).collect();
+    let zones = energy_zones(&v.hot_cues, &names, v.duration_secs);
+    let stem_wave = core.decks[d].stem_wave.clone();
 
     // Common scale: pixels per beat is the same for every deck, so synced
     // decks line up beat for beat.
@@ -72,6 +74,25 @@ fn draw_lane(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, lane: Rec
     let play_x = lane.left() + lane.width() * PLAYHEAD;
     let t_at = |x: f32| v.position_secs + (x - play_x) as f64 / px_per_sec;
     let x_at = |t: f64| play_x + ((t - v.position_secs) * px_per_sec) as f32;
+
+    // Energy zones (Mixed In Key "Energy N" cues): tint the lane, hotter = redder.
+    for z in &zones {
+        let (x0, x1) = (x_at(z.start).max(lane.left()), x_at(z.end).min(lane.right()));
+        if x1 > x0 {
+            let c = energy_color(z.level);
+            let a = 0.05 + 0.02 * z.level as f32;
+            p.rect_filled(Rect::from_min_max(Pos2::new(x0, lane.top()), Pos2::new(x1, lane.bottom())), CornerRadius::ZERO, alpha(c, a));
+        }
+    }
+
+    // ...and a solid energy band along the bottom of the lane.
+    let band_h = if lane.height() > 50.0 { 4.0 } else { 2.0 };
+    for z in &zones {
+        let (x0, x1) = (x_at(z.start).max(lane.left()), x_at(z.end).min(lane.right()));
+        if x1 > x0 {
+            p.rect_filled(Rect::from_min_max(Pos2::new(x0, lane.bottom() - band_h), Pos2::new(x1, lane.bottom())), CornerRadius::ZERO, energy_color(z.level));
+        }
+    }
 
     // Bar lines (behind the waveform).
     if v.has_grid {
@@ -100,6 +121,28 @@ fn draw_lane(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, lane: Rec
         let t0 = t_at(x);
         let t1 = t_at(x + step);
         let (a, b) = ((t0 * bps) as i64, ((t1 * bps).ceil() as i64).max((t0 * bps) as i64 + 1));
+        let played = x + bar_w < play_x;
+        if let Some(sw) = stem_wave.as_deref() {
+            // Separated: one bar per stem, loudest at the back so quieter stems stay visible.
+            // Muted stems are grey, so the lane shows what is actually audible.
+            let n = sw.levels[0].len() as i64;
+            if b > 0 && a < n {
+                let (a, b) = (a.max(0) as usize, b.min(n) as usize);
+                let mut bars: [(f32, usize); 4] = std::array::from_fn(|k| (sw.levels[k][a..b].iter().cloned().fold(0.0, f32::max), k));
+                bars.sort_by(|p, q| q.0.total_cmp(&p.0));
+                for (amp, k) in bars {
+                    if amp <= 0.002 {
+                        continue;
+                    }
+                    let h = (amp * hh).max(1.0);
+                    let base = if v.stem_gains[k] > 0.5 { STEM[k] } else { Color32::from_gray(70) };
+                    let c = if played { dim(base, 0.42) } else { base };
+                    p.rect_filled(Rect::from_min_max(Pos2::new(x, mid - h), Pos2::new(x + bar_w, mid + h)), CornerRadius::ZERO, c);
+                }
+            }
+            x += step;
+            continue;
+        }
         if b > 0 && a < nb {
             let (a, b) = (a.max(0) as usize, (b.min(nb)) as usize);
             let mut amp = 0.0f32;
@@ -107,7 +150,7 @@ fn draw_lane(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, lane: Rec
                 amp = amp.max((wf.low[i] * 0.9 + wf.mid[i] + wf.high[i] * 0.7).min(1.0));
             }
             let h = (amp * hh).max(1.0);
-            let c = if x + bar_w < play_x { dim(color, 0.42) } else { color };
+            let c = if played { dim(color, 0.42) } else { color };
             p.rect_filled(Rect::from_min_max(Pos2::new(x, mid - h), Pos2::new(x + bar_w, mid + h)), CornerRadius::ZERO, c);
         }
         x += step;
@@ -159,15 +202,81 @@ fn draw_lane(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, lane: Rec
     p.rect_filled(prog, CornerRadius::same(2), Color32::from_rgb(0x22, 0x22, 0x28));
     let dur = v.duration_secs.max(0.001);
     let frac = (v.position_secs / dur).clamp(0.0, 1.0) as f32;
-    p.rect_filled(Rect::from_min_size(prog.min, Vec2::new(prog.width() * frac, prog.height())), CornerRadius::same(2), color);
-    for c in v.hot_cues.iter().flatten() {
-        let x = prog.left() + (*c / dur) as f32 * prog.width();
-        p.rect_filled(Rect::from_center_size(Pos2::new(x, prog.center().y), Vec2::new(3.0, prog.height() + 2.0)), CornerRadius::ZERO, ORANGE);
+    let px = |t: f64| prog.left() + (t / dur).clamp(0.0, 1.0) as f32 * prog.width();
+    if zones.is_empty() {
+        p.rect_filled(Rect::from_min_size(prog.min, Vec2::new(prog.width() * frac, prog.height())), CornerRadius::same(2), color);
+    } else {
+        // The whole track's energy profile; the played part is darkened.
+        for z in &zones {
+            p.rect_filled(Rect::from_min_max(Pos2::new(px(z.start), prog.top()), Pos2::new(px(z.end), prog.bottom())), CornerRadius::ZERO, energy_color(z.level));
+        }
+        p.rect_filled(Rect::from_min_size(prog.min, Vec2::new(prog.width() * frac, prog.height())), CornerRadius::ZERO, Color32::from_black_alpha(150));
+        let hx = prog.left() + prog.width() * frac;
+        p.rect_filled(Rect::from_center_size(Pos2::new(hx, prog.center().y), Vec2::new(2.0, prog.height() + 4.0)), CornerRadius::ZERO, color);
+    }
+    // Cue ticks in the same colours as the cue flags and pads.
+    for (i, c) in v.hot_cues.iter().enumerate() {
+        let Some(t) = c else { continue };
+        p.rect_filled(Rect::from_center_size(Pos2::new(px(*t), prog.center().y), Vec2::new(3.0, prog.height() + 2.0)), CornerRadius::ZERO, CUE[i]);
     }
     let pr = ui.allocate_rect(prog.expand2(Vec2::new(0.0, 2.0)), Sense::click_and_drag());
     if pr.clicked() || pr.dragged() {
         if let Some(pos) = pr.interact_pointer_pos() {
             act_f(core, &format!("Deck/{}/WaveformSeek", d + 1), ((pos.x - prog.left()) / prog.width()).clamp(0.0, 1.0));
         }
+    }
+}
+
+/// A stretch of the track at one Mixed In Key energy level.
+struct Zone {
+    start: f64,
+    end: f64,
+    level: u8,
+}
+
+/// Energy level from a cue name such as "Energy 6" (Mixed In Key's cue naming).
+fn cue_energy(name: &str) -> Option<u8> {
+    let lower = name.to_ascii_lowercase();
+    let rest = &lower[lower.find("energy")? + "energy".len()..];
+    let digits: String = rest.trim_start().chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse::<u8>().ok().filter(|e| (1..=10).contains(e))
+}
+
+/// Zones between consecutive energy cues; the last one runs to the end of the track.
+fn energy_zones(cues: &[Option<f64>], names: &[String], duration: f64) -> Vec<Zone> {
+    let mut points: Vec<(f64, u8)> = cues
+        .iter()
+        .zip(names)
+        .filter_map(|(t, n)| Some(((*t)?, cue_energy(n)?)))
+        .collect();
+    points.sort_by(|a, b| a.0.total_cmp(&b.0));
+    points
+        .iter()
+        .enumerate()
+        .map(|(i, &(start, level))| Zone { start, end: points.get(i + 1).map_or(duration, |p| p.0), level })
+        .filter(|z| z.end > z.start)
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_mixed_in_key_energy_names() {
+        assert_eq!(cue_energy("Energy 6"), Some(6));
+        assert_eq!(cue_energy("energy10"), Some(10));
+        assert_eq!(cue_energy("Drop - Energy 8 (MIK)"), Some(8));
+        assert_eq!(cue_energy("Energy 0"), None);
+        assert_eq!(cue_energy("Chorus"), None);
+    }
+
+    #[test]
+    fn zones_follow_cue_order_and_end_at_the_next_cue() {
+        let cues = [Some(20.0), Some(0.5), None, Some(56.0), Some(40.0)];
+        let names = ["Energy 4", "Energy 2", "", "Energy 8", "Break"].map(String::from);
+        let z = energy_zones(&cues, &names, 190.0);
+        let got: Vec<(f64, f64, u8)> = z.iter().map(|z| (z.start, z.end, z.level)).collect();
+        assert_eq!(got, vec![(0.5, 20.0, 2), (20.0, 56.0, 4), (56.0, 190.0, 8)]);
     }
 }
