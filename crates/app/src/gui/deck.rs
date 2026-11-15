@@ -150,8 +150,8 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
     ui.painter().text(time_r.right_center(), Align2::RIGHT_CENTER, mmss_remain(v.duration_secs - v.position_secs), mono(30.0), if v.loaded && v.playing && v.duration_secs - v.position_secs < 30.0 { RED } else { TEXT });
     let bpm_r = Rect::from_min_size(Pos2::new(time_r.left() - 88.0, r.top()), Vec2::new(80.0, hh));
     let p = ui.painter();
-    p.text(Pos2::new(bpm_r.right(), bpm_r.top() + 4.0), Align2::RIGHT_TOP, if v.has_grid { format!("{:.2}", v.bpm) } else { "—".into() }, mono(22.0), TEXT);
-    p.text(Pos2::new(bpm_r.right(), bpm_r.bottom() - 2.0), Align2::RIGHT_BOTTOM, format!("{:+.1}%", (v.speed - 1.0) * 100.0), mono(12.0), color);
+    // (The tempo change in % is shown inside the tempo slider.)
+    p.text(Pos2::new(bpm_r.right(), bpm_r.center().y), Align2::RIGHT_CENTER, if v.has_grid { format!("{:.2}", v.bpm) } else { "—".into() }, mono(22.0), TEXT);
     let key = core.key_text(core.deck_key(d));
     let chip = Rect::from_min_size(Pos2::new(bpm_r.left() - 56.0, r.top() + 8.0), Vec2::new(46.0, 30.0));
     if !key.is_empty() {
@@ -161,14 +161,20 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
     title_block(ui, core, d, title_r, true);
 
     // ---------------------------------------------------------- transport row
+    // Vertical scale: rows grow to fill the card (e.g. 2-deck mode) instead of leaving space
+    // unused. Base layout heights: transport 52, pads 2×36+8, stems 26, tempo 30, loops 30 +
+    // gaps; never smaller than today's sizes, at most 1.8×.
+    let stems_on = core.settings.stems_enabled;
+    let base = 52.0 + 10.0 + 2.0 * 36.0 + 8.0 + if stems_on { 10.0 + 26.0 + 10.0 } else { 14.0 } + 30.0 + 12.0 + 30.0;
+    let k = ((r.bottom() - (r.top() + hh + 12.0)) / base).clamp(1.0, 1.8);
     let y = r.top() + hh + 12.0;
-    let bh = 52.0;
+    let bh = 52.0 * k;
     let big_w = (w - 3.0 * gap) / 4.0;
     let mut x = r.left();
     let mut big_btn = |ui: &mut Ui, label: &str, style: Style, wf: f32| -> egui::Response {
         let rr = Rect::from_min_size(Pos2::new(x, y), Vec2::new(big_w * wf, bh));
         x += big_w * wf + gap;
-        button(ui, rr, label, style, bold(17.0))
+        button(ui, rr, label, style, bold(17.0 * k.min(1.35)))
     };
     let resp = big_btn(ui, "Cue", Style::Outline(ORANGE, false), 0.86);
     learnable(core, &resp, &a("Cue"));
@@ -192,11 +198,10 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
 
     // ---------------------------------------------------------- hot cues
     // With stems enabled the pads are a little shorter to make room for the stems row.
-    let stems_on = core.settings.stems_enabled;
-    let y = y + bh + if stems_on { 10.0 } else { 14.0 };
+    let y = y + bh + (if stems_on { 10.0 } else { 14.0 }) * k;
     // Pads take whatever height is left (rows below: stems 26+10+10, tempo 30+12, loops 30).
-    let below = if stems_on { 10.0 + 26.0 + 10.0 } else { 14.0 } + 30.0 + 12.0 + 30.0;
-    let ph = ((r.bottom() - y - 8.0 - below) / 2.0).clamp(28.0, 46.0);
+    let below = (if stems_on { 10.0 + 26.0 + 10.0 } else { 14.0 } + 30.0 + 12.0 + 30.0) * k;
+    let ph = ((r.bottom() - y - 8.0 - below) / 2.0).clamp(28.0, 46.0 * k);
     let pw = (w - 3.0 * gap) / 4.0;
     for i in 0..8 {
         let rr = Rect::from_min_size(Pos2::new(r.left() + (i % 4) as f32 * (pw + gap), y + (i / 4) as f32 * (ph + 8.0)), Vec2::new(pw, ph));
@@ -245,15 +250,15 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
     // ---------------------------------------------------------- stems
     let after_cues = y + 2.0 * ph + 8.0;
     let y = if stems_on {
-        let stems_h = 26.0;
-        stems_row(ui, core, d, Rect::from_min_size(Pos2::new(r.left(), after_cues + 10.0), Vec2::new(w, stems_h)));
-        after_cues + 10.0 + stems_h + 10.0
+        let stems_h = 26.0 * k;
+        stems_row(ui, core, d, Rect::from_min_size(Pos2::new(r.left(), after_cues + 10.0 * k), Vec2::new(w, stems_h)));
+        after_cues + (10.0 + 10.0) * k + stems_h
     } else {
-        after_cues + 14.0
+        after_cues + 14.0 * k
     };
 
     // ---------------------------------------------------------- tempo
-    let th = 30.0;
+    let th = 30.0 * k;
     let minus = Rect::from_min_size(Pos2::new(r.left(), y), Vec2::new(36.0, th));
     let plus = Rect::from_min_size(Pos2::new(r.right() - 36.0, y), Vec2::new(36.0, th));
     let follower = v.sync && !is_master;
@@ -274,7 +279,10 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
     p.rect_filled(Rect::from_min_max(Pos2::new(cx.min(hx), track.top()), Pos2::new(cx.max(hx), track.bottom())), CornerRadius::same(4), alpha(color, 0.32));
     p.line_segment([Pos2::new(cx, track.top() + 6.0), Pos2::new(cx, track.bottom() - 6.0)], Stroke::new(1.0, TEXT_FAINT));
     p.text(Pos2::new(track.left() + 12.0, track.center().y), Align2::LEFT_CENTER, format!("Tempo {}", v.tempo_range.label()), sans(13.0), if follower { TEXT_DIM } else { TEXT });
-    let handle = Rect::from_center_size(Pos2::new(hx, track.center().y), Vec2::new(12.0, 26.0));
+    let pct = (v.speed - 1.0) * 100.0;
+    let pct_col = if pct.abs() < 0.05 { TEXT_DIM } else { color };
+    p.text(Pos2::new(track.right() - 12.0, track.center().y), Align2::RIGHT_CENTER, format!("{pct:+.1}%"), mono(13.0 * k.min(1.3)), pct_col);
+    let handle = Rect::from_center_size(Pos2::new(hx, track.center().y), Vec2::new(12.0, th - 4.0));
     p.rect_filled(handle, CornerRadius::same(4), color);
     p.line_segment([Pos2::new(hx, handle.top() + 6.0), Pos2::new(hx, handle.bottom() - 6.0)], Stroke::new(2.0, on(color)));
     let resp = resp.on_hover_text(format!("{:+.2}% · drag (Shift: fine), double-click: reset, right-click: range{}", (v.speed - 1.0) * 100.0, if follower { " · following the clock" } else { "" }));
@@ -300,8 +308,8 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
 
     // ---------------------------------------------------------- loops
     // (Hi / Mid / Low / Filter live in the mixer: the ▾ next to each channel's CUE.)
-    let y = y + th + 12.0;
-    let lh = 30.0;
+    let y = y + th + 12.0 * k;
+    let lh = 30.0 * k;
     let size = st.loop_size[d];
     let size_txt = if v.loop_on { beats_label(v.loop_beats) } else { beats_label(size) };
     let pending = core.decks[d].loop_in_pending && !v.loop_on;
@@ -316,7 +324,7 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
             0 | 2 if v.loop_on => Style::Light,
             _ => Style::Dark,
         };
-        let resp = button(ui, rr, label, style, bold(13.0));
+        let resp = button(ui, rr, label, style, bold(13.0 * k.min(1.3)));
         match i {
             0 => {
                 let resp = resp.on_hover_text("Loop in, then loop out · while looping: exit");
