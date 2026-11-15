@@ -28,7 +28,15 @@ AUDIO_SUFFIXES = {".wav", ".flac", ".mp3", ".ogg", ".aif", ".aiff"}
 
 
 def find_audio(root: Path) -> list:
-    return sorted(p for p in root.rglob("*") if p.suffix.lower() in AUDIO_SUFFIXES and p.is_file())
+    """Audio files under `root`, skipping hidden files and folders. That includes macOS "._*"
+    AppleDouble files, which carry an audio extension on non-Mac volumes but are not audio."""
+    return sorted(
+        p
+        for p in root.rglob("*")
+        if p.suffix.lower() in AUDIO_SUFFIXES
+        and not any(part.startswith(".") for part in p.relative_to(root).parts)
+        and p.is_file()
+    )
 
 
 def song_id(path: Path, root: Path) -> str:

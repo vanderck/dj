@@ -44,3 +44,12 @@ def test_split_is_deterministic():
     valid = [n for n in names if teacher.split_for(n, 0.05) == "valid"]
     assert 50 < len(valid) < 150
     assert valid == [n for n in names if teacher.split_for(n, 0.05) == "valid"]
+
+
+def test_skips_macos_metadata_and_hidden_files(tmp_path):
+    (tmp_path / "album").mkdir()
+    (tmp_path / ".hidden").mkdir()
+    for name in ["album/song.mp3", "album/._song.mp3", ".hidden/x.flac", "._top.wav", "top.wav", "notes.txt"]:
+        (tmp_path / name).write_bytes(b"x")
+    found = [p.relative_to(tmp_path).as_posix() for p in teacher.find_audio(tmp_path)]
+    assert found == ["album/song.mp3", "top.wav"]
