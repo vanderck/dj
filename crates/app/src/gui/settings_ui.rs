@@ -256,6 +256,7 @@ fn settings(ui: &mut Ui, core: &mut Core, st: &mut UiState) {
         let active = crate::stems::resolve_model(core.settings.stems_model.as_deref());
         let note = match (&core.settings.stems_model, &active) {
             (Some(_), _) => "Applies to tracks loaded from now on.".to_string(),
+            (None, Some(p)) if Some(p) == crate::stems::bundled_model().as_ref() => "Using the model bundled with the app.".to_string(),
             (None, Some(p)) => format!("Using STEMS_MODEL: {}", p.display()),
             (None, None) => "No model: a low-quality placeholder separator is used.".to_string(),
         };
