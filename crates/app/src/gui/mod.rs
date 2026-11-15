@@ -46,7 +46,6 @@ pub struct UiState {
     pub browser_asc: bool,
     /// Which deck is shown large on the left (0 or 2) and right (1 or 3).
     pub focus: [usize; 2],
-    pub roll: [bool; 4],
     pub loop_size: [f64; 4],
     pub lane_zoom: f32,
     pub taps: Vec<Instant>,
@@ -70,7 +69,6 @@ impl Default for UiState {
             browser_sort: browser::Col::Artist,
             browser_asc: true,
             focus: [0, 1],
-            roll: [false; 4],
             loop_size: [4.0; 4],
             lane_zoom: 1.0,
             taps: Vec::new(),
@@ -217,7 +215,8 @@ impl eframe::App for App {
             let mixer_w = (area.width() * 0.31).clamp(360.0, 640.0);
             let deck_w = (area.width() - mixer_w - 2.0 * gap) / 2.0;
             let four = self.core.deck_count() >= 4;
-            let compact_h = 98.0;
+            // One row: badge, title, key, Swap, Cue, Play, Sync.
+            let compact_h = 62.0;
             for side in 0..2 {
                 let x = if side == 0 { mid.left() } else { mid.right() - deck_w };
                 let big_d = self.ui.focus[side];

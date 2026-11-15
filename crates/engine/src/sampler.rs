@@ -85,7 +85,10 @@ pub struct Step {
 
 impl Default for Step {
     fn default() -> Self {
-        Self { on: false, velocity: 1.0 }
+        Self {
+            on: false,
+            velocity: 1.0,
+        }
     }
 }
 
@@ -226,10 +229,13 @@ impl Sampler {
     }
 
     fn start_voice(&mut self, lane: usize, velocity: f32, delay: u32) {
-        let Some(sample) = self.samples.get(lane).and_then(|s| s.as_ref()) else { return };
+        let Some(sample) = self.samples.get(lane).and_then(|s| s.as_ref()) else {
+            return;
+        };
         let lp = self.lanes[lane];
         let len = sample.frames.len() as f64;
-        let rate = sample.sample_rate as f64 / self.out_rate * 2f64.powf((lp.pitch + self.global_pitch) as f64 / 12.0);
+        let rate = sample.sample_rate as f64 / self.out_rate
+            * 2f64.powf((lp.pitch + self.global_pitch) as f64 / 12.0);
         if lp.mono {
             for v in self.voices.iter_mut() {
                 if v.active && v.lane as usize == lane && !v.releasing {
@@ -245,7 +251,14 @@ impl Sampler {
             .voices
             .iter()
             .position(|v| !v.active)
-            .unwrap_or_else(|| self.voices.iter().enumerate().min_by_key(|(_, v)| v.age).map(|(i, _)| i).unwrap());
+            .unwrap_or_else(|| {
+                self.voices
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, v)| v.age)
+                    .map(|(i, _)| i)
+                    .unwrap()
+            });
         self.age += 1;
         let attack_frames = lp.attack * 0.5 * self.out_rate as f32;
         let release_frames = (lp.release * 2.0 * self.out_rate as f32).max(16.0);
@@ -259,7 +272,11 @@ impl Sampler {
             rate,
             gain: velocity * lp.volume,
             env: if attack_frames < 1.0 { 1.0 } else { 0.0 },
-            attack_inc: if attack_frames < 1.0 { 1.0 } else { 1.0 / attack_frames },
+            attack_inc: if attack_frames < 1.0 {
+                1.0
+            } else {
+                1.0 / attack_frames
+            },
             releasing: false,
             release_mul,
             release_lin,
@@ -320,7 +337,8 @@ impl Sampler {
                         self.current_step[lane] = pi as i8;
                         let step = self.patterns[self.pattern][lane][pi];
                         if step.on && !self.lanes[lane].mute {
-                            let off = ((t - r0) / bpf - 1e-7).ceil().clamp(0.0, (n - 1) as f64) as u32;
+                            let off =
+                                ((t - r0) / bpf - 1e-7).ceil().clamp(0.0, (n - 1) as f64) as u32;
                             self.start_voice(lane, step.velocity, off);
                         }
                     }
@@ -388,7 +406,10 @@ impl Sampler {
             let l = v.lane as usize;
             if v.age >= newest[l] {
                 newest[l] = v.age;
-                let len = self.samples[l].as_ref().map(|s| s.frames.len()).unwrap_or(1) as f64;
+                let len = self.samples[l]
+                    .as_ref()
+                    .map(|s| s.frames.len())
+                    .unwrap_or(1) as f64;
                 progress[l] = (v.pos / len) as f32;
             }
         }
@@ -413,7 +434,10 @@ mod tests {
         for f in frames.iter_mut().take(100) {
             *f = [1.0, 1.0];
         }
-        Arc::new(AudioData { sample_rate: 48000, frames })
+        Arc::new(AudioData {
+            sample_rate: 48000,
+            frames,
+        })
     }
 
     #[test]
@@ -445,7 +469,10 @@ mod tests {
             frame += 256;
         }
         // 120 BPM → one beat every 24000 frames.
-        assert_eq!(&onsets[..4], &[0, 24000, 48000, 72000][..onsets.len().min(4)]);
+        assert_eq!(
+            &onsets[..4],
+            &[0, 24000, 48000, 72000][..onsets.len().min(4)]
+        );
         assert!(onsets.len() >= 4);
     }
 

@@ -32,8 +32,12 @@ impl FaderCurve {
         }
     }
 
-    pub const ALL: [FaderCurve; 4] =
-        [FaderCurve::LinearDb, FaderCurve::ConstantPower, FaderCurve::Dipped, FaderCurve::FastCut];
+    pub const ALL: [FaderCurve; 4] = [
+        FaderCurve::LinearDb,
+        FaderCurve::ConstantPower,
+        FaderCurve::Dipped,
+        FaderCurve::FastCut,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -65,7 +69,12 @@ pub struct ExtStages {
 
 impl Default for ExtStages {
     fn default() -> Self {
-        Self { trim: false, eq: true, filter: true, volume: false }
+        Self {
+            trim: false,
+            eq: true,
+            filter: true,
+            volume: false,
+        }
     }
 }
 
@@ -236,12 +245,31 @@ impl Channel {
 
     /// Process one block. `buf` holds the source (deck) audio and is
     /// overwritten with the channel output. Returns the cue tap if enabled.
-    pub fn process(&mut self, buf: &mut [Frame], ctx: &FxCtx, curve: FaderCurve, audible: bool) -> Option<&[Frame]> {
+    pub fn process(
+        &mut self,
+        buf: &mut [Frame],
+        ctx: &FxCtx,
+        curve: FaderCurve,
+        audible: bool,
+    ) -> Option<&[Frame]> {
         let p = self.params;
         let direct = matches!(p.output, Output::Pair(_));
-        let st = if direct { self.ext_stages } else { ExtStages { trim: true, eq: true, filter: true, volume: true } };
+        let st = if direct {
+            self.ext_stages
+        } else {
+            ExtStages {
+                trim: true,
+                eq: true,
+                filter: true,
+                volume: true,
+            }
+        };
 
-        self.trim.set(if st.trim { db_to_gain(p.trim_db.clamp(-6.0, 6.0)) } else { 1.0 });
+        self.trim.set(if st.trim {
+            db_to_gain(p.trim_db.clamp(-6.0, 6.0))
+        } else {
+            1.0
+        });
         for b in 0..3 {
             self.eq_gain[b].set(if st.eq { eq_gain(p.eq[b]) } else { 1.0 });
         }
@@ -256,7 +284,10 @@ impl Channel {
         let fader = if st.volume { curve.gain(p.volume) } else { 1.0 };
         self.vol.set(if audible { fader } else { 0.0 });
 
-        let eq_active = self.eq_gain.iter().any(|g| !(g.is_settled() && g.current == 1.0));
+        let eq_active = self
+            .eq_gain
+            .iter()
+            .any(|g| !(g.is_settled() && g.current == 1.0));
 
         for f in buf.iter_mut() {
             let t = self.trim.next();
@@ -362,7 +393,10 @@ pub fn mix_gains(mode: MixMode, assign: &[XfAssign; 4]) -> [f32; 4] {
                 // Equal power, but unity at centre so a blend doesn't dip.
                 let a = (t * std::f32::consts::FRAC_PI_2).cos();
                 let b = (t * std::f32::consts::FRAC_PI_2).sin();
-                ((a * std::f32::consts::SQRT_2).min(1.0), (b * std::f32::consts::SQRT_2).min(1.0))
+                (
+                    (a * std::f32::consts::SQRT_2).min(1.0),
+                    (b * std::f32::consts::SQRT_2).min(1.0),
+                )
             };
             let mut g = [1.0; 4];
             for i in 0..4 {
@@ -376,7 +410,12 @@ pub fn mix_gains(mode: MixMode, assign: &[XfAssign; 4]) -> [f32; 4] {
         }
         MixMode::Delta { a, b, c } => {
             let s = (a.max(0.0) + b.max(0.0) + c.max(0.0)).max(1e-6);
-            [(a.max(0.0) / s).sqrt(), (b.max(0.0) / s).sqrt(), (c.max(0.0) / s).sqrt(), 1.0]
+            [
+                (a.max(0.0) / s).sqrt(),
+                (b.max(0.0) / s).sqrt(),
+                (c.max(0.0) / s).sqrt(),
+                1.0,
+            ]
         }
         MixMode::Vector { x, y } => {
             let x = x.clamp(0.0, 1.0);
@@ -399,7 +438,9 @@ mod tests {
     #[test]
     fn neutral_channel_is_transparent() {
         let mut ch = Channel::new(48000.0, 512, 1024);
-        let input: Vec<Frame> = (0..512).map(|i| [((i as f32) * 0.05).sin() * 0.5; 2]).collect();
+        let input: Vec<Frame> = (0..512)
+            .map(|i| [((i as f32) * 0.05).sin() * 0.5; 2])
+            .collect();
         let mut buf = input.clone();
         ch.process(&mut buf, &ctx(), FaderCurve::LinearDb, true);
         for (a, b) in input.iter().zip(&buf) {
@@ -449,9 +490,21 @@ mod tests {
     #[test]
     fn crossfader_assign() {
         let assign = [XfAssign::A, XfAssign::B, XfAssign::Thru, XfAssign::Thru];
-        let g = mix_gains(MixMode::Crossfader { pos: -1.0, sharp: false }, &assign);
+        let g = mix_gains(
+            MixMode::Crossfader {
+                pos: -1.0,
+                sharp: false,
+            },
+            &assign,
+        );
         assert!((g[0] - 1.0).abs() < 1e-5 && g[1] < 1e-5 && g[2] == 1.0);
-        let g = mix_gains(MixMode::Crossfader { pos: 0.0, sharp: false }, &assign);
+        let g = mix_gains(
+            MixMode::Crossfader {
+                pos: 0.0,
+                sharp: false,
+            },
+            &assign,
+        );
         assert!((g[0] - 1.0).abs() < 1e-5 && (g[1] - 1.0).abs() < 1e-5);
     }
 

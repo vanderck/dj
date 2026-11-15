@@ -7,7 +7,7 @@ use eframe::egui::{self, Align2, Color32, CornerRadius, Pos2, Rect, Sense, Strok
 use collective_engine::dsp::gain_to_db;
 use collective_engine::engine::{ClockOwner, NUM_DECKS};
 use collective_engine::fx::SlotHealth;
-use collective_engine::mixer::{MixMode, Output};
+use collective_engine::mixer::Output;
 
 use super::skin::*;
 use super::{act_f, act_i, learnable, UiState};
@@ -31,8 +31,7 @@ pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect) {
     let r = rect.shrink(16.0);
     top_bar(ui, core, st, Rect::from_min_size(r.min, Vec2::new(r.width(), 38.0)));
 
-    let xf_h = 34.0;
-    let strips = Rect::from_min_max(Pos2::new(r.left(), r.top() + 52.0), Pos2::new(r.right(), r.bottom() - xf_h - 14.0));
+    let strips = Rect::from_min_max(Pos2::new(r.left(), r.top() + 52.0), r.right_bottom());
     let order: Vec<Option<usize>> = if core.deck_count() >= 4 { vec![Some(2), Some(0), None, Some(1), Some(3)] } else { vec![Some(0), None, Some(1)] };
     let gap = 10.0;
     let sw = (strips.width() - gap * (order.len() as f32 - 1.0)) / order.len() as f32;
@@ -43,7 +42,6 @@ pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect) {
             None => master_strip(ui, core, sr),
         }
     }
-    crossfader(ui, core, Rect::from_min_size(Pos2::new(r.left(), r.bottom() - xf_h), Vec2::new(r.width(), xf_h)));
 }
 
 fn top_bar(ui: &mut Ui, core: &mut Core, st: &mut UiState, r: Rect) {
@@ -263,14 +261,14 @@ fn strip(ui: &mut Ui, core: &mut Core, st: &mut UiState, ch: usize, rect: Rect) 
     let r = rect.shrink2(Vec2::new(8.0, 12.0));
     let title_r = Rect::from_min_size(r.min, Vec2::new(r.width(), 16.0));
     let tr = ui.allocate_rect(title_r, Sense::click()).on_hover_text("Right-click: mute, solo, trim, output…");
-    ui.painter().text(title_r.center(), Align2::CENTER_CENTER, format!("CH {n}"), mono(12.0), TEXT_DIM);
+    ui.painter().text(title_r.center(), Align2::CENTER_CENTER, if p.mute { format!("CH {n} · MUTE") } else { format!("CH {n}") }, mono(12.0), if p.mute { RED } else { TEXT_DIM });
     tr.context_menu(|ui| channel_menu(ui, core, ch));
-    let gain = core.settings.fader_curve.gain(p.volume);
-    let label = if p.mute { "MUTE".to_string() } else { db_text(gain) };
-    ui.painter().text(Pos2::new(r.center().x, title_r.bottom() + 16.0), Align2::CENTER_CENTER, label, mono(22.0), if p.mute { TEXT_FAINT } else { color });
 
-    // CUE pill.
-    let cue_r = Rect::from_min_size(Pos2::new(r.left() + 2.0, title_r.bottom() + 34.0), Vec2::new(r.width() - 4.0, 26.0));
+    // CUE | ▾  (the arrow opens EQ, filter and FX).
+    let pill = Rect::from_min_size(Pos2::new(r.left() + 2.0, title_r.bottom() + 10.0), Vec2::new(r.width() - 4.0, 28.0));
+    let arrow_w = 26.0;
+    let cue_r = Rect::from_min_max(pill.min, Pos2::new(pill.right() - arrow_w - 3.0, pill.bottom()));
+    let arrow_r = Rect::from_min_max(Pos2::new(pill.right() - arrow_w, pill.top()), pill.max);
     let cue_style = if p.cue { Style::Outline(ORANGE, true) } else { Style::Outline(Color32::from_gray(64), false) };
     let resp = button(ui, cue_r, "CUE", cue_style, mono(12.0));
     if p.cue {
@@ -280,10 +278,22 @@ fn strip(ui: &mut Ui, core: &mut Core, st: &mut UiState, ch: usize, rect: Rect) 
     if resp.clicked() {
         act_i(core, &a("Cue"), !p.cue as i32);
     }
+    let arrow = button(ui, arrow_r, "▾", Style::Outline(Color32::from_gray(64), false), bold(13.0)).on_hover_text("EQ, filter and effects");
+    // Status dots: EQ/filter moved away from neutral, effects active.
+    let eq_moved = p.eq.iter().any(|v| (v - 0.5).abs() > 0.01) || (p.cutoff - 0.5).abs() > 0.01;
+    let fx_on = cm.fx.slots.iter().any(|s| s.is_some()) && !cm.fx.bypass_all;
+    for (i, (show, col)) in [(eq_moved, color), (fx_on, GREEN)].into_iter().enumerate() {
+        if show {
+            ui.painter().circle_filled(Pos2::new(arrow_r.center().x - 3.0 + i as f32 * 6.0, arrow_r.bottom() - 5.0), 2.0, col);
+        }
+    }
+    egui::Popup::from_toggle_button_response(&arrow)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .width(230.0)
+        .show(|ui| channel_dropdown(ui, core, st, ch));
 
     // Fader.
-    let bottom_h = 30.0;
-    let track = Rect::from_min_max(Pos2::new(r.left() + 4.0, cue_r.bottom() + 14.0), Pos2::new(r.right() - 4.0, r.bottom() - bottom_h - 12.0));
+    let track = Rect::from_min_max(Pos2::new(r.left() + 4.0, pill.bottom() + 14.0), Pos2::new(r.right() - 4.0, r.bottom()));
     let meter = view.post_peak[0].max(view.post_peak[1]);
     let (resp, new) = vfader(ui, track, p.volume, if p.mute { Color32::from_gray(90) } else { color }, meter);
     let resp = resp.on_hover_text(format!("Volume · {} · Ctrl-drag: trim ({:+.1} dB) · double-click: unity", core.settings.fader_curve.label(), p.trim_db));
@@ -301,41 +311,63 @@ fn strip(ui: &mut Ui, core: &mut Core, st: &mut UiState, ch: usize, rect: Rect) 
             act_f(core, &a("Volume"), 1.0);
         }
     }
+}
 
-    // − FX +
-    let by = r.bottom() - bottom_h;
-    let bw = (r.width() - 8.0) / 3.0;
-    let minus = Rect::from_min_size(Pos2::new(r.left(), by), Vec2::new(bw, bottom_h));
-    let fx = Rect::from_min_size(Pos2::new(minus.right() + 4.0, by), Vec2::new(bw, bottom_h));
-    let plus = Rect::from_min_size(Pos2::new(fx.right() + 4.0, by), Vec2::new(bw, bottom_h));
-    if button(ui, minus, "−", Style::Dark, bold(16.0)).clicked() {
-        act_f(core, &a("Volume"), (p.volume - 0.05).max(0.0));
+/// Hi / Mid / Low / Filter and the insert effects of one channel (the ▾ next to CUE).
+fn channel_dropdown(ui: &mut Ui, core: &mut Core, st: &mut UiState, ch: usize) {
+    let n = ch + 1;
+    let a = |s: &str| format!("Mixer/CH{n}/{s}");
+    let cm = core.session.channels[ch].clone();
+    let p = cm.params;
+    let view = core.snap.channels[ch];
+    let color = DECK[ch];
+    ui.label(egui::RichText::new(format!("CH {n}")).font(mono(12.0)).color(TEXT_DIM));
+    ui.add_space(4.0);
+    let w = ui.available_width();
+    for (label, addr, val, def, is_eq) in [
+        ("Hi", a("EQ/High"), p.eq[2], 0.5, true),
+        ("Mid", a("EQ/Mid"), p.eq[1], 0.5, true),
+        ("Low", a("EQ/Low"), p.eq[0], 0.5, true),
+        ("Filter", a("Filter1"), p.cutoff, 0.5, false),
+    ] {
+        let (rr, _) = ui.allocate_exact_size(Vec2::new(w, 34.0), Sense::hover());
+        let mut vv = val;
+        let killed = is_eq && val <= 0.001;
+        let (resp, label_clicked) = mini_slider(ui, rr, &mut vv, def, label, killed, color);
+        let resp = resp.on_hover_text(if is_eq { "Double-click: reset · click label: kill" } else { "Double-click or click label: reset" });
+        learnable(core, &resp, &addr);
+        if resp.changed() {
+            act_f(core, &addr, vv);
+        }
+        if label_clicked {
+            act_f(core, &addr, if is_eq && !killed { 0.0 } else { def });
+        }
     }
-    if button(ui, plus, "+", Style::Dark, bold(16.0)).clicked() {
-        act_f(core, &a("Volume"), (p.volume + 0.05).min(1.0));
-    }
-    let has = cm.fx.slots.iter().any(|s| s.is_some());
-    let fx_style = if has && !cm.fx.bypass_all { Style::Light } else { Style::Dark };
-    let resp = button(ui, fx, "FX", fx_style, bold(11.0)).on_hover_text("Insert effects (right-click: bypass all)");
-    // Slot dots.
-    let dots_y = fx.bottom() - 5.0;
-    for s in 0..4 {
-        let col = match (&cm.fx.slots[s], view.fx[s]) {
-            (None, _) => continue,
-            (Some(m), _) if m.missing => RED,
-            (Some(_), Some((_, SlotHealth::Failed, _))) => RED,
-            (Some(_), Some((true, _, _))) => GREEN,
-            _ => Color32::from_gray(110),
-        };
-        ui.painter().circle_filled(Pos2::new(fx.center().x - 9.0 + s as f32 * 6.0, dots_y), 1.8, col);
-    }
-    learnable(core, &resp, &a("FX"));
-    if resp.clicked() && !core.learn {
-        st.fx_open[ch] = !st.fx_open[ch];
-    }
-    if resp.secondary_clicked() {
-        act_i(core, &a("FX"), cm.fx.bypass_all as i32);
-    }
+    ui.add_space(4.0);
+    ui.separator();
+    ui.horizontal(|ui| {
+        let slots = cm.fx.slots.iter().filter(|s| s.is_some()).count();
+        let open = ui.add(egui::Button::new(format!("Effects ({slots})…")).selected(st.fx_open[ch]));
+        learnable(core, &open, &a("FX"));
+        if open.clicked() && !core.learn {
+            st.fx_open[ch] = !st.fx_open[ch];
+        }
+        if slots > 0 && ui.selectable_label(cm.fx.bypass_all, "Bypass").clicked() {
+            act_i(core, &a("FX"), cm.fx.bypass_all as i32);
+        }
+        // One dot per occupied slot: green running, red failed/missing, grey bypassed.
+        for s in 0..cm.fx.slots.len().min(4) {
+            let col = match (&cm.fx.slots[s], view.fx[s]) {
+                (None, _) => continue,
+                (Some(m), _) if m.missing => RED,
+                (Some(_), Some((_, SlotHealth::Failed, _))) => RED,
+                (Some(_), Some((true, _, _))) => GREEN,
+                _ => Color32::from_gray(110),
+            };
+            let (dot, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
+            ui.painter().circle_filled(dot.center(), 3.0, col);
+        }
+    });
 }
 
 fn channel_menu(ui: &mut Ui, core: &mut Core, ch: usize) {
@@ -384,17 +416,16 @@ fn master_strip(ui: &mut Ui, core: &mut Core, rect: Rect) {
     let s = core.snap;
     let title_r = Rect::from_min_size(r.min, Vec2::new(r.width(), 16.0));
     ui.painter().text(title_r.center(), Align2::CENTER_CENTER, "MASTER", mono(12.0), TEXT_DIM);
-    ui.painter().text(Pos2::new(r.center().x, title_r.bottom() + 16.0), Align2::CENTER_CENTER, db_text(MasterModel::knob_gain(m.volume)), mono(22.0), TEXT);
-    let lim_r = Rect::from_min_size(Pos2::new(r.left() + 2.0, title_r.bottom() + 34.0), Vec2::new(r.width() - 4.0, 26.0));
+    let lim_r = Rect::from_min_size(Pos2::new(r.left() + 2.0, title_r.bottom() + 10.0), Vec2::new(r.width() - 4.0, 28.0));
     let style = if m.limiter { Style::Outline(LIGHT, true) } else { Style::Outline(Color32::from_gray(64), false) };
     let resp = button(ui, lim_r, "LIMIT", style, mono(12.0)).on_hover_text(format!("Master limiter · reduction {:.1} dB", s.limiter_db));
     learnable(core, &resp, "Header/Limiter");
     if resp.clicked() {
         act_i(core, "Header/Limiter", !m.limiter as i32);
     }
-    let bottom_h = 30.0;
-    let track = Rect::from_min_max(Pos2::new(r.left() + 4.0, lim_r.bottom() + 14.0), Pos2::new(r.right() - 4.0, r.bottom() - bottom_h - 12.0));
+    let track = Rect::from_min_max(Pos2::new(r.left() + 4.0, lim_r.bottom() + 14.0), Pos2::new(r.right() - 4.0, r.bottom()));
     let (resp, new) = vfader(ui, track, m.volume, Color32::from_gray(200), s.master.peak[0].max(s.master.peak[1]));
+    let resp = resp.on_hover_text(format!("Master · {} · double-click: reset", db_text(MasterModel::knob_gain(m.volume))));
     learnable(core, &resp, "Header/MasterVolume");
     if let (Some(v), false) = (new, core.learn) {
         act_f(core, "Header/MasterVolume", v);
@@ -402,39 +433,6 @@ fn master_strip(ui: &mut Ui, core: &mut Core, rect: Rect) {
     if resp.double_clicked() {
         act_f(core, "Header/MasterVolume", 0.85);
     }
-    let by = r.bottom() - bottom_h;
-    let bw = (r.width() - 4.0) / 2.0;
-    if button(ui, Rect::from_min_size(Pos2::new(r.left(), by), Vec2::new(bw, bottom_h)), "−", Style::Dark, bold(16.0)).clicked() {
-        act_f(core, "Header/MasterVolume", (m.volume - 0.03).max(0.0));
-    }
-    if button(ui, Rect::from_min_size(Pos2::new(r.left() + bw + 4.0, by), Vec2::new(bw, bottom_h)), "+", Style::Dark, bold(16.0)).clicked() {
-        act_f(core, "Header/MasterVolume", (m.volume + 0.03).min(1.0));
-    }
     let _ = NUM_DECKS;
 }
 
-fn crossfader(ui: &mut Ui, core: &mut Core, r: Rect) {
-    let resp = ui.allocate_rect(r, Sense::click_and_drag());
-    let p = ui.painter();
-    p.rect_filled(r, CornerRadius::same(8), WELL);
-    let active = matches!(core.session.mix_mode, MixMode::Crossfader { .. });
-    p.text(Pos2::new(r.left() + 14.0, r.center().y), Align2::LEFT_CENTER, "Crossfader", sans(13.0), if active { TEXT } else { TEXT_DIM });
-    let t = (core.session.crossfader + 1.0) / 2.0;
-    let x = r.left() + 10.0 + t * (r.width() - 20.0);
-    let h = Rect::from_center_size(Pos2::new(x, r.center().y), Vec2::new(14.0, r.height() - 6.0));
-    p.rect_filled(h, CornerRadius::same(4), if active { LIGHT } else { Color32::from_gray(120) });
-    p.line_segment([Pos2::new(x, h.top() + 6.0), Pos2::new(x, h.bottom() - 6.0)], Stroke::new(2.0, Color32::from_gray(30)));
-    let resp = resp.on_hover_text("Deck 1/3 ← → deck 2/4 (assign per channel in Settings). Double-click: centre.");
-    learnable(core, &resp, "Header/Crossfader");
-    if core.learn {
-        return;
-    }
-    if resp.dragged() || resp.clicked() {
-        if let Some(pos) = resp.interact_pointer_pos() {
-            act_f(core, "Header/Crossfader", ((pos.x - r.left() - 10.0) / (r.width() - 20.0)).clamp(0.0, 1.0));
-        }
-    }
-    if resp.double_clicked() {
-        act_f(core, "Header/Crossfader", 0.5);
-    }
-}

@@ -62,6 +62,8 @@ pub struct DeckUi {
     pub stems_progress: Option<f32>,
     /// What produced the attached stems (model name, "placeholder separator", "cache").
     pub stems_source: Option<String>,
+    /// `LoopInOut` set a loop start and is waiting for the end.
+    pub loop_in_pending: bool,
     /// Bar/beat last reported over OSC.
     last_beat: i64,
 }
@@ -97,7 +99,7 @@ pub fn addr_kind(addr: &str) -> Kind {
     match l.as_str() {
         "playpause" | "gridstart" | "temposync" | "tempomaster" | "loop" | "loopin" | "loopout" | "loopexit"
         | "skipbeatback" | "skipbeatforward" | "skipbarback" | "skipbarforward" | "pitchdown" | "pitchup"
-        | "pitchreset" | "phasereset" | "eject" | "loadselected" | "gridstarthere" | "master" | "resend" | "save"
+        | "pitchreset" | "phasereset" | "eject" | "loadselected" | "gridstarthere" | "master" | "resend" | "save" | "loopinout"
         | "previous" | "next" | "tap" => Kind::Trigger,
         "playing" | "cuemomentary" | "slip" | "cueslip" | "faderstart" | "speedhalf" | "speeddouble" | "reverse"
         | "slipdotted" | "slipth" | "sliptriplet" | "pitchpreserve" | "mute" | "solo" | "fx" | "on" | "limiter"
@@ -434,6 +436,7 @@ impl Core {
         self.stems.cancel(d);
         self.decks[d].stems_progress = None;
         self.decks[d].stems_source = None;
+        self.decks[d].loop_in_pending = false;
         self.decks[d].loading = Some(path.to_path_buf());
         self.decks[d].error = None;
         let _ = self.loader_tx.send(LoadJob::Track {
@@ -1270,6 +1273,18 @@ impl Core {
             }),
             ["loop"] if trig => Some(DeckCmd::LoopToggle),
             ["loopin"] if trig => Some(DeckCmd::LoopIn),
+            // One button for both ends: In, then Out; while a loop plays it exits.
+            ["loopinout"] if trig => {
+                let pending = std::mem::take(&mut self.decks[d].loop_in_pending);
+                Some(if self.snap.decks[d].loop_on {
+                    DeckCmd::LoopExit
+                } else if pending {
+                    DeckCmd::LoopOut
+                } else {
+                    self.decks[d].loop_in_pending = true;
+                    DeckCmd::LoopIn
+                })
+            }
             ["loopout"] if trig => Some(DeckCmd::LoopOut),
             ["loopexit"] if trig => Some(DeckCmd::LoopExit),
             ["loopbeats"] => f.filter(|v| *v > 0.0).map(|v| DeckCmd::LoopBeats(v as f64)),

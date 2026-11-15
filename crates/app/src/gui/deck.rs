@@ -163,8 +163,7 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
     // ---------------------------------------------------------- transport row
     let y = r.top() + hh + 12.0;
     let bh = 52.0;
-    let small_w = w * 0.14;
-    let big_w = (w - 2.0 * small_w - 5.0 * gap) / 4.0;
+    let big_w = (w - 3.0 * gap) / 4.0;
     let mut x = r.left();
     let mut big_btn = |ui: &mut Ui, label: &str, style: Style, wf: f32| -> egui::Response {
         let rr = Rect::from_min_size(Pos2::new(x, y), Vec2::new(big_w * wf, bh));
@@ -189,34 +188,6 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
     learnable(core, &resp, &a("TempoMaster"));
     if resp.clicked() {
         act_i(core, &a("TempoMaster"), 1);
-    }
-    // 2×2 toggles.
-    let sh = (bh - 6.0) / 2.0;
-    let toggles = [
-        ("Key lock", v.keylock, "PitchPreserve"),
-        ("Slip", v.slip, "Slip"),
-        ("Reverse", v.reverse, "Reverse"),
-        ("Roll", st.roll[d], ""),
-    ];
-    for (i, (label, on_, addr)) in toggles.iter().enumerate() {
-        let rr = Rect::from_min_size(Pos2::new(x + (i % 2) as f32 * (small_w + 6.0), y + (i / 2) as f32 * (sh + 6.0)), Vec2::new(small_w, sh));
-        let resp = button(ui, rr, label, if *on_ { Style::Light } else { Style::Dark }, bold(12.5));
-        if addr.is_empty() {
-            if resp.clicked() {
-                st.roll[d] = !st.roll[d];
-            }
-            resp.on_hover_text("Roll: the loop-size button repeats while held, then returns (slip)");
-            continue;
-        }
-        learnable(core, &resp, &a(addr));
-        if resp.clicked() {
-            if *addr == "Reverse" && ui.input(|i| i.modifiers.shift) {
-                act_i(core, &a("Backspin"), 1);
-                act_i(core, &a("Backspin"), 0);
-            } else {
-                act_i(core, &a(addr), !on_ as i32);
-            }
-        }
     }
 
     // ---------------------------------------------------------- hot cues
@@ -325,56 +296,46 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
         }
     });
 
-    // ---------------------------------------------------------- loops + EQ
+    // ---------------------------------------------------------- loops
+    // (Hi / Mid / Low / Filter live in the mixer: the ▾ next to each channel's CUE.)
     let y = y + th + 12.0;
     let lh = 30.0;
     let size = st.loop_size[d];
     let size_txt = if v.loop_on { beats_label(v.loop_beats) } else { beats_label(size) };
-    let lb = [("In", 1.0), ("Out", 1.0), ("÷2", 1.0), (size_txt.as_str(), 1.0), ("×2", 1.0), ("«", 1.0), ("»", 1.0)];
-    let eq_w = w * 0.42;
-    let lw = (w - eq_w - 6.0 * 6.0 - 14.0) / 7.0;
-    let mut x = r.left();
-    for (i, (label, _)) in lb.iter().enumerate() {
-        let rr = Rect::from_min_size(Pos2::new(x, y), Vec2::new(lw, lh));
-        x += lw + 6.0;
-        let style = if i == 3 && v.loop_on { Style::Light } else { Style::Dark };
+    let pending = core.decks[d].loop_in_pending && !v.loop_on;
+    let in_out = if v.loop_on { "Exit" } else if pending { "Out" } else { "In" };
+    let labels = [in_out, "÷2", size_txt.as_str(), "×2", "«", "»"];
+    let lgap = 6.0;
+    let lw = (w - lgap * (labels.len() as f32 - 1.0)) / labels.len() as f32;
+    for (i, label) in labels.iter().enumerate() {
+        let rr = Rect::from_min_size(Pos2::new(r.left() + i as f32 * (lw + lgap), y), Vec2::new(lw, lh));
+        let style = match i {
+            0 if pending => Style::Outline(color, true),
+            0 | 2 if v.loop_on => Style::Light,
+            _ => Style::Dark,
+        };
         let resp = button(ui, rr, label, style, bold(13.0));
         match i {
             0 => {
-                learnable(core, &resp, &a("LoopIn"));
+                let resp = resp.on_hover_text("Loop in, then loop out · while looping: exit");
+                learnable(core, &resp, &a("LoopInOut"));
                 if resp.clicked() {
-                    act_i(core, &a("LoopIn"), 1);
+                    act_i(core, &a("LoopInOut"), 1);
                 }
             }
-            1 => {
-                learnable(core, &resp, &a("LoopOut"));
+            1 | 3 => {
                 if resp.clicked() {
-                    act_i(core, &a("LoopOut"), 1);
-                }
-            }
-            2 | 4 => {
-                if resp.clicked() {
-                    let f = if i == 2 { 0.5 } else { 2.0 };
+                    let f = if i == 1 { 0.5 } else { 2.0 };
                     st.loop_size[d] = (size * f).clamp(1.0 / 32.0, 64.0);
                     if v.loop_on {
-                        act_i(core, &a(if i == 2 { "LoopHalve" } else { "LoopDouble" }), 1);
+                        act_i(core, &a(if i == 1 { "LoopHalve" } else { "LoopDouble" }), 1);
                     }
                 }
             }
-            3 => {
-                let resp = resp.on_hover_text(if st.roll[d] { "Hold to roll" } else { "Loop this many beats" });
+            2 => {
+                let resp = resp.on_hover_text("Loop this many beats");
                 learnable(core, &resp, &a("Loop"));
-                if core.learn {
-                    continue;
-                }
-                if st.roll[d] {
-                    if resp.drag_started() || (resp.is_pointer_button_down_on() && ui.input(|i| i.pointer.primary_pressed())) {
-                        core.send(Command::Deck { deck: d as u8, cmd: DeckCmd::SlipLoop { beats: size, pressed: true } });
-                    }
-                    if resp.drag_stopped() || resp.clicked() {
-                        core.send(Command::Deck { deck: d as u8, cmd: DeckCmd::SlipLoop { beats: size, pressed: false } });
-                    }
-                } else if resp.clicked() {
+                if resp.clicked() && !core.learn {
                     if v.loop_on {
                         act_i(core, &a("LoopExit"), 1);
                     } else {
@@ -384,34 +345,10 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
             }
             _ => {
                 if resp.clicked() {
-                    let dir = if i == 5 { -1.0 } else { 1.0 };
+                    let dir = if i == 4 { -1.0 } else { 1.0 };
                     core.send(Command::Deck { deck: d as u8, cmd: DeckCmd::Skip(dir * size) });
                 }
             }
-        }
-    }
-    // Hi / Mid / Low / Filter.
-    let ch = core.session.channels[d].params;
-    let ew = (eq_w - 3.0 * 10.0) / 4.0;
-    let mut x = r.right() - eq_w;
-    let m = |s: &str| format!("Mixer/CH{n}/{s}");
-    for (label, addr, val, def, is_eq) in [
-        ("Hi", m("EQ/High"), ch.eq[2], 0.5, true),
-        ("Mid", m("EQ/Mid"), ch.eq[1], 0.5, true),
-        ("Low", m("EQ/Low"), ch.eq[0], 0.5, true),
-        ("Filter", m("Filter1"), ch.cutoff, 0.5, false),
-    ] {
-        let rr = Rect::from_min_size(Pos2::new(x, y + 1.0), Vec2::new(ew, 32.0));
-        x += ew + 10.0;
-        let mut vv = val;
-        let killed = is_eq && val <= 0.001;
-        let (resp, label_clicked) = mini_slider(ui, rr, &mut vv, def, label, killed, color);
-        learnable(core, &resp, &addr);
-        if resp.changed() {
-            act_f(core, &addr, vv);
-        }
-        if label_clicked {
-            act_f(core, &addr, if is_eq && !killed { 0.0 } else { def });
         }
     }
 }
@@ -474,11 +411,31 @@ fn stems_row(ui: &mut Ui, core: &mut Core, d: usize, r: Rect) {
         (None, _, true) => ("No stems".into(), TEXT_FAINT),
         _ => ("Stems".into(), TEXT_FAINT),
     };
-    p.text(sr.center(), Align2::CENTER_CENTER, text, bold(11.0), col);
+    let fitted = fit_text(ui, &text, bold(11.0), sr.width() - 12.0);
+    p.text(sr.center(), Align2::CENTER_CENTER, &fitted, bold(11.0), col);
+    let hover = ui.allocate_rect(sr, Sense::hover());
     if placeholder {
-        ui.allocate_rect(sr, Sense::hover())
-            .on_hover_text("No separation model is configured, so a low-quality placeholder is used. Set one in Settings → Stems.");
+        hover.on_hover_text("No separation model is configured, so a low-quality placeholder is used. Set one in Settings → Stems.");
+    } else if fitted != text {
+        hover.on_hover_text(text);
     }
+}
+
+/// `text`, shortened with "…" until it fits in `max_w` points.
+fn fit_text(ui: &Ui, text: &str, font: egui::FontId, max_w: f32) -> String {
+    let width = |s: &str| ui.painter().layout_no_wrap(s.to_string(), font.clone(), TEXT).size().x;
+    if width(text) <= max_w {
+        return text.to_string();
+    }
+    let mut chars: Vec<char> = text.chars().collect();
+    while !chars.is_empty() {
+        chars.pop();
+        let candidate = format!("{}…", chars.iter().collect::<String>().trim_end());
+        if width(&candidate) <= max_w {
+            return candidate;
+        }
+    }
+    "…".into()
 }
 
 pub fn beats_label(b: f64) -> String {
@@ -516,6 +473,11 @@ pub fn compact(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: R
     let sync_r = next(bw);
     let play_r = next(bw + 4.0);
     let cue_r = next(bw - 6.0);
+    let swap_r = next(bw + 8.0);
+    let resp = button(ui, swap_r, "⇄ Swap", Style::Outline(Color32::from_gray(110), false), bold(14.0)).on_hover_text("Show this deck in the large view");
+    if resp.clicked() {
+        st.focus[d % 2] = d;
+    }
     if !sampler {
         let resp = button(ui, sync_r, "Sync", if v.sync { Style::Light } else { Style::Dark }, bold(15.0));
         learnable(core, &resp, &a("TempoSync"));
@@ -538,16 +500,14 @@ pub fn compact(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: R
     if resp.clicked() {
         act_i(core, &play_addr, 1);
     }
-    let time_r = Rect::from_min_size(Pos2::new(cue_r.left() - 76.0, r.top()), Vec2::new(68.0, row_h));
+    let chip = Rect::from_min_size(Pos2::new(swap_r.left() - 48.0, r.top() + 7.0), Vec2::new(40.0, 24.0));
     if !sampler {
-        ui.painter().text(time_r.right_center(), Align2::RIGHT_CENTER, mmss_remain(v.duration_secs - v.position_secs), mono(19.0), TEXT);
         let key = core.key_text(core.deck_key(d));
         if !key.is_empty() {
-            let chip = Rect::from_min_size(Pos2::new(time_r.left() - 48.0, r.top() + 7.0), Vec2::new(40.0, 24.0));
             key_chip(ui, chip, &key, key_border(core, d), 12.5);
         }
     }
-    let title_r = Rect::from_min_max(Pos2::new(badge.right() + 12.0, r.top()), Pos2::new(time_r.left() - 54.0, r.top() + row_h));
+    let title_r = Rect::from_min_max(Pos2::new(badge.right() + 12.0, r.top()), Pos2::new(chip.left() - 8.0, r.top() + row_h));
     if sampler {
         let p = ui.painter_at(title_r);
         p.text(title_r.left_center(), Align2::LEFT_CENTER, format!("Sampler · {}", core.session.decks[d].sampler.name), bold(14.0), TEXT);
@@ -555,13 +515,6 @@ pub fn compact(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: R
         title_block(ui, core, d, title_r, false);
     }
 
-    // Swap.
-    let swap = Rect::from_min_size(Pos2::new(r.left(), r.top() + row_h + 10.0), Vec2::new(96.0, 34.0));
-    let resp = button(ui, swap, "⇄  Swap", Style::Outline(Color32::from_gray(110), false), bold(14.0)).on_hover_text("Show this deck in the large view");
-    if resp.clicked() {
-        let side = d % 2;
-        st.focus[side] = d;
-    }
 }
 
 // ---------------------------------------------------------------- sampler

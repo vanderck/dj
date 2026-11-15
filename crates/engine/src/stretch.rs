@@ -26,7 +26,10 @@ pub trait Source {
         let b = self.frame(i);
         let c = self.frame(i + 1);
         let d = self.frame(i + 2);
-        [hermite(a[0], b[0], c[0], d[0], t), hermite(a[1], b[1], c[1], d[1], t)]
+        [
+            hermite(a[0], b[0], c[0], d[0], t),
+            hermite(a[1], b[1], c[1], d[1], t),
+        ]
     }
 
     #[inline]
@@ -104,24 +107,31 @@ impl Stretcher {
             }
             dot / energy.sqrt()
         };
+        // Start from "no shift" and only move for a genuinely better match, preferring the
+        // smaller shift on ties. Otherwise silence (all scores equal) picked the most negative
+        // offset every time, which made key-locked audio lag the playhead.
+        let better = |c: f32, off: i64, best_c: f32, best: i64| {
+            c > best_c || (c == best_c && off.abs() < best.abs())
+        };
         let mut best = 0i64;
-        let mut best_c = f32::MIN;
+        let mut best_c = corr(0, 4);
         let mut off = -self.search;
         while off <= self.search {
             let c = corr(off, 4);
-            if c > best_c {
+            if better(c, off, best_c, best) {
                 best_c = c;
                 best = off;
             }
             off += 4;
         }
         let coarse = best;
+        best_c = corr(coarse, 2);
         for off in (coarse - 3)..=(coarse + 3) {
             if off == coarse {
                 continue;
             }
             let c = corr(off, 2);
-            if c > best_c {
+            if better(c, off, best_c, best) {
                 best_c = c;
                 best = off;
             }
@@ -139,15 +149,33 @@ impl Stretcher {
                 // Start with two perfectly aligned grains (one half-way
                 // through) so output is at full level immediately.
                 let a = timeline - self.hop as f64 * read_rate;
-                self.grains[self.newest] = Grain { start: a, rate: read_rate, idx: self.hop, active: true };
-                self.grains[slot] = Grain { start: timeline, rate: read_rate, idx: 0, active: true };
+                self.grains[self.newest] = Grain {
+                    start: a,
+                    rate: read_rate,
+                    idx: self.hop,
+                    active: true,
+                };
+                self.grains[slot] = Grain {
+                    start: timeline,
+                    rate: read_rate,
+                    idx: 0,
+                    active: true,
+                };
                 self.fresh = false;
             } else {
-                let ideal = timeline - self.hop as f64 * read_rate;
+                // The new grain starts *at* the timeline (the previous grain, now half-way through,
+                // also reads the timeline at this moment). Starting it a hop earlier made the
+                // output lag the playhead and cue markers by a hop (~21 ms) with key lock on.
+                let ideal = timeline;
                 let prev = self.grains[self.newest];
                 let target = prev.start + (prev.idx as f64) * prev.rate;
                 let off = self.best_offset(src, ideal, target, read_rate);
-                self.grains[slot] = Grain { start: ideal + off, rate: read_rate, idx: 0, active: true };
+                self.grains[slot] = Grain {
+                    start: ideal + off,
+                    rate: read_rate,
+                    idx: 0,
+                    active: true,
+                };
             }
             self.newest = slot;
             self.countdown = self.hop;
