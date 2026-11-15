@@ -9,6 +9,7 @@ mod model;
 mod osc;
 mod settings;
 mod stems;
+mod syndicate_map;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -25,6 +26,8 @@ USAGE:
     collective --headless      run the engine with OSC/MIDI control only
     collective --info FILE     print tags (BPM, key, energy, cues) for a file
     collective --list-devices  list audio and MIDI devices
+    collective --import-mapping FILE.sdcmap
+                               import a Syndicate MIDI mapping into Collective's mappings
     collective --vst3-scan B   (internal) scan one VST3 bundle and print JSON
 ";
 
@@ -34,6 +37,24 @@ fn main() {
         Some("--vst3-scan") => {
             let code = args.get(2).map(|b| fxcat::scan_child_main(&PathBuf::from(b))).unwrap_or(2);
             std::process::exit(code);
+        }
+        Some("--import-mapping") => {
+            let Some(p) = args.get(2) else {
+                eprintln!("{USAGE}");
+                std::process::exit(2);
+            };
+            let mut profile = settings::MappingProfile::load();
+            let mut settings = Settings::load();
+            match import_mapping_file(&PathBuf::from(p), &mut profile, &mut settings) {
+                Ok(summary) => {
+                    println!("{summary}");
+                    println!("Saved to {}", settings::MappingProfile::path().display());
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
+            }
         }
         Some("--list-devices") => {
             println!("Audio outputs:");
@@ -67,6 +88,23 @@ fn main() {
         Some("-h") | Some("--help") => print!("{USAGE}"),
         _ => gui::run(),
     }
+}
+
+/// Import a Syndicate `.sdcmap` into `profile` and save it. If MIDI inputs are restricted to a
+/// list, the mapping's devices are added to it so they are actually opened.
+pub fn import_mapping_file(path: &std::path::Path, profile: &mut settings::MappingProfile, settings: &mut Settings) -> Result<String, String> {
+    let json = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let report = syndicate_map::import(&json, profile)?;
+    profile.save().map_err(|e| format!("saving mappings: {e}"))?;
+    if !settings.midi_inputs.is_empty() {
+        for d in &report.devices {
+            if !settings.midi_inputs.contains(d) {
+                settings.midi_inputs.push(d.clone());
+            }
+        }
+        settings.save().map_err(|e| format!("saving settings: {e}"))?;
+    }
+    Ok(report.summary())
 }
 
 /// Build the core (audio + engine + session restore).

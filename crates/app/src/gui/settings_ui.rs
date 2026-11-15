@@ -367,6 +367,22 @@ fn mapping(ui: &mut Ui, core: &mut Core) {
     if let Some(t) = &core.last_touched {
         ui.label(RichText::new(format!("Waiting for MIDI for: {t}")).color(ACCENT));
     }
+    // Import a mapping exported from Syndicate.
+    ui.horizontal(|ui| {
+        let id = egui::Id::unique("sdcmap-path");
+        let mut path = ui.data_mut(|d| d.get_temp::<String>(id)).unwrap_or_default();
+        ui.label("Import Syndicate mapping");
+        ui.add(egui::TextEdit::singleline(&mut path).hint_text("/path/to/midi_mapping.sdcmap").desired_width(260.0));
+        if ui.button("Import").clicked() && !path.trim().is_empty() {
+            let msg = match crate::import_mapping_file(std::path::Path::new(path.trim()), &mut core.profile, &mut core.settings) {
+                Ok(summary) => summary,
+                Err(e) => format!("Import failed: {e}"),
+            };
+            core.log(msg);
+            path.clear();
+        }
+        ui.data_mut(|d| d.insert_temp(id, path));
+    });
     ui.separator();
     let mut remove = None;
     let mut changed = false;
