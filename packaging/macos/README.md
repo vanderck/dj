@@ -13,7 +13,7 @@ Run `cargo xtask help` for all options. Useful ones:
 
 | Option | Effect |
 |---|---|
-| `--model stems.onnx` | Bundle a stem-separation model in `Contents/Resources/`; used when none is set in Settings or `STEMS_MODEL`. |
+| `--model stems.onnx` | Bundle this stem-separation model in `Contents/Resources/` (used when none is set in Settings or `STEMS_MODEL`). Default: `packaging/models/stems-model.onnx`, currently a synthetic-data demo model ([details](../models/README.md)). `--no-model` leaves it out. |
 | `--icon icon.png` | App icon: a 1024×1024 PNG (converted with `sips`/`iconutil`) or an `.icns`. |
 | `--sign "Developer ID Application: …"` | Sign with your Developer ID (hardened runtime). Default: `$MACOS_SIGN_IDENTITY`, else ad-hoc. |
 | `--notarize` | Notarize and staple the `.dmg`. |
@@ -63,4 +63,5 @@ Optional repository secrets for signed, notarized builds:
 | `MACOS_SIGN_IDENTITY` | e.g. `Developer ID Application: Your Name (TEAMID)` |
 | `APPLE_ID`, `APPLE_TEAM_ID`, `APPLE_APP_PASSWORD` | For notarization (app-specific password) |
 
-Optional repository variable `STEMS_MODEL_URL`: a downloadable `.onnx` model to bundle.
+Optional repository variable `STEMS_MODEL_URL`: a downloadable `.onnx` model to bundle instead of
+`packaging/models/stems-model.onnx`.
