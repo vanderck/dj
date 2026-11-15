@@ -67,6 +67,7 @@ class TrainConfig:
     seed: int = 0
     log_every: int = 50
     eval_every: int = 1000
+    eval_at: float = 60.0  # evaluate on one clip per validation song, this many seconds in
     ckpt_every: int = 1000
     remix_prob: float = 0.5  # probability of mixing stems from different tracks
     sdr_weight: float = 0.05  # weight of the negative-SDR term in the loss

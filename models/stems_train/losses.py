@@ -43,8 +43,17 @@ def separation_loss(est: torch.Tensor, target: torch.Tensor, mix: torch.Tensor, 
 
 
 @torch.no_grad()
+def sdr_energies(est: torch.Tensor, target: torch.Tensor):
+    """(target energy, error energy) per stem, summed over the batch -> ([S], [S]). Sum these over
+    batches and pass them to `sdr_from_energies` to score a dataset without holding it in memory."""
+    return target.pow(2).sum(dim=(0, 2, 3, 4)), (target - est).pow(2).sum(dim=(0, 2, 3, 4))
+
+
+def sdr_from_energies(num: torch.Tensor, den: torch.Tensor) -> torch.Tensor:
+    return 10 * torch.log10((num + 1e-8) / (den + 1e-8))
+
+
+@torch.no_grad()
 def spectral_sdr(est: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     """Per-stem SDR in dB computed on spectra (≈ waveform SDR by Parseval). -> [S]."""
-    num = target.pow(2).sum(dim=(0, 2, 3, 4))
-    den = (target - est).pow(2).sum(dim=(0, 2, 3, 4))
-    return 10 * torch.log10((num + 1e-8) / (den + 1e-8))
+    return sdr_from_energies(*sdr_energies(est, target))

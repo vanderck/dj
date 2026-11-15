@@ -17,7 +17,7 @@ from torch.utils.data import DataLoader
 
 from .config import STEMS, ModelConfig, TrainConfig
 from .data import make_dataset
-from .losses import apply_masks, separation_loss, spectral_sdr
+from .losses import apply_masks, sdr_energies, sdr_from_energies, separation_loss
 from .model import StemsNet, count_parameters
 from .stft import stft_planes
 
@@ -68,20 +68,23 @@ def step_loss(model: StemsNet, mix, tgt, sdr_weight: float = 0.05):
 
 @torch.no_grad()
 def evaluate(model, loader, device):
+    """-> per-stem SDR of the model, the equal-split floor and the oracle ceiling over the whole
+    loader. Energies are summed batch by batch, so the evaluation set can be large."""
     model.eval()
-    ests, tgts, mixes = [], [], []
+    totals = None
     for mix, tgt in loader:
         _, est, t, m = step_loss(model, mix.to(device), tgt.to(device))
-        ests.append(est.cpu())
-        tgts.append(t.cpu())
-        mixes.append(m.cpu())
+        parts = (
+            sdr_energies(est, t),
+            # Floor: every stem gets a quarter of the mix (what an untrained model outputs).
+            sdr_energies(0.25 * m[:, None].expand_as(t), t),
+            # Ceiling: oracle ratio masks computed from the true stems.
+            sdr_energies(apply_masks(oracle_masks(t), m), t),
+        )
+        parts = [(a.double().cpu(), b.double().cpu()) for a, b in parts]
+        totals = parts if totals is None else [(a + c, b + d) for (a, b), (c, d) in zip(totals, parts)]
     model.train()
-    est, tgt, mix = torch.cat(ests), torch.cat(tgts), torch.cat(mixes)
-    sdr = spectral_sdr(est, tgt)
-    # Floor: every stem gets a quarter of the mix (what an untrained model outputs).
-    base = spectral_sdr(0.25 * mix[:, None].expand_as(tgt), tgt)
-    # Ceiling: oracle ratio masks computed from the true stems.
-    return sdr, base, spectral_sdr(apply_masks(oracle_masks(tgt), mix), tgt)
+    return tuple(sdr_from_energies(a, b).float() for a, b in totals)
 
 
 def oracle_masks(tgt: torch.Tensor) -> torch.Tensor:
@@ -119,6 +122,8 @@ def parse_args(argv=None) -> TrainConfig:
     p.add_argument("--seed", type=int, default=d.seed)
     p.add_argument("--log-every", type=int, default=d.log_every)
     p.add_argument("--eval-every", type=int, default=d.eval_every)
+    p.add_argument("--eval-at", type=float, default=d.eval_at,
+                   help="seconds into each validation song where its evaluation clip starts")
     p.add_argument("--ckpt-every", type=int, default=d.ckpt_every)
     p.add_argument("--remix-prob", type=float, default=d.remix_prob)
     p.add_argument("--sdr-weight", type=float, default=d.sdr_weight,
@@ -145,7 +150,7 @@ def parse_args(argv=None) -> TrainConfig:
         data=a.data, out=a.out, steps=a.steps, batch_size=a.batch_size,
         segment_seconds=a.segment_seconds, lr=a.lr, warmup_steps=a.warmup_steps,
         num_workers=a.num_workers, device=a.device, seed=a.seed, log_every=a.log_every,
-        eval_every=a.eval_every, ckpt_every=a.ckpt_every, remix_prob=a.remix_prob,
+        eval_every=a.eval_every, eval_at=a.eval_at, ckpt_every=a.ckpt_every, remix_prob=a.remix_prob,
         sdr_weight=a.sdr_weight, model=model,
     )
     cfg.resume = a.resume
@@ -184,14 +189,15 @@ def train(cfg: TrainConfig) -> dict:
     remaining = cfg.steps - start_step
     train_ds = make_dataset(cfg.data, "train", m.sample_rate, cfg.segment_seconds,
                             length=max(1, remaining) * cfg.batch_size, remix_prob=cfg.remix_prob, seed=cfg.seed)
-    val_ds = make_dataset(cfg.data, "valid", m.sample_rate, cfg.segment_seconds, length=2 * cfg.batch_size, seed=cfg.seed)
+    val_ds = make_dataset(cfg.data, "valid", m.sample_rate, cfg.segment_seconds, length=2 * cfg.batch_size,
+                          seed=cfg.seed, snapshot_seconds=cfg.eval_at)
     train_loader = make_loader(train_ds, cfg, shuffle_workers=True)
     val_loader = make_loader(val_ds, cfg, shuffle_workers=False)
 
     print(
         f"device {device} · {count_parameters(model) / 1e6:.2f}M params · context {m.context_frames} frames · "
         f"lookahead {m.lookahead_frames} · plugin latency {m.latency_samples()} samples "
-        f"({1000 * m.latency_samples() / m.sample_rate:.0f} ms)",
+        f"({1000 * m.latency_samples() / m.sample_rate:.0f} ms) · eval on {len(val_ds)} clips",
         flush=True,
     )
     (out / "config.json").write_text(json.dumps({"model": m.to_dict(), "train": {

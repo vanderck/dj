@@ -62,3 +62,40 @@ def test_stem_folder_dataset(tmp_path):
         raise AssertionError("expected a sample-rate error")
     except ValueError as e:
         assert "22050" in str(e)
+
+
+def test_snapshot_dataset_takes_one_fixed_clip_per_track(tmp_path):
+    sr = 8000
+    for t, seconds in enumerate((10.0, 3.0)):  # the second track is shorter than the offset
+        d = tmp_path / "valid" / f"track{t}"
+        d.mkdir(parents=True)
+        ramp = np.arange(int(sr * seconds)) / sr  # sample value = its time in seconds
+        for stem in ("drums", "bass", "vocals", "other"):
+            sf.write(d / f"{stem}.wav", np.stack([ramp, ramp], 1) * 0.01, sr, subtype="FLOAT")
+    ds = StemFolder(str(tmp_path), "valid", sr, 1.0, length=99, snapshot_seconds=6.0)
+    assert len(ds) == 2
+    first, second = ds[0], ds[1]
+    assert np.isclose(first[0, 0, 0].item(), 0.06)  # starts 6 s in
+    assert np.isclose(second[0, 0, 0].item(), 0.02)  # last second of a 3 s track
+    assert torch.equal(ds[0], first)
+
+
+def test_evaluate_matches_whole_set_sdr():
+    from stems_train.config import ModelConfig
+    from stems_train.losses import apply_masks, spectral_sdr
+    from stems_train.model import StemsNet
+    from stems_train.train import Collate, evaluate, oracle_masks, step_loss
+
+    torch.manual_seed(0)
+    net = StemsNet(ModelConfig(fft_size=512, dim=16)).eval()
+    items = [torch.randn(4, 2, 4096) * torch.rand(4, 1, 1) for _ in range(6)]
+    collate = Collate(512)
+    batches = [collate(items[i : i + 2]) for i in range(0, 6, 2)]
+    sdr, base, oracle = evaluate(net, batches, "cpu")
+
+    mix, tgt = collate(items)
+    with torch.no_grad():
+        _, est, t, m = step_loss(net, mix, tgt)
+    assert torch.allclose(sdr, spectral_sdr(est, t), atol=1e-3)
+    assert torch.allclose(base, spectral_sdr(0.25 * m[:, None].expand_as(t), t), atol=1e-3)
+    assert torch.allclose(oracle, spectral_sdr(apply_masks(oracle_masks(t), m), t), atol=1e-3)

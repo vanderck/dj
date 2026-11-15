@@ -90,13 +90,21 @@ It skips songs it already did, and stores FLAC (about 100 MB per full song, less
 ## 3. Train
 
 ```bash
-python -m stems_train.train --data data/teacher --out runs/v1 --steps 200000 --batch-size 16 --segment-seconds 6
+python -m stems_train.train --data data/teacher --out runs/v1 --steps 100000 --batch-size 8 --segment-seconds 4 --num-workers 3
 ```
+
+On a MacBook Air (16 GB) this runs at about 1.1 steps/s, so 100k steps take about a day. Bigger
+batches (`--batch-size 16 --segment-seconds 6`) need a GPU with more memory: when macOS starts
+swapping, each step takes tens of seconds. Run a few steps and check `it/s` before leaving it.
+
+Every `--eval-every` steps the model is scored on **one fixed clip from every validation song**
+(`--eval-at` seconds into the file, 60 by default), so scores from different steps and runs are
+directly comparable. With a few hundred validation songs an evaluation takes about a minute.
 
 Resume an interrupted run:
 
 ```bash
-python -m stems_train.train --data data/teacher --out runs/v1 --steps 200000 --resume runs/v1/last.pt
+python -m stems_train.train --data data/teacher --out runs/v1 --steps 100000 --batch-size 8 --segment-seconds 4 --num-workers 3 --resume runs/v1/last.pt
 ```
 
 `runs/v1/log.jsonl` has the loss curve and eval SDRs; `best.pt` is the best checkpoint so far.
@@ -111,6 +119,7 @@ Useful knobs (all CLI flags):
 | `--fft-size` | 4096 | frequency resolution vs latency |
 | `--remix-prob` | 0.5 | mix stems from different songs (strong augmentation) |
 | `--sdr-weight` | 0.05 | weight of the negative-SDR loss term (see below) |
+| `--eval-at` | 60 | where each validation song's evaluation clip starts (seconds) |
 
 ## 4. Export and try it in the plugin
 
