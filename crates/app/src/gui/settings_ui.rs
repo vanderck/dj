@@ -87,6 +87,27 @@ fn settings(ui: &mut Ui, core: &mut Core, st: &mut UiState) {
         core.log("Audio settings saved; restart to apply");
     }
 
+    let mut ext = core.settings.external_mixer;
+    if ui
+        .checkbox(&mut ext, "External mixer: send each deck to its own output and hide the mixer section")
+        .changed()
+    {
+        core.set_external_mixer(ext);
+    }
+    let pairs = core.output_pairs();
+    let routing: Vec<String> = (0..core.deck_count())
+        .map(|d| {
+            let p = core.external_pair(d);
+            format!("deck {} → {}/{}", d + 1, p * 2 + 1, p * 2 + 2)
+        })
+        .collect();
+    let info = if pairs >= 2 {
+        format!("The device has {} outputs. With an external mixer: {}.", core.audio_channels, routing.join(", "))
+    } else {
+        format!("The device has {} outputs; an external mixer needs at least 4 (two stereo pairs).", core.audio_channels)
+    };
+    ui.label(RichText::new(info).small().weak());
+
     section(ui, "MIXER");
     egui::ComboBox::from_label("Fader curve").selected_text(core.settings.fader_curve.label()).show_ui(ui, |ui| {
         for c in FaderCurve::ALL {
@@ -367,6 +388,22 @@ fn mapping(ui: &mut Ui, core: &mut Core) {
     if let Some(t) = &core.last_touched {
         ui.label(RichText::new(format!("Waiting for MIDI for: {t}")).color(ACCENT));
     }
+    // Import a mapping exported from Syndicate.
+    ui.horizontal(|ui| {
+        let id = egui::Id::unique("sdcmap-path");
+        let mut path = ui.data_mut(|d| d.get_temp::<String>(id)).unwrap_or_default();
+        ui.label("Import Syndicate mapping");
+        ui.add(egui::TextEdit::singleline(&mut path).hint_text("/path/to/midi_mapping.sdcmap").desired_width(260.0));
+        if ui.button("Import").clicked() && !path.trim().is_empty() {
+            let msg = match crate::import_mapping_file(std::path::Path::new(path.trim()), &mut core.profile, &mut core.settings) {
+                Ok(summary) => summary,
+                Err(e) => format!("Import failed: {e}"),
+            };
+            core.log(msg);
+            path.clear();
+        }
+        ui.data_mut(|d| d.insert_temp(id, path));
+    });
     ui.separator();
     let mut remove = None;
     let mut changed = false;

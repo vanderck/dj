@@ -397,3 +397,68 @@ fn stems_survive_keylock_and_loops() {
     let (bass, vocal) = (tone_energy(tail, 60.0, SR), tone_energy(tail, 1000.0, SR));
     assert!(vocal > 100.0 * bass, "bass muted through the stretcher: {bass} vs {vocal}");
 }
+
+// ------------------------------------------------------------------ timing
+
+/// When a click placed at exactly 1.000 s of the track is loudest in the output, relative to when
+/// the deck reaches 1.000 s (in ms; positive = late).
+fn click_lag_ms(keylock: bool, tempo: f64) -> f64 {
+    let sr = SR as u32;
+    let mut frames = vec![[0.0f32; 2]; sr as usize * 4];
+    for f in frames.iter_mut().skip(sr as usize).take(32) {
+        *f = [0.9, 0.9];
+    }
+    let track = Arc::new(Track { id: 1, audio: AudioData { sample_rate: sr, frames }, grid: None, gain: 1.0, cues: Default::default() });
+    let (mut e, mut c) = setup();
+    send(&mut c, Command::Load { deck: 0, track, start_at_first_cue: false });
+    send(&mut c, Command::GlobalQuantize(None));
+    deck(&mut c, 0, DeckCmd::KeyLock(keylock));
+    deck(&mut c, 0, DeckCmd::Tempo(tempo));
+    deck(&mut c, 0, DeckCmd::Play);
+    let out = run(&mut e, sr as usize * 2 / BLOCK);
+    let speed = e.snapshot().decks[0].speed;
+    let peak = out.iter().enumerate().max_by(|a, b| a.1[0].abs().total_cmp(&b.1[0].abs())).unwrap().0;
+    peak as f64 * 1000.0 / SR as f64 - 1000.0 / speed
+}
+
+#[test]
+fn key_lock_does_not_delay_audio_against_the_playhead() {
+    // Cue markers and the waveform are drawn at the deck position; what you hear must match.
+    // (The stretcher used to start each grain a hop early: everything was ~33 ms late.)
+    let plain = click_lag_ms(false, 0.0);
+    for tempo in [0.0, 0.3, -0.3, 0.8, -0.8] {
+        let locked = click_lag_ms(true, tempo);
+        assert!((locked - plain).abs() < 6.0, "key lock at tempo {tempo}: {locked:+.1} ms vs {plain:+.1} ms without");
+    }
+}
+
+// ------------------------------------------------------------------ direct outputs
+
+#[test]
+fn decks_routed_to_direct_pairs_reach_only_their_own_outputs() {
+    use collective_engine::mixer::{ExtStages, Output};
+    let (mut e, mut c) = setup();
+    let (tones, _) = stem_track(61); // deck 1: 60 Hz + 1 kHz
+    send(&mut c, Command::Load { deck: 0, track: tones, start_at_first_cue: false });
+    send(&mut c, Command::Load { deck: 1, track: click_track(62, 120.0, 10.0, SR as u32), start_at_first_cue: false });
+    send(&mut c, Command::GlobalQuantize(None));
+    // External mixer: no internal stages, each channel to its own stereo pair.
+    send(&mut c, Command::ExtStages(ExtStages { trim: false, eq: false, filter: false, volume: false }));
+    for ch in 0..2u8 {
+        send(&mut c, Command::Channel { ch, params: ChannelParams { output: Output::Pair(ch), volume: 0.0, ..Default::default() } });
+        deck(&mut c, ch, DeckCmd::Play);
+    }
+    let energy = |x: &[Frame]| x.iter().map(|f| f[0] * f[0]).sum::<f32>();
+    let (mut master, mut p0, mut p1) = (0.0, Vec::new(), Vec::new());
+    for _ in 0..80 {
+        e.process(BLOCK);
+        master += energy(e.master(BLOCK));
+        p0.extend_from_slice(e.pair(0, BLOCK).expect("pair 0 in use"));
+        p1.extend_from_slice(e.pair(1, BLOCK).expect("pair 1 in use"));
+    }
+    assert!(master < 1e-6, "nothing on the master bus: {master}");
+    // Channel volume is at 0 but bypassed, so both decks are heard at full level.
+    assert!(tone_energy(&p0[4096..], 1000.0, SR) > 1e-3, "deck 1 tone on outputs 1/2");
+    assert!(tone_energy(&p1[4096..], 1000.0, SR) < 1e-4 * tone_energy(&p0[4096..], 1000.0, SR), "deck 1 not on 3/4");
+    assert!(p1.iter().any(|f| f[0] > 0.5), "deck 2 clicks on outputs 3/4");
+}

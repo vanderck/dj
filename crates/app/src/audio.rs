@@ -123,8 +123,20 @@ fn start_device(settings: &AudioSettings) -> Result<(AudioHost, Controller, f32)
             sr = want;
         }
     }
-    let channels = default.channels() as usize;
-    let mut config = default.config();
+    // Use every output the device offers (e.g. both stereo pairs of a Xone:K2 or any multi-output
+    // interface), not only the default layout, so decks can go to separate outputs.
+    let supported = |f: cpal::SampleFormat| {
+        matches!(f, cpal::SampleFormat::F32 | cpal::SampleFormat::I16 | cpal::SampleFormat::I32 | cpal::SampleFormat::U16)
+    };
+    let chosen = device
+        .supported_output_configs()?
+        .filter(|c| c.min_sample_rate() <= sr && c.max_sample_rate() >= sr && supported(c.sample_format()))
+        .max_by_key(|c| (c.channels(), c.sample_format() == default.sample_format(), c.sample_format() == cpal::SampleFormat::F32))
+        .map(|c| c.with_sample_rate(sr))
+        .filter(|c| c.channels() > default.channels())
+        .unwrap_or(default);
+    let channels = chosen.channels() as usize;
+    let mut config = chosen.config();
     config.sample_rate = sr;
     if let Some(b) = settings.buffer_frames {
         config.buffer_size = cpal::BufferSize::Fixed(b);
@@ -134,7 +146,7 @@ fn start_device(settings: &AudioSettings) -> Result<(AudioHost, Controller, f32)
     let master_pair = (settings.master_pair as usize).min(pairs - 1);
     let cue_pair = settings.cue_enabled.then_some((settings.cue_pair as usize).min(pairs - 1));
     let router = Router::new(engine, channels, master_pair, cue_pair);
-    let stream = match default.sample_format() {
+    let stream = match chosen.sample_format() {
         cpal::SampleFormat::F32 => build::<f32>(&device, config, router),
         cpal::SampleFormat::I16 => build::<i16>(&device, config, router),
         cpal::SampleFormat::I32 => build::<i32>(&device, config, router),

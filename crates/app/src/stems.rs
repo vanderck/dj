@@ -17,7 +17,7 @@ use stems_core::Stem as CoreStem;
 
 pub enum Update {
     Progress { deck: usize, track_id: u64, fraction: f32 },
-    Done { deck: usize, track_id: u64, stems: Arc<StemData>, source: String },
+    Done { deck: usize, track_id: u64, stems: Arc<StemData>, wave: Arc<StemWave>, source: String },
     Failed { deck: usize, track_id: u64, error: String },
 }
 
@@ -75,6 +75,44 @@ impl StemsWorker {
     }
 }
 
+/// Per-stem loudness for the waveform lanes: peak level per bin, at the same rate as the track's
+/// waveform, scaled so 1.0 is the loudest moment of the full mix.
+pub struct StemWave {
+    pub bins_per_sec: f64,
+    /// In `Stem` order: drums, bass, vocals, other.
+    pub levels: [Vec<f32>; 4],
+}
+
+impl StemWave {
+    pub fn compute(mix: &[[f32; 2]], sample_rate: u32, stems: &StemData) -> Self {
+        let bins_per_sec = collective_library::waveform::BINS_PER_SEC;
+        let per = (sample_rate as f64 / bins_per_sec).max(1.0);
+        let bins = (mix.len() as f64 / per).ceil() as usize;
+        let mut levels: [Vec<f32>; 4] = std::array::from_fn(|_| vec![0.0; bins]);
+        let mut mix_peak = 1e-6f32;
+        let deq = |v: [i16; 2]| [v[0] as f32 * stems.scale, v[1] as f32 * stems.scale];
+        for (i, m) in mix.iter().enumerate() {
+            let b = ((i as f64 / per) as usize).min(bins - 1);
+            let get = |s: &Vec<[i16; 2]>| s.get(i).copied().map(deq).unwrap_or([0.0; 2]);
+            let (d, ba, v) = (get(&stems.drums), get(&stems.bass), get(&stems.vocals));
+            let o = [m[0] - d[0] - ba[0] - v[0], m[1] - d[1] - ba[1] - v[1]];
+            for (k, f) in [d, ba, v, o].iter().enumerate() {
+                let a = f[0].abs().max(f[1].abs());
+                if a > levels[k][b] {
+                    levels[k][b] = a;
+                }
+            }
+            mix_peak = mix_peak.max(m[0].abs().max(m[1].abs()));
+        }
+        for l in &mut levels {
+            for x in l.iter_mut() {
+                *x = (*x / mix_peak).min(1.0);
+            }
+        }
+        Self { bins_per_sec, levels }
+    }
+}
+
 /// Model from the settings, else `STEMS_MODEL`, else one bundled with the app.
 pub fn resolve_model(setting: Option<&Path>) -> Option<PathBuf> {
     setting
@@ -105,7 +143,8 @@ fn run(job: Request, wanted: &[AtomicU64; NUM_DECKS], tx: &Sender<Update>) {
 
     if let Some((dir, _)) = &job.cache {
         if let Some(stems) = cache::read(&dir.join(cache::file_name(key)), key, id, audio.frames.len()) {
-            let _ = tx.send(Update::Done { deck, track_id: id, stems: Arc::new(stems), source: "cache".into() });
+            let wave = Arc::new(StemWave::compute(&audio.frames, audio.sample_rate, &stems));
+            let _ = tx.send(Update::Done { deck, track_id: id, stems: Arc::new(stems), wave, source: "cache".into() });
             return;
         }
     }
@@ -140,7 +179,8 @@ fn run(job: Request, wanted: &[AtomicU64; NUM_DECKS], tx: &Sender<Update>) {
                     eprintln!("stems cache: {e}");
                 }
             }
-            let _ = tx.send(Update::Done { deck, track_id: id, stems: Arc::new(stems), source });
+            let wave = Arc::new(StemWave::compute(&audio.frames, audio.sample_rate, &stems));
+            let _ = tx.send(Update::Done { deck, track_id: id, stems: Arc::new(stems), wave, source });
         }
         Err(OfflineError::Cancelled) => {}
         Err(e) => {
@@ -358,7 +398,7 @@ mod tests {
         let w = StemsWorker::new();
         let t = track(11, 2.0);
         w.request(Request { deck: 1, track: t.clone(), path: song.clone(), model: None, cache: cache.clone() });
-        let Update::Done { deck, track_id, stems, source } = wait(&w) else { panic!("expected stems") };
+        let Update::Done { deck, track_id, stems, source, .. } = wait(&w) else { panic!("expected stems") };
         assert_eq!((deck, track_id, source.as_str()), (1, 11, "placeholder separator"));
         assert_eq!(stems.len(), t.audio.frames.len());
         // Unity gains reproduce the mix; all three stored stems plus "other" sum back to it.
