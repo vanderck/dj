@@ -99,3 +99,23 @@ def test_evaluate_matches_whole_set_sdr():
     assert torch.allclose(sdr, spectral_sdr(est, t), atol=1e-3)
     assert torch.allclose(base, spectral_sdr(0.25 * m[:, None].expand_as(t), t), atol=1e-3)
     assert torch.allclose(oracle, spectral_sdr(apply_masks(oracle_masks(t), m), t), atol=1e-3)
+
+
+def test_export_survives_silent_and_quiet_bins(tmp_path):
+    """Regression: the ONNX optimiser dropped the `+ 1e-8` in the input compression, so silent
+    bins gave NaN and quiet ones wrong masks in the exported model (but not in PyTorch)."""
+    import onnxruntime as ort
+    from stems_train.export import parity_inputs
+    from stems_train.model import ExportWrapper
+
+    torch.manual_seed(0)
+    net = StemsNet(ModelConfig(fft_size=512, dim=16)).eval()
+    export(net, str(tmp_path / "m.onnx"), "quiet")  # its parity check covers these inputs too
+    sess = ort.InferenceSession(str(tmp_path / "m.onnx"))
+    example = torch.randn(1, net.cfg.context_frames, 4, net.cfg.num_bins) * 10
+    for x in parity_inputs(example):
+        (got,) = sess.run(None, {"spec": x.numpy()})
+        with torch.no_grad():
+            want = ExportWrapper(net)(x).numpy()
+        assert np.isfinite(got).all()
+        assert np.abs(got - want).max() < 1e-3
