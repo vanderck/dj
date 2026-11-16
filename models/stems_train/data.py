@@ -44,9 +44,11 @@ class StemFolder(Dataset):
         remix_prob: float = 0.5,
         seed: int = 0,
         snapshot_seconds: float = None,
+        max_snapshots: int = 0,
     ):
         """`snapshot_seconds` (evaluation): one clip per track, starting that far into the file (or
-        as far as fits), in track order and without augmentation; `length` is then ignored."""
+        as far as fits), in track order and without augmentation; `length` is then ignored.
+        `max_snapshots` > 0 keeps that many tracks, evenly spread over the sorted list."""
         self.tracks = sorted(p for p in (Path(root) / split).iterdir() if p.is_dir())
         if not self.tracks:
             raise FileNotFoundError(f"no track folders in {Path(root) / split}")
@@ -54,8 +56,12 @@ class StemFolder(Dataset):
         self.segment = int(segment_seconds * sample_rate)
         self.seed = seed
         self.snapshot = None if snapshot_seconds is None else int(snapshot_seconds * sample_rate)
+        self.snapshot_tracks = list(range(len(self.tracks)))
         if self.snapshot is not None:
-            self.length, self.augment = len(self.tracks), False
+            if 0 < max_snapshots < len(self.tracks):
+                step = len(self.tracks) / max_snapshots
+                self.snapshot_tracks = [int(k * step) for k in range(max_snapshots)]
+            self.length, self.augment = len(self.snapshot_tracks), False
         self.frames = []
         for track in self.tracks:
             lengths = []
@@ -102,7 +108,7 @@ class StemFolder(Dataset):
 
     def __getitem__(self, i):
         rng = np.random.default_rng((self.seed, i)) if not self.augment else np.random.default_rng()
-        base = i if self.snapshot is not None else int(rng.integers(len(self.tracks)))
+        base = self.snapshot_tracks[i] if self.snapshot is not None else int(rng.integers(len(self.tracks)))
         remix = self.augment and rng.random() < self.remix_prob
         stems = []
         for stem in STEMS:
@@ -123,9 +129,10 @@ class StemFolder(Dataset):
 
 
 def make_dataset(data: str, split: str, sample_rate: int, segment_seconds: float, length: int,
-                 remix_prob: float = 0.5, seed: int = 0, snapshot_seconds: float = None) -> Dataset:
+                 remix_prob: float = 0.5, seed: int = 0, snapshot_seconds: float = None,
+                 max_snapshots: int = 0) -> Dataset:
     if data == "synthetic":
         return SyntheticStems(sample_rate, segment_seconds, length, seed=seed + (0 if split == "train" else 10**6))
     return StemFolder(data, split, sample_rate, segment_seconds, length,
                       augment=(split == "train"), remix_prob=remix_prob, seed=seed,
-                      snapshot_seconds=snapshot_seconds)
+                      snapshot_seconds=snapshot_seconds, max_snapshots=max_snapshots)

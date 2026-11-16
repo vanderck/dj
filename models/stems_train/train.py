@@ -124,6 +124,8 @@ def parse_args(argv=None) -> TrainConfig:
     p.add_argument("--eval-every", type=int, default=d.eval_every)
     p.add_argument("--eval-at", type=float, default=d.eval_at,
                    help="seconds into each validation song where its evaluation clip starts")
+    p.add_argument("--eval-clips", type=int, default=d.eval_clips,
+                   help="evaluate on at most this many validation songs (0 = all)")
     p.add_argument("--ckpt-every", type=int, default=d.ckpt_every)
     p.add_argument("--remix-prob", type=float, default=d.remix_prob)
     p.add_argument("--sdr-weight", type=float, default=d.sdr_weight,
@@ -150,7 +152,7 @@ def parse_args(argv=None) -> TrainConfig:
         data=a.data, out=a.out, steps=a.steps, batch_size=a.batch_size,
         segment_seconds=a.segment_seconds, lr=a.lr, warmup_steps=a.warmup_steps,
         num_workers=a.num_workers, device=a.device, seed=a.seed, log_every=a.log_every,
-        eval_every=a.eval_every, eval_at=a.eval_at, ckpt_every=a.ckpt_every, remix_prob=a.remix_prob,
+        eval_every=a.eval_every, eval_at=a.eval_at, eval_clips=a.eval_clips, ckpt_every=a.ckpt_every, remix_prob=a.remix_prob,
         sdr_weight=a.sdr_weight, model=model,
     )
     cfg.resume = a.resume
@@ -190,7 +192,7 @@ def train(cfg: TrainConfig) -> dict:
     train_ds = make_dataset(cfg.data, "train", m.sample_rate, cfg.segment_seconds,
                             length=max(1, remaining) * cfg.batch_size, remix_prob=cfg.remix_prob, seed=cfg.seed)
     val_ds = make_dataset(cfg.data, "valid", m.sample_rate, cfg.segment_seconds, length=2 * cfg.batch_size,
-                          seed=cfg.seed, snapshot_seconds=cfg.eval_at)
+                          seed=cfg.seed, snapshot_seconds=cfg.eval_at, max_snapshots=cfg.eval_clips)
     train_loader = make_loader(train_ds, cfg, shuffle_workers=True)
     val_loader = make_loader(val_ds, cfg, shuffle_workers=False)
 
