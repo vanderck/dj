@@ -51,7 +51,7 @@ def load_checkpoint(path: str) -> StemsNet:
 
 def export(net: StemsNet, out: str, name: str, check: bool = True) -> dict:
     cfg = net.cfg
-    wrapper = ExportWrapper(net.eval().cpu())
+    wrapper = ExportWrapper(net.eval().cpu()).eval()
     example = torch.randn(1, cfg.context_frames, 4, cfg.num_bins) * 10.0
 
     with tempfile.TemporaryDirectory() as tmp:
