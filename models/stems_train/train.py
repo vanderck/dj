@@ -81,7 +81,7 @@ def evaluate(model, loader, device):
             # Ceiling: oracle ratio masks computed from the true stems.
             sdr_energies(apply_masks(oracle_masks(t), m), t),
         )
-        parts = [(a.double().cpu(), b.double().cpu()) for a, b in parts]
+        parts = [(a.cpu().double(), b.cpu().double()) for a, b in parts]  # MPS has no float64
         totals = parts if totals is None else [(a + c, b + d) for (a, b), (c, d) in zip(totals, parts)]
     model.train()
     return tuple(sdr_from_energies(a, b).float() for a, b in totals)
