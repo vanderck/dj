@@ -88,8 +88,6 @@ pub struct Settings {
     pub vst3_paths: Vec<PathBuf>,
     pub library_folders: Vec<PathBuf>,
     pub key_notation: KeyNotation,
-    pub light_theme: bool,
-    pub ui_scale: f32,
     /// Separate every loaded track into stems in the background.
     pub stems_enabled: bool,
     /// ONNX separation model. `None` uses `STEMS_MODEL`, else the low-quality placeholder.
@@ -149,8 +147,6 @@ impl Default for Settings {
             vst3_paths: Vec::new(),
             library_folders: dirs::audio_dir().into_iter().collect(),
             key_notation: KeyNotation::Camelot,
-            light_theme: false,
-            ui_scale: 1.0,
             stems_enabled: true,
             stems_model: None,
             stems_cache_mb: 4096,
