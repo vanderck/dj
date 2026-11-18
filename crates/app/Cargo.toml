@@ -1,12 +1,12 @@
 [package]
-name = "collective"
+name = "dj"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Collective: live performance DJ software"
+description = "dj: live performance DJ software"
 
 [[bin]]
-name = "collective"
+name = "dj"
 path = "src/main.rs"
 
 [features]
@@ -17,7 +17,7 @@ stems-onnx = ["stems-core/onnx"]
 stems-onnx-dynamic = ["stems-core/onnx-dynamic"]
 
 [dependencies]
-stems-core = { git = "https://github.com/vanderck/stems", rev = "cb42d15681f317f6036429ff9e75e3b848b5ab79" }
+stems-core.workspace = true
 collective-engine.workspace = true
 collective-library.workspace = true
 serde.workspace = true

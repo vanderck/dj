@@ -31,8 +31,8 @@ USAGE:
     dj --download-demucs
                                download HT-Demucs (300 MB) and use it for stems
     dj --prepare-stems PATH...
-                               separate files / folders with Demucs (or the external
-                               separator, Settings → Stems) into the prepared-stems folder
+                               separate files / folders with Demucs into the
+                               prepared-stems folder (Settings → Stems)
     dj --vst3-scan B   (internal) scan one VST3 bundle and print JSON
 ";
 
@@ -133,21 +133,16 @@ fn download_demucs() -> i32 {
     }
 }
 
-/// `--prepare-stems`: run the external separator over files and folders (recursively), skipping
+/// `--prepare-stems`: run Demucs over files and folders (recursively), skipping
 /// tracks that are already prepared. Returns the exit code.
 fn prepare_stems(paths: &[String]) -> i32 {
     use std::io::Write;
     let settings = Settings::load();
     let mut demucs_cache = stems::DemucsCache::default();
     let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
-    let external = settings.stems_external();
-    let mut with = match (&settings.stems_demucs, &external) {
-        (Some(model), _) => stems::Preparer::Demucs { model, threads, cache: &mut demucs_cache },
-        (None, Some(command)) => stems::Preparer::External(command),
-        (None, None) => {
-            eprintln!("No separator for prepared stems. Set Settings → Stems → Demucs model (or External separator).");
-            return 2;
-        }
+    let Some(model) = settings.stems_demucs.clone() else {
+        eprintln!("No Demucs model. Download it in Settings → Stems, or run: dj --download-demucs");
+        return 2;
     };
     if paths.is_empty() {
         eprintln!("{USAGE}");
@@ -188,7 +183,7 @@ fn prepare_stems(paths: &[String]) -> i32 {
                 let _ = std::io::stdout().flush();
             }
         };
-        match stems::prepare_file(f, &mut with, &dir, &mut progress) {
+        match stems::prepare_file(f, &model, threads, &mut demucs_cache, &dir, &mut progress) {
             Ok(stems::Prepared::Done(_)) => {
                 done += 1;
                 println!("\r{label}  done");

@@ -333,23 +333,6 @@ fn settings(ui: &mut Ui, core: &mut Core, st: &mut UiState) {
             .weak(),
         );
 
-        let mut ext = core.settings.stems_external.clone();
-        ui.horizontal(|ui| {
-            ui.label("External separator");
-            let edit = egui::TextEdit::singleline(&mut ext)
-                .hint_text("command, e.g. the Demucs add-on")
-                .desired_width(300.0);
-            if ui.add(edit).changed() {
-                core.settings.stems_external = ext.clone();
-            }
-        });
-        ui.label(
-            RichText::new(
-                "Optional, used before the model. Its stems are kept in the prepared-stems folder, so each track is separated once. Prepare whole folders ahead of a set with: dj --prepare-stems FOLDER",
-            )
-            .small()
-            .weak(),
-        );
         let mut prepared = core.settings.stems_prepared_dir().display().to_string();
         ui.horizontal(|ui| {
             ui.label("Prepared stems");

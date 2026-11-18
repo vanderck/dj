@@ -674,28 +674,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "collective"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "collective-engine",
- "collective-library",
- "collective-vst3",
- "cpal",
- "crossbeam-channel",
- "dirs",
- "eframe",
- "hound",
- "midir",
- "rosc",
- "rtrb",
- "serde",
- "serde_json",
- "stems-core",
- "ureq",
-]
-
-[[package]]
 name = "collective-engine"
 version = "0.1.0"
 dependencies = [
@@ -983,6 +961,28 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.10",
+]
+
+[[package]]
+name = "dj"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "collective-engine",
+ "collective-library",
+ "collective-vst3",
+ "cpal",
+ "crossbeam-channel",
+ "dirs",
+ "eframe",
+ "hound",
+ "midir",
+ "rosc",
+ "rtrb",
+ "serde",
+ "serde_json",
+ "stems-core",
+ "ureq",
 ]
 
 [[package]]
@@ -3801,11 +3801,9 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 [[package]]
 name = "stems-core"
 version = "0.1.0"
-source = "git+https://github.com/vanderck/stems?rev=cb42d15681f317f6036429ff9e75e3b848b5ab79#cb42d15681f317f6036429ff9e75e3b848b5ab79"
 dependencies = [
  "ort",
  "realfft",
- "rtrb",
 ]
 
 [[package]]

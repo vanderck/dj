@@ -1,2 +1,7 @@
 [alias]
 xtask = "run --package xtask --release --"
+
+[env]
+# The prebuilt ONNX Runtime (stems) is compiled for macOS 13.4; dj's minimum anyway.
+# Ignored on other platforms.
+MACOSX_DEPLOYMENT_TARGET = "13.4"

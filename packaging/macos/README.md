@@ -13,7 +13,7 @@ Run `cargo xtask help` for all options. Useful ones:
 
 | Option | Effect |
 |---|---|
-| `--model stems.onnx` | Bundle this stem-separation model in `Contents/Resources/` (used when none is set in Settings or `STEMS_MODEL`). Default: `packaging/models/stems-model.onnx`, currently a synthetic-data demo model ([details](../models/README.md)). `--no-model` leaves it out. |
+| `--model stems.onnx` | Bundle this stem-separation model in `Contents/Resources/`: the fallback when no Demucs or model is set in Settings → Stems (or `STEMS_MODEL`). |
 | `--icon icon.png` | App icon: a 1024×1024 PNG (converted with `sips`/`iconutil`) or an `.icns`. Default: `packaging/macos/AppIcon.icns` (`AppIcon.png` is its 1024 px source). |
 | `--sign "Developer ID Application: …"` | Sign with your Developer ID (hardened runtime). Default: `$MACOS_SIGN_IDENTITY`, else ad-hoc. |
 | `--notarize` | Notarize and staple the `.dmg`. |

@@ -12,13 +12,11 @@ use std::process::{Command, ExitCode};
 
 const APP_NAME: &str = "dj";
 const EXECUTABLE: &str = "dj";
-const CARGO_BIN: &str = "collective";
+const CARGO_BIN: &str = "dj";
 const DEFAULT_BUNDLE_ID: &str = "com.github.vanderck.collective";
 /// The statically linked ONNX Runtime (stem separation) is built for macOS 13.4.
 const DEFAULT_MIN_MACOS: &str = "13.4";
 const BUNDLED_MODEL_NAME: &str = "stems-model.onnx";
-/// Bundled by default when present (see packaging/models/README.md).
-const DEFAULT_MODEL: &str = "packaging/models/stems-model.onnx";
 /// App icon used when --icon is not given.
 const DEFAULT_ICON: &str = "packaging/macos/AppIcon.icns";
 
@@ -29,9 +27,7 @@ Builds dj (release) and packages target/package/dj.app and a .dmg.
 
 Options:
   --universal            Build for Apple Silicon and Intel and merge them (lipo)
-  --model <file.onnx>    Bundle a stem-separation model (used when none is configured).
-                         Default: packaging/models/stems-model.onnx if it exists
-  --no-model             Do not bundle a model
+  --model <file.onnx>    Bundle a stem-separation model (the fallback when none is configured)
   --icon <file>          App icon: .icns, or a 1024x1024 .png (converted with sips/iconutil).
                          Default: packaging/macos/AppIcon.icns
   --sign <identity>      Code-signing identity, e.g. \"Developer ID Application: Name (TEAMID)\".
@@ -72,7 +68,6 @@ fn main() -> ExitCode {
 struct Options {
     universal: bool,
     model: Option<PathBuf>,
-    no_model: bool,
     icon: Option<PathBuf>,
     sign: Option<String>,
     no_sign: bool,
@@ -108,7 +103,6 @@ impl Options {
             match a.as_str() {
                 "--universal" => o.universal = true,
                 "--model" => o.model = Some(value(a)?.into()),
-                "--no-model" => o.no_model = true,
                 "--icon" => o.icon = Some(value(a)?.into()),
                 "--sign" => o.sign = Some(value(a)?),
                 "--no-sign" => o.no_sign = true,
@@ -127,12 +121,6 @@ impl Options {
                 "--out" => o.out = value(a)?.into(),
                 other => return Err(format!("unknown option `{other}`\n\n{USAGE}")),
             }
-        }
-        if o.no_model {
-            o.model = None;
-        } else if o.model.is_none() {
-            let default = workspace_root().join(DEFAULT_MODEL);
-            o.model = default.is_file().then_some(default);
         }
         if o.icon.is_none() {
             let default = workspace_root().join(DEFAULT_ICON);
@@ -605,14 +593,6 @@ mod tests {
         let (no_default, f) = features_for(Some("aarch64-apple-darwin"), &o);
         assert!(!no_default);
         assert_eq!(f, vec!["stems-onnx", "extra"]);
-    }
-
-    #[test]
-    fn bundles_the_repository_model_by_default() {
-        let default = workspace_root().join(DEFAULT_MODEL);
-        let o = Options::parse(&[]).unwrap();
-        assert_eq!(o.model, default.is_file().then_some(default));
-        assert_eq!(Options::parse(&args(&["--no-model"])).unwrap().model, None);
     }
 
     #[test]
