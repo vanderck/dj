@@ -1,8 +1,0 @@
-[alias]
-xtask = "run --package xtask --release --"
-
-[env]
-# The prebuilt ONNX Runtime (feature `onnx`) is compiled for macOS 13.4; linking it into a binary
-# that targets Rust's default (11.0) fails with `___isPlatformVersionAtLeast` undefined.
-# macOS 13 is the plugin's minimum anyway. Ignored on other platforms.
-MACOSX_DEPLOYMENT_TARGET = "13.4"
