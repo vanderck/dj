@@ -142,11 +142,11 @@ impl MaskModel for OnnxModel {
     }
 }
 
-fn err(e: impl std::fmt::Display) -> ModelError {
+pub(crate) fn err(e: impl std::fmt::Display) -> ModelError {
     ModelError::new(e.to_string())
 }
 
-fn builder(options: &OnnxOptions) -> Result<SessionBuilder, ModelError> {
+pub(crate) fn builder(options: &OnnxOptions) -> Result<SessionBuilder, ModelError> {
     let env = environment()?;
     Session::builder(&env)
         .map_err(err)?
