@@ -111,3 +111,36 @@ def test_eval_snapshots_can_be_capped(tmp_path):
     ds = StemFolder(str(tmp_path), "valid", sr, 1.0, length=1, snapshot_seconds=0.0, max_snapshots=4)
     assert len(ds) == 4 and ds.snapshot_tracks == [0, 2, 5, 7]
     assert len(StemFolder(str(tmp_path), "valid", sr, 1.0, length=1, snapshot_seconds=0.0)) == 10
+
+
+def test_demucs_addon_chunks_join_seamlessly():
+    import demucs_stems
+
+    sr = 1000
+    rng = np.random.default_rng(0)
+    audio = rng.standard_normal((2, 10 * sr + 123)).astype(np.float32)
+    calls, seen = [], []
+
+    def fake(chunk, rate):  # a "separator" that depends on the chunk, like a real one would
+        calls.append(chunk.shape[1])
+        return {s: chunk * w for s, w in zip(teacher.STEMS, (0.1, 0.2, 0.3, 0.4))}
+
+    out = demucs_stems.separate_file(audio, sr, fake, chunk_seconds=3.0, overlap_seconds=0.5,
+                                     progress=seen.append)
+    for s, w in zip(teacher.STEMS, (0.1, 0.2, 0.3, 0.4)):
+        np.testing.assert_allclose(out[s], audio * w, atol=1e-6)
+    assert len(calls) == 4 and seen[-1] == 1.0 and seen == sorted(seen)
+
+
+def test_demucs_addon_writes_the_protocol_files(tmp_path, monkeypatch, capsys):
+    import demucs_stems
+
+    sr = 8000
+    x = np.random.default_rng(1).standard_normal((sr * 2, 2)).astype(np.float32) * 0.1
+    sf.write(tmp_path / "in.wav", x, sr, subtype="FLOAT")
+    monkeypatch.setattr(demucs_stems, "demucs_separator", lambda *a: fake_separator)
+    assert demucs_stems.main([str(tmp_path / "in.wav"), str(tmp_path / "out")]) == 0
+    total = sum(sf.read(tmp_path / "out" / f"{s}.wav")[0] for s in teacher.STEMS)
+    np.testing.assert_allclose(total, x, atol=1e-6)
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0] == "name HT-Demucs FT (external)" and lines[-1] == "progress 1.000"

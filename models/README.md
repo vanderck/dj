@@ -140,6 +140,24 @@ Then run the plugin with it:
 export STEMS_MODEL=$PWD/models/stems-v1.onnx
 ```
 
+## 5. Demucs add-on for Collective
+
+For DJing, where tracks are separated before they are played, HT-Demucs itself gives much
+better stems than any real-time model (at about 1 minute per 5-minute track on an M-series Mac).
+`tools/demucs_stems.py` plugs it into Collective's *External separator* setting:
+
+```
+/Users/you/stems/models/.venv/bin/python /Users/you/stems/models/tools/demucs_stems.py
+```
+
+(the Python of the environment where `demucs` is installed, then the script). Collective then
+uses Demucs for every track it loads, keeps the results, and falls back to its model if Demucs
+fails. Prepare a whole crate in advance with `collective --prepare-stems FOLDER`.
+
+Licence: the Demucs code is MIT, but its pretrained weights were trained partly on MUSDB18
+(non-commercial research licence). Fine for your own use; keep it an add-on rather than shipping
+it in a product.
+
 ## Design notes
 
 - **Training equals deployment.** Every temporal layer is an unpadded dilated convolution, so
