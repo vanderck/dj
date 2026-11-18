@@ -108,6 +108,17 @@ pub struct Settings {
     /// Mixing happens on an external (hardware) mixer: every deck goes to its own output pair,
     /// Collective's volume / trim / EQ / filter and the mixer section are bypassed and hidden.
     pub external_mixer: bool,
+    /// Screen layout: big touch controls, or (with a MIDI controller) four full decks with
+    /// slim cue pads. `Auto` picks Controller when a hardware MIDI input is connected.
+    pub layout: LayoutMode,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum LayoutMode {
+    #[default]
+    Auto,
+    Touch,
+    Controller,
 }
 
 impl Default for Settings {
@@ -148,6 +159,7 @@ impl Default for Settings {
             stems_external: String::new(),
             stems_prepared_dir: None,
             external_mixer: false,
+            layout: LayoutMode::Auto,
         }
     }
 }

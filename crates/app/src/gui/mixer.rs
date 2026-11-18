@@ -250,6 +250,15 @@ fn menu(ui: &mut Ui, core: &mut Core, st: &mut UiState) {
             }
         }
     });
+    ui.horizontal(|ui| {
+        use crate::settings::LayoutMode;
+        ui.label("Layout").on_hover_text("Controller: four full decks with slim cue pads, for use with a MIDI controller. Auto: Controller when one is connected.");
+        for (m, l) in [(LayoutMode::Auto, "Auto"), (LayoutMode::Touch, "Touch"), (LayoutMode::Controller, "Controller")] {
+            if ui.selectable_label(core.settings.layout == m, l).clicked() {
+                core.settings.layout = m;
+            }
+        }
+    });
     ui.menu_button("Insert FX ▸", |ui| {
         for c in 0..core.deck_count() {
             if ui.button(format!("Channel {}", c + 1)).clicked() {

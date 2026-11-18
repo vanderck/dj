@@ -160,24 +160,27 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
     let a = |s: &str| format!("Deck/{n}/{s}");
     let color = DECK[d];
     let is_master = core.snap.clock.owner == ClockOwner::Deck(d as u8);
-    let pad = 16.0;
+    // Controller layout: a MIDI controller has its own cue pads, so the pads become one slim
+    // row and everything is smaller, to fit two decks per side.
+    let dense = st.dense;
+    let pad = if dense { 10.0 } else { 16.0 };
     let r = rect.shrink(pad);
     let w = r.width();
     let gap = 8.0;
 
     // ---------------------------------------------------------- header
-    let hh = 44.0;
+    let hh = if dense { 34.0 } else { 44.0 };
     let badge = Rect::from_min_size(r.min, Vec2::splat(hh));
     badge_menu(ui, core, d, badge, 22.0);
     let time_w = 92.0;
     let time_r = Rect::from_min_size(Pos2::new(r.right() - time_w, r.top()), Vec2::new(time_w, hh));
-    ui.painter().text(time_r.right_center(), Align2::RIGHT_CENTER, mmss_remain(v.duration_secs - v.position_secs), mono(30.0), if v.loaded && v.playing && v.duration_secs - v.position_secs < 30.0 { RED } else { TEXT });
+    ui.painter().text(time_r.right_center(), Align2::RIGHT_CENTER, mmss_remain(v.duration_secs - v.position_secs), mono(if dense { 24.0 } else { 30.0 }), if v.loaded && v.playing && v.duration_secs - v.position_secs < 30.0 { RED } else { TEXT });
     let bpm_r = Rect::from_min_size(Pos2::new(time_r.left() - 88.0, r.top()), Vec2::new(80.0, hh));
     let p = ui.painter();
     // (The tempo change in % is shown inside the tempo slider.)
-    p.text(Pos2::new(bpm_r.right(), bpm_r.center().y), Align2::RIGHT_CENTER, if v.has_grid { format!("{:.2}", v.bpm) } else { "—".into() }, mono(22.0), TEXT);
+    p.text(Pos2::new(bpm_r.right(), bpm_r.center().y), Align2::RIGHT_CENTER, if v.has_grid { format!("{:.2}", v.bpm) } else { "—".into() }, mono(if dense { 18.0 } else { 22.0 }), TEXT);
     let key = core.key_text(core.deck_key(d));
-    let chip = Rect::from_min_size(Pos2::new(bpm_r.left() - 56.0, r.top() + 8.0), Vec2::new(46.0, 30.0));
+    let chip = Rect::from_min_size(Pos2::new(bpm_r.left() - 56.0, r.top() + (hh - 30.0).max(4.0) / 2.0), Vec2::new(46.0, (hh - 8.0).min(30.0)));
     if !key.is_empty() {
         key_chip(ui, chip, &key, key_border(core, d), 15.0);
     }
@@ -191,8 +194,9 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
     // The stems row only exists without the internal mixer (otherwise stems are on the faders
     // and their status is in the header).
     let stems_on = core.settings.stems_enabled && core.external_routing();
-    let base = 52.0 + 10.0 + 2.0 * 36.0 + 8.0 + if stems_on { 10.0 + 26.0 + 10.0 } else { 14.0 } + 30.0 + 12.0 + 30.0;
-    let k = ((r.bottom() - (r.top() + hh + 12.0)) / base).clamp(1.0, 1.8);
+    let pads_base = if dense { 30.0 } else { 2.0 * 36.0 + 8.0 };
+    let base = 52.0 + 10.0 + pads_base + if stems_on { 10.0 + 26.0 + 10.0 } else { 14.0 } + 30.0 + 12.0 + 30.0;
+    let k = ((r.bottom() - (r.top() + hh + 12.0)) / base).clamp(if dense { 0.55 } else { 1.0 }, 1.8);
     let y = r.top() + hh + 12.0;
     let bh = 52.0 * k;
     let big_w = (w - 3.0 * gap) / 4.0;
@@ -227,10 +231,15 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
     let y = y + bh + (if stems_on { 10.0 } else { 14.0 }) * k;
     // Pads take whatever height is left (rows below: stems 26+10+10, tempo 30+12, loops 30).
     let below = (if stems_on { 10.0 + 26.0 + 10.0 } else { 14.0 } + 30.0 + 12.0 + 30.0) * k;
-    let ph = ((r.bottom() - y - 8.0 - below) / 2.0).clamp(28.0, 46.0 * k);
-    let pw = (w - 3.0 * gap) / 4.0;
+    let (cols, rows) = if dense { (8, 1) } else { (4, 2) };
+    let ph = if dense { (r.bottom() - y - below).clamp(16.0, 40.0 * k) } else { ((r.bottom() - y - 8.0 - below) / 2.0).clamp(28.0, 46.0 * k) };
+    let pgap = if dense { 6.0 } else { gap };
+    let pw = (w - (cols - 1) as f32 * pgap) / cols as f32;
+    // Narrow pads show just the number (the pad colour says the rest).
+    let pad_labels = pw >= 80.0;
+    let pad_font = if dense { 13.0 } else { 16.0 };
     for i in 0..8 {
-        let rr = Rect::from_min_size(Pos2::new(r.left() + (i % 4) as f32 * (pw + gap), y + (i / 4) as f32 * (ph + 8.0)), Vec2::new(pw, ph));
+        let rr = Rect::from_min_size(Pos2::new(r.left() + (i % cols) as f32 * (pw + pgap), y + (i / cols) as f32 * (ph + 8.0)), Vec2::new(pw, ph));
         let set = v.hot_cues[i].is_some();
         let name = core.decks[d].info.as_ref().and_then(|x| x.cues[i].as_ref()).map(|c| c.name.clone()).unwrap_or_default();
         let resp = ui.allocate_rect(rr, Sense::click_and_drag());
@@ -241,13 +250,21 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
             p.rect_filled(rr, rad, if resp.hovered() { dim(c, 0.42) } else { dim(c, 0.32) });
             p.rect_stroke(rr, rad, Stroke::new(1.5, dim(c, 0.85)), egui::StrokeKind::Inside);
             let label = if !name.is_empty() { name } else if v.hot_cue_is_loop[i] { "Loop".into() } else { "Cue".into() };
-            p.text(Pos2::new(rr.left() + 14.0, rr.center().y), Align2::LEFT_CENTER, format!("{}", i + 1), bold(16.0), TEXT);
-            p.text(Pos2::new(rr.left() + 32.0, rr.center().y), Align2::LEFT_CENTER, label, sans(15.0), TEXT);
+            if pad_labels {
+                p.text(Pos2::new(rr.left() + 14.0, rr.center().y), Align2::LEFT_CENTER, format!("{}", i + 1), bold(pad_font), TEXT);
+                p.text(Pos2::new(rr.left() + 32.0, rr.center().y), Align2::LEFT_CENTER, label, sans(pad_font - 1.0), TEXT);
+            } else {
+                p.text(rr.center(), Align2::CENTER_CENTER, format!("{}", i + 1), bold(pad_font), TEXT);
+            }
         } else {
             p.rect_filled(rr, rad, Color32::from_rgb(0x17, 0x17, 0x1b));
             p.rect_stroke(rr, rad, Stroke::new(1.0, Color32::from_rgb(0x2a, 0x2a, 0x30)), egui::StrokeKind::Inside);
-            p.text(Pos2::new(rr.left() + 14.0, rr.center().y), Align2::LEFT_CENTER, format!("{}", i + 1), bold(16.0), TEXT_FAINT);
-            p.text(Pos2::new(rr.left() + 32.0, rr.center().y), Align2::LEFT_CENTER, "empty", sans(15.0), TEXT_FAINT);
+            if pad_labels {
+                p.text(Pos2::new(rr.left() + 14.0, rr.center().y), Align2::LEFT_CENTER, format!("{}", i + 1), bold(pad_font), TEXT_FAINT);
+                p.text(Pos2::new(rr.left() + 32.0, rr.center().y), Align2::LEFT_CENTER, "empty", sans(pad_font - 1.0), TEXT_FAINT);
+            } else {
+                p.text(rr.center(), Align2::CENTER_CENTER, format!("{}", i + 1), bold(pad_font), TEXT_FAINT);
+            }
         }
         let resp = resp.on_hover_text("Click: set / launch · Ctrl-click: delete · Alt-click: loop to next cue");
         let addr = a(&format!("Cue{}", i + 1));
@@ -274,7 +291,7 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
     }
 
     // ---------------------------------------------------------- stems
-    let after_cues = y + 2.0 * ph + 8.0;
+    let after_cues = y + rows as f32 * ph + (rows - 1) as f32 * 8.0;
     let y = if stems_on {
         let stems_h = 26.0 * k;
         stems_row(ui, core, d, Rect::from_min_size(Pos2::new(r.left(), after_cues + 10.0 * k), Vec2::new(w, stems_h)));

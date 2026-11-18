@@ -35,6 +35,8 @@ pub struct UiState {
     pub fader_mode: mixer::FaderMode,
     /// Value each channel/mode had before its ON/OFF button switched it off.
     pub fader_restore: std::collections::HashMap<(usize, mixer::FaderMode), f32>,
+    /// Controller layout this frame (see `Settings::layout`): slim cue pads, four full decks.
+    pub dense: bool,
     pub fx_edit: [[bool; 4]; 4],
     pub insert_browser: Option<InsertBrowser>,
     pub preset_name: [String; 4],
@@ -61,6 +63,7 @@ impl Default for UiState {
             fx_open: [false; 4],
             fader_mode: mixer::FaderMode::Level,
             fader_restore: Default::default(),
+            dense: false,
             fx_edit: [[false; 4]; 4],
             insert_browser: None,
             preset_name: Default::default(),
@@ -225,10 +228,24 @@ impl eframe::App for App {
             let mixer_w = if self.core.external_routing() { 240.0 } else { (area.width() * 0.31).clamp(360.0, 640.0) };
             let deck_w = (area.width() - mixer_w - 2.0 * gap) / 2.0;
             let four = self.core.deck_count() >= 4;
+            self.ui.dense = match self.core.settings.layout {
+                crate::settings::LayoutMode::Controller => true,
+                crate::settings::LayoutMode::Touch => false,
+                crate::settings::LayoutMode::Auto => self.core.midi.has_controller(),
+            };
             // One row: badge, title, key, Swap, Cue, Play, Sync.
             let compact_h = 62.0;
             for side in 0..2 {
                 let x = if side == 0 { mid.left() } else { mid.right() - deck_w };
+                if four && self.ui.dense {
+                    // Controller layout: both decks of this side in full, stacked (1 over 3, 2 over 4).
+                    let dh = (mid.height() - gap) / 2.0;
+                    for (row, d) in [side, side + 2].into_iter().enumerate() {
+                        let dr = Rect::from_min_size(Pos2::new(x, mid.top() + row as f32 * (dh + gap)), Vec2::new(deck_w, dh));
+                        deck::big(ui, &mut self.core, &mut self.ui, d, dr);
+                    }
+                    continue;
+                }
                 let big_d = self.ui.focus[side];
                 let big_h = if four { mid.height() - compact_h - gap } else { mid.height() };
                 deck::big(ui, &mut self.core, &mut self.ui, big_d, Rect::from_min_size(Pos2::new(x, mid.top()), Vec2::new(deck_w, big_h)));
