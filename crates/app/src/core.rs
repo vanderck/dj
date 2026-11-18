@@ -486,6 +486,8 @@ impl Core {
                 path: lt.path.clone(),
                 model: crate::stems::resolve_model(self.settings.stems_model.as_deref()),
                 cache,
+                external: self.settings.stems_external(),
+                prepared: Some(self.settings.stems_prepared_dir()),
             });
         }
         self.send(Command::Load { deck: d as u8, track: lt.track, start_at_first_cue: self.settings.load_at_first_cue });

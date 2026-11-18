@@ -29,7 +29,15 @@ pub struct Request {
     pub model: Option<PathBuf>,
     /// Cache folder and its size limit in bytes; `None` disables the cache.
     pub cache: Option<(PathBuf, u64)>,
+    /// External separator command (see [`external`]); tried before `model`.
+    pub external: Option<String>,
+    /// Folder of prepared stems (from the external separator or `--prepare-stems`); checked
+    /// first and never evicted.
+    pub prepared: Option<PathBuf>,
 }
+
+/// Separator id of prepared stems in cache keys: one set per track, whichever command made it.
+const PREPARED: &str = "prepared";
 
 pub struct StemsWorker {
     jobs: Sender<Request>,
@@ -138,8 +146,17 @@ fn run(job: Request, wanted: &[AtomicU64; NUM_DECKS], tx: &Sender<Update>) {
         return;
     }
     let audio = &job.track.audio;
+    let frames = audio.frames.len();
+    let prepared_key = cache_key(&job.path, PREPARED, frames);
+    if let Some(dir) = &job.prepared {
+        if let Some(stems) = cache::read(&dir.join(cache::file_name(prepared_key)), prepared_key, id, frames) {
+            let wave = Arc::new(StemWave::compute(&audio.frames, audio.sample_rate, &stems));
+            let _ = tx.send(Update::Done { deck, track_id: id, stems: Arc::new(stems), wave, source: "prepared stems".into() });
+            return;
+        }
+    }
     let separator = separator_id(job.model.as_deref());
-    let key = cache_key(&job.path, &separator, audio.frames.len());
+    let key = cache_key(&job.path, &separator, frames);
 
     if let Some((dir, _)) = &job.cache {
         if let Some(stems) = cache::read(&dir.join(cache::file_name(key)), key, id, audio.frames.len()) {
@@ -157,6 +174,31 @@ fn run(job: Request, wanted: &[AtomicU64; NUM_DECKS], tx: &Sender<Update>) {
         }
         still_wanted()
     };
+    if let Some(command) = &job.external {
+        match external::run(&audio.frames, audio.sample_rate, command, &mut progress) {
+            Ok((buffers, name)) => {
+                let stems = StemData::from_f32(
+                    id,
+                    &buffers[CoreStem::Drums as usize],
+                    &buffers[CoreStem::Bass as usize],
+                    &buffers[CoreStem::Vocals as usize],
+                );
+                if let Some(dir) = &job.prepared {
+                    if let Err(e) = cache::write(dir, prepared_key, &stems, u64::MAX) {
+                        eprintln!("prepared stems: {e}");
+                    }
+                }
+                let wave = Arc::new(StemWave::compute(&audio.frames, audio.sample_rate, &stems));
+                let _ = tx.send(Update::Done { deck, track_id: id, stems: Arc::new(stems), wave, source: name });
+                return;
+            }
+            Err(external::Error::Cancelled) => return,
+            Err(external::Error::Failed(e)) => {
+                let error = format!("external separator failed ({e}); using the built-in model");
+                let _ = tx.send(Update::Failed { deck, track_id: id, error });
+            }
+        }
+    }
     let mut result = separate(&audio.frames, audio.sample_rate, job.model.as_deref(), &mut progress);
     if let (Err(OfflineError::Model(e)), Some(model)) = (&result, &job.model) {
         // Better rough stems than none: report the problem, then use the placeholder.
@@ -265,6 +307,195 @@ fn cache_key(path: &Path, separator: &str, frames: usize) -> u64 {
     eat(separator.as_bytes());
     eat(&(frames as u64).to_le_bytes());
     h
+}
+
+/// What [`prepare_file`] did.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Prepared {
+    Done(String),
+    AlreadyPrepared,
+}
+
+/// Separate one file with the external separator into the prepared-stems folder, unless it is
+/// already there (for `collective --prepare-stems`). `progress` gets 0..=1.
+pub fn prepare_file(path: &Path, command: &str, dir: &Path, progress: &mut dyn FnMut(f32)) -> Result<Prepared, String> {
+    let audio = collective_library::decode(path).map_err(|e| format!("decoding: {e}"))?;
+    let frames = audio.frames.len();
+    let key = cache_key(path, PREPARED, frames);
+    if cache::read(&dir.join(cache::file_name(key)), key, 0, frames).is_some() {
+        return Ok(Prepared::AlreadyPrepared);
+    }
+    let (buffers, name) = external::run(&audio.frames, audio.sample_rate, command, &mut |p| {
+        progress(p);
+        true
+    })
+    .map_err(|e| match e {
+        external::Error::Failed(e) => e,
+        external::Error::Cancelled => "cancelled".into(),
+    })?;
+    let stems = StemData::from_f32(
+        0,
+        &buffers[CoreStem::Drums as usize],
+        &buffers[CoreStem::Bass as usize],
+        &buffers[CoreStem::Vocals as usize],
+    );
+    cache::write(dir, key, &stems, u64::MAX).map_err(|e| format!("writing {}: {e}", dir.display()))?;
+    Ok(Prepared::Done(name))
+}
+
+/// External separator: any program that turns a WAV file into stem files, so separators that
+/// cannot ship with Collective (licence, size, Python) plug in from outside.
+///
+/// Collective runs `sh -c '<command> "$@"' collective INPUT.wav OUTPUT_DIR`, where INPUT.wav is
+/// the decoded track (32-bit float, stereo, at the track's own sample rate). The program writes
+/// `OUTPUT_DIR/{drums,bass,vocals,other}.wav` (any sample rate, mono or stereo, PCM or float;
+/// `other` is optional: Collective derives it) and exits with status 0. It may print lines
+/// `progress 0.42` and `name Some Separator` on stdout.
+pub mod external {
+    use super::*;
+    use std::collections::VecDeque;
+    use std::io::BufRead;
+    use std::process::{Command, Stdio};
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    pub enum Error {
+        /// `progress` returned false; the program was stopped.
+        Cancelled,
+        Failed(String),
+    }
+
+    /// Removes the exchange folder however `run` ends.
+    struct TempDir(PathBuf);
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    pub fn run(
+        frames: &[[f32; 2]],
+        rate: u32,
+        command: &str,
+        progress: &mut dyn FnMut(f32) -> bool,
+    ) -> Result<(StemBuffers, String), Error> {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let fail = |e: String| Error::Failed(e);
+        let tmp = TempDir(std::env::temp_dir().join(format!(
+            "collective-stems-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        )));
+        let out_dir = tmp.0.join("stems");
+        fs::create_dir_all(&out_dir).map_err(|e| fail(format!("temp folder: {e}")))?;
+        let input = tmp.0.join("input.wav");
+        write_wav(&input, frames, rate).map_err(|e| fail(format!("writing input: {e}")))?;
+
+        let mut child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(format!("{command} \"$@\""))
+            .arg("collective")
+            .arg(&input)
+            .arg(&out_dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| fail(format!("starting it: {e}")))?;
+
+        let (line_tx, lines) = crossbeam_channel::unbounded::<String>();
+        let stdout = child.stdout.take().unwrap();
+        std::thread::spawn(move || {
+            for line in std::io::BufReader::new(stdout).lines().map_while(Result::ok) {
+                let _ = line_tx.send(line);
+            }
+        });
+        let tail = Arc::new(Mutex::new(VecDeque::<String>::new()));
+        let stderr = child.stderr.take().unwrap();
+        let t = tail.clone();
+        std::thread::spawn(move || {
+            for line in std::io::BufReader::new(stderr).lines().map_while(Result::ok) {
+                let mut t = t.lock().unwrap();
+                t.push_back(line);
+                if t.len() > 8 {
+                    t.pop_front();
+                }
+            }
+        });
+
+        let mut name = String::from("external separator");
+        let mut fraction = 0.0f32;
+        let status = loop {
+            while let Ok(line) = lines.try_recv() {
+                if let Some(p) = line.strip_prefix("progress ").and_then(|v| v.trim().parse::<f32>().ok()) {
+                    fraction = p.clamp(0.0, 1.0);
+                } else if let Some(n) = line.strip_prefix("name ") {
+                    name = n.trim().to_string();
+                }
+            }
+            if !progress(0.98 * fraction) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(Error::Cancelled);
+            }
+            match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+                Err(e) => return Err(fail(format!("waiting for it: {e}"))),
+            }
+        };
+        if !status.success() {
+            std::thread::sleep(Duration::from_millis(50)); // let stderr drain
+            let tail = tail.lock().unwrap().iter().cloned().collect::<Vec<_>>().join(" | ");
+            return Err(fail(format!("{status}: {tail}")));
+        }
+
+        let mut stems: StemBuffers = Default::default();
+        for s in [CoreStem::Drums, CoreStem::Bass, CoreStem::Vocals] {
+            let path = out_dir.join(format!("{}.wav", s.name().to_lowercase()));
+            let (mut audio, r) = read_wav(&path).map_err(|e| fail(format!("{}: {e}", path.display())))?;
+            if r != rate {
+                audio = stems_core::resample(&audio, r, rate);
+            }
+            audio.resize(frames.len(), [0.0; 2]);
+            stems[s as usize] = audio;
+        }
+        Ok((stems, name))
+    }
+
+    fn write_wav(path: &Path, frames: &[[f32; 2]], rate: u32) -> Result<(), hound::Error> {
+        let spec = hound::WavSpec {
+            channels: 2,
+            sample_rate: rate,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        };
+        let mut w = hound::WavWriter::create(path, spec)?;
+        for f in frames {
+            w.write_sample(f[0])?;
+            w.write_sample(f[1])?;
+        }
+        w.finalize()
+    }
+
+    /// Any PCM or float WAV -> stereo frames (mono duplicated, extra channels dropped).
+    pub(super) fn read_wav(path: &Path) -> Result<(Vec<[f32; 2]>, u32), hound::Error> {
+        let mut r = hound::WavReader::open(path)?;
+        let spec = r.spec();
+        let ch = spec.channels.max(1) as usize;
+        let samples: Vec<f32> = match spec.sample_format {
+            hound::SampleFormat::Float => r.samples::<f32>().collect::<Result<_, _>>()?,
+            hound::SampleFormat::Int => {
+                let k = 1.0 / (1u64 << (spec.bits_per_sample - 1)) as f32;
+                r.samples::<i32>().map(|v| v.map(|v| v as f32 * k)).collect::<Result<_, _>>()?
+            }
+        };
+        let frames = samples
+            .chunks_exact(ch)
+            .map(|c| if ch == 1 { [c[0], c[0]] } else { [c[0], c[1]] })
+            .collect();
+        Ok((frames, spec.sample_rate))
+    }
 }
 
 mod cache {
@@ -397,7 +628,7 @@ mod tests {
 
         let w = StemsWorker::new();
         let t = track(11, 2.0);
-        w.request(Request { deck: 1, track: t.clone(), path: song.clone(), model: None, cache: cache.clone() });
+        w.request(Request { deck: 1, track: t.clone(), path: song.clone(), model: None, cache: cache.clone(), external: None, prepared: None });
         let Update::Done { deck, track_id, stems, source, .. } = wait(&w) else { panic!("expected stems") };
         assert_eq!((deck, track_id, source.as_str()), (1, 11, "placeholder separator"));
         assert_eq!(stems.len(), t.audio.frames.len());
@@ -408,7 +639,7 @@ mod tests {
 
         // Same file again (new track id): served from the cache, identical content.
         let t2 = track(12, 2.0);
-        w.request(Request { deck: 0, track: t2, path: song.clone(), model: None, cache: cache.clone() });
+        w.request(Request { deck: 0, track: t2, path: song.clone(), model: None, cache: cache.clone(), external: None, prepared: None });
         let Update::Done { track_id, stems: cached, source, .. } = wait(&w) else { panic!() };
         assert_eq!((track_id, source.as_str()), (12, "cache"));
         assert_eq!(cached.drums, stems.drums);
@@ -424,10 +655,10 @@ mod tests {
     #[test]
     fn cancelled_jobs_produce_nothing() {
         let w = StemsWorker::new();
-        w.request(Request { deck: 2, track: track(21, 30.0), path: PathBuf::from("/nonexistent"), model: None, cache: None });
+        w.request(Request { deck: 2, track: track(21, 30.0), path: PathBuf::from("/nonexistent"), model: None, cache: None, external: None, prepared: None });
         w.cancel(2);
         // A later request for another deck still completes, and nothing arrives for the cancelled one.
-        w.request(Request { deck: 3, track: track(22, 1.0), path: PathBuf::from("/nonexistent"), model: None, cache: None });
+        w.request(Request { deck: 3, track: track(22, 1.0), path: PathBuf::from("/nonexistent"), model: None, cache: None, external: None, prepared: None });
         let Update::Done { deck, track_id, .. } = wait(&w) else { panic!() };
         assert_eq!((deck, track_id), (3, 22));
     }
@@ -437,10 +668,99 @@ mod tests {
         let w = StemsWorker::new();
         let bad = std::env::temp_dir().join("collective-not-a-model.onnx");
         fs::write(&bad, b"nope").unwrap();
-        w.request(Request { deck: 0, track: track(31, 1.0), path: bad.clone(), model: Some(bad), cache: None });
+        w.request(Request { deck: 0, track: track(31, 1.0), path: bad.clone(), model: Some(bad), cache: None, external: None, prepared: None });
         let Update::Failed { track_id: 31, error, .. } = wait(&w) else { panic!("expected the model error first") };
         assert!(error.contains("placeholder"), "{error}");
         let Update::Done { track_id: 31, source, .. } = wait(&w) else { panic!("expected placeholder stems") };
+        assert_eq!(source, "placeholder separator");
+    }
+
+    /// A stand-in external separator: every stem is a copy of the input; counts its runs.
+    fn fake_separator(dir: &Path) -> String {
+        let script = dir.join("fake.sh");
+        fs::write(
+            &script,
+            "echo 'name Fake separator'\necho 'progress 0.5'\nfor s in drums bass vocals; do cp \"$1\" \"$2/$s.wav\"; done\necho run >> \"$(dirname \"$0\")/runs\"\n",
+        )
+        .unwrap();
+        format!("sh '{}'", script.display())
+    }
+
+    fn write_song(path: &Path, t: &Track) {
+        let spec = hound::WavSpec { channels: 2, sample_rate: t.audio.sample_rate, bits_per_sample: 32, sample_format: hound::SampleFormat::Float };
+        let mut w = hound::WavWriter::create(path, spec).unwrap();
+        for f in &t.audio.frames {
+            w.write_sample(f[0]).unwrap();
+            w.write_sample(f[1]).unwrap();
+        }
+        w.finalize().unwrap();
+    }
+
+    #[test]
+    fn external_separator_results_are_kept_as_prepared_stems() {
+        let dir = std::env::temp_dir().join(format!("collective-ext-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let song = dir.join("song.wav");
+        let t = track(41, 2.0);
+        write_song(&song, &t);
+        let decoded = |id| {
+            let audio = collective_library::decode(&song).unwrap();
+            Arc::new(Track { id, audio, grid: None, gain: 1.0, cues: Default::default() })
+        };
+        let t = decoded(41);
+        let command = fake_separator(&dir);
+        let prepared = Some(dir.join("prepared"));
+
+        let w = StemsWorker::new();
+        let req = |_id: u64, track: Arc<Track>| Request {
+            deck: 0,
+            track,
+            path: song.clone(),
+            model: None,
+            cache: None,
+            external: Some(command.clone()),
+            prepared: prepared.clone(),
+        };
+        w.request(req(41, t.clone()));
+        let Update::Done { stems, source, .. } = wait(&w) else { panic!("expected stems") };
+        assert_eq!(source, "Fake separator");
+        let i = 20_000;
+        let back = stems.drums[i][0] as f32 * stems.scale;
+        assert!((back - t.audio.frames[i][0]).abs() < 1e-3, "{back} vs {}", t.audio.frames[i][0]);
+
+        // Loading the same file again uses the prepared stems without running the separator.
+        w.request(req(42, decoded(42)));
+        let Update::Done { track_id: 42, source, .. } = wait(&w) else { panic!() };
+        assert_eq!(source, "prepared stems");
+        assert_eq!(fs::read_to_string(dir.join("runs")).unwrap().lines().count(), 1);
+
+        // `--prepare-stems` sees the same store.
+        let mut p = |_| {};
+        assert_eq!(prepare_file(&song, &command, &dir.join("prepared"), &mut p), Ok(Prepared::AlreadyPrepared));
+        let other = dir.join("other.wav");
+        write_song(&other, &track(43, 1.0));
+        assert_eq!(prepare_file(&other, &command, &dir.join("prepared"), &mut p), Ok(Prepared::Done("Fake separator".into())));
+        assert_eq!(fs::read_dir(dir.join("prepared")).unwrap().count(), 2);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn external_separator_failure_is_reported_then_falls_back() {
+        let w = StemsWorker::new();
+        let command = "echo 'no GPU today' >&2; exit 3; true".to_string();
+        w.request(Request {
+            deck: 1,
+            track: track(51, 1.0),
+            path: PathBuf::from("/nonexistent"),
+            model: None,
+            cache: None,
+            external: Some(command),
+            prepared: None,
+        });
+        let Update::Failed { track_id: 51, error, .. } = wait(&w) else { panic!("expected the failure first") };
+        assert!(error.contains("no GPU today") && error.contains('3'), "{error}");
+        let Update::Done { track_id: 51, source, .. } = wait(&w) else { panic!("expected fallback stems") };
         assert_eq!(source, "placeholder separator");
     }
 }

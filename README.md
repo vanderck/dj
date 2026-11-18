@@ -72,6 +72,23 @@ Settings → Stems), so reloading a track is instant.
 variable). Without one, a low-quality placeholder separator is used and the deck says so in red.
 Models are trained with the pipeline in the stems repository.
 
+**External separator (e.g. Demucs).** Settings → Stems → *External separator* takes any command
+that turns a WAV file into stem files; Collective tries it before the model and falls back to
+the model if it fails. Its stems are kept in the *Prepared stems* folder (never cleaned up
+automatically; about 32 MB per minute), so each track is separated once. Prepare a crate ahead of
+a set with:
+
+```bash
+collective --prepare-stems ~/Music/Crate
+```
+
+Protocol: Collective runs `<command> INPUT.wav OUTPUT_DIR` (through `sh`); INPUT.wav is the
+decoded track (32-bit float stereo, the track's own sample rate). The command writes
+`OUTPUT_DIR/{drums,bass,vocals,other}.wav` (any rate, mono or stereo, PCM or float; `other` is
+optional) and exits 0. It may print `progress 0.42` and `name …` lines. The stems repository has
+a Demucs add-on, `models/tools/demucs_stems.py`. Demucs' pretrained weights are for
+non-commercial use, which is why it is an add-on and not part of Collective.
+
 **Build.** The default `stems-onnx` feature downloads ONNX Runtime at build time and links it
 statically. Where that download is blocked, build with
 `--no-default-features --features stems-onnx-dynamic` and set `ORT_DYLIB_PATH` to an existing

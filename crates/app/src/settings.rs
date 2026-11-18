@@ -96,6 +96,12 @@ pub struct Settings {
     pub stems_model: Option<PathBuf>,
     /// Disk cache for separated stems (MB); 0 disables it.
     pub stems_cache_mb: u64,
+    /// External separator command (e.g. the Demucs add-on), tried before the model; empty = off.
+    /// See `stems::external` for the protocol.
+    pub stems_external: String,
+    /// Where prepared stems (external separator, `--prepare-stems`) are kept; never cleaned up
+    /// automatically. `None` = `stems-prepared` in the config folder.
+    pub stems_prepared_dir: Option<PathBuf>,
     /// Mixing happens on an external (hardware) mixer: every deck goes to its own output pair,
     /// Collective's volume / trim / EQ / filter and the mixer section are bypassed and hidden.
     pub external_mixer: bool,
@@ -135,12 +141,24 @@ impl Default for Settings {
             stems_enabled: true,
             stems_model: None,
             stems_cache_mb: 4096,
+            stems_external: String::new(),
+            stems_prepared_dir: None,
             external_mixer: false,
         }
     }
 }
 
 impl Settings {
+    pub fn stems_prepared_dir(&self) -> PathBuf {
+        self.stems_prepared_dir.clone().unwrap_or_else(|| config_dir().join("stems-prepared"))
+    }
+
+    /// The external separator command, if one is set.
+    pub fn stems_external(&self) -> Option<String> {
+        let c = self.stems_external.trim();
+        (!c.is_empty()).then(|| c.to_string())
+    }
+
     pub fn path() -> PathBuf {
         config_dir().join("settings.json")
     }

@@ -282,6 +282,31 @@ fn settings(ui: &mut Ui, core: &mut Core, st: &mut UiState) {
             (None, None) => "No model: a low-quality placeholder separator is used.".to_string(),
         };
         ui.label(RichText::new(note).small().weak());
+        let mut ext = core.settings.stems_external.clone();
+        ui.horizontal(|ui| {
+            ui.label("External separator");
+            let edit = egui::TextEdit::singleline(&mut ext)
+                .hint_text("command, e.g. the Demucs add-on")
+                .desired_width(300.0);
+            if ui.add(edit).changed() {
+                core.settings.stems_external = ext.clone();
+            }
+        });
+        ui.label(
+            RichText::new(
+                "Optional, used before the model. Its stems are kept in the prepared-stems folder, so each track is separated once. Prepare whole folders ahead of a set with: Collective --prepare-stems FOLDER",
+            )
+            .small()
+            .weak(),
+        );
+        let mut prepared = core.settings.stems_prepared_dir().display().to_string();
+        ui.horizontal(|ui| {
+            ui.label("Prepared stems");
+            if ui.add(egui::TextEdit::singleline(&mut prepared).desired_width(300.0)).changed() {
+                let p = prepared.trim();
+                core.settings.stems_prepared_dir = (!p.is_empty()).then(|| p.into());
+            }
+        });
         ui.horizontal(|ui| {
             ui.label("Cache");
             ui.add(egui::DragValue::new(&mut core.settings.stems_cache_mb).range(0..=200_000).suffix(" MB"));
