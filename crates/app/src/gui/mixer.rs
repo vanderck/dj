@@ -101,7 +101,7 @@ fn external_panel(ui: &mut Ui, core: &mut Core, st: &mut UiState, r: Rect) {
     }
     y += 6.0;
     let note = format!(
-        "{} outputs on the audio device. Volume, EQ and filter happen on your mixer; Collective sends each deck unprocessed.",
+        "{} outputs on the audio device. Volume, EQ and filter happen on your mixer; dj sends each deck unprocessed.",
         core.audio_channels
     );
     let galley = p.layout(note, sans(11.5), TEXT_DIM, r.width());

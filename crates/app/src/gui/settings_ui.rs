@@ -83,7 +83,7 @@ fn settings(ui: &mut Ui, core: &mut Core, st: &mut UiState) {
         changed_engine = true;
     }
     if changed_audio {
-        ui.label(RichText::new("Audio device changes apply after restarting Collective.").color(WARN));
+        ui.label(RichText::new("Audio device changes apply after restarting dj.").color(WARN));
         core.log("Audio settings saved; restart to apply");
     }
 
@@ -345,7 +345,7 @@ fn settings(ui: &mut Ui, core: &mut Core, st: &mut UiState) {
         });
         ui.label(
             RichText::new(
-                "Optional, used before the model. Its stems are kept in the prepared-stems folder, so each track is separated once. Prepare whole folders ahead of a set with: Collective --prepare-stems FOLDER",
+                "Optional, used before the model. Its stems are kept in the prepared-stems folder, so each track is separated once. Prepare whole folders ahead of a set with: dj --prepare-stems FOLDER",
             )
             .small()
             .weak(),

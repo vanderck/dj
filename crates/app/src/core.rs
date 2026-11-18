@@ -1043,7 +1043,7 @@ impl Core {
             self.log(format!("Recording saved to {}", path.display()));
             return;
         }
-        let dir = dirs::audio_dir().or_else(dirs::home_dir).unwrap_or_else(|| PathBuf::from(".")).join("Collective Recordings");
+        let dir = dirs::audio_dir().or_else(dirs::home_dir).unwrap_or_else(|| PathBuf::from(".")).join("dj Recordings");
         let _ = std::fs::create_dir_all(&dir);
         let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
         let path = dir.join(format!("collective-{stamp}.wav"));

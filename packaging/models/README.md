@@ -1,7 +1,7 @@
 # Bundled stem-separation model
 
 `cargo xtask package-macos` puts `stems-model.onnx` from this folder into
-`Collective.app/Contents/Resources/`. Collective uses it whenever no model is set in
+`dj.app/Contents/Resources/`. dj uses it whenever no model is set in
 Settings → Stems or `STEMS_MODEL`. Pass `--no-model` to leave it out, or `--model other.onnx`
 to bundle a different one.
 

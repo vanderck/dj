@@ -19,21 +19,21 @@ use crate::model::Session;
 use crate::settings::Settings;
 
 const USAGE: &str = "\
-Collective — live performance DJ software
+dj — live performance DJ software
 
 USAGE:
-    collective                 start the GUI
-    collective --headless      run the engine with OSC/MIDI control only
-    collective --info FILE     print tags (BPM, key, energy, cues) for a file
-    collective --list-devices  list audio and MIDI devices
-    collective --import-mapping FILE.sdcmap
-                               import a Syndicate MIDI mapping into Collective's mappings
-    collective --download-demucs
+    dj                 start the GUI
+    dj --headless      run the engine with OSC/MIDI control only
+    dj --info FILE     print tags (BPM, key, energy, cues) for a file
+    dj --list-devices  list audio and MIDI devices
+    dj --import-mapping FILE.sdcmap
+                               import a Syndicate MIDI mapping into dj's mappings
+    dj --download-demucs
                                download HT-Demucs (300 MB) and use it for stems
-    collective --prepare-stems PATH...
+    dj --prepare-stems PATH...
                                separate files / folders with Demucs (or the external
                                separator, Settings → Stems) into the prepared-stems folder
-    collective --vst3-scan B   (internal) scan one VST3 bundle and print JSON
+    dj --vst3-scan B   (internal) scan one VST3 bundle and print JSON
 ";
 
 fn main() {
@@ -123,7 +123,7 @@ fn download_demucs() -> i32 {
                 eprintln!("Downloaded, but saving the settings failed: {e}");
                 return 1;
             }
-            println!("Done. Collective now uses HT-Demucs for stems.");
+            println!("Done. dj now uses HT-Demucs for stems.");
             0
         }
         Err(e) => {

@@ -112,7 +112,7 @@ pub fn run() {
             viewport: egui::ViewportBuilder::default()
                 .with_inner_size([1600.0, 1000.0])
                 .with_min_inner_size([1100.0, 700.0])
-                .with_title("Collective")
+                .with_title("dj")
                 .with_icon(std::sync::Arc::new(
                     eframe::icon_data::from_png_bytes(include_bytes!("../../assets/icon-256.png")).unwrap_or_default(),
                 )),

@@ -136,7 +136,7 @@ pub fn import(json: &str, profile: &mut MappingProfile) -> Result<ImportReport, 
             continue;
         }
         let Some(address) = address_for(&b.target) else {
-            skip(&mut report, "no matching Collective control");
+            skip(&mut report, "no matching dj control");
             continue;
         };
         let source = MidiSource { kind, channel: b.channel, number: b.number };
