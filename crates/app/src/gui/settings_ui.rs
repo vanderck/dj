@@ -83,7 +83,7 @@ fn settings(ui: &mut Ui, core: &mut Core, st: &mut UiState) {
         changed_engine = true;
     }
     if changed_audio {
-        ui.label(RichText::new("Audio device changes apply after restarting Collective.").color(WARN));
+        ui.label(RichText::new("Audio device changes apply after restarting dj.").color(WARN));
         core.log("Audio settings saved; restart to apply");
     }
 
@@ -164,6 +164,13 @@ fn settings(ui: &mut Ui, core: &mut Core, st: &mut UiState) {
     egui::ComboBox::from_label("Default tempo range").selected_text(core.settings.tempo_range.label()).show_ui(ui, |ui| {
         for r in [TempoRange::Pct6, TempoRange::Pct10, TempoRange::Pct16, TempoRange::Pct50, TempoRange::Semitones12] {
             ui.selectable_value(&mut core.settings.tempo_range, r, r.label());
+        }
+    });
+    let steps: [(f32, &str); 6] = [(0.0, "Continuous"), (0.01, "0.01 %"), (0.05, "0.05 %"), (0.1, "0.1 %"), (0.5, "0.5 %"), (1.0, "1 %")];
+    let current = steps.iter().find(|(v, _)| (*v - core.settings.tempo_step_pct).abs() < 1e-6).map_or("Custom", |(_, l)| *l);
+    egui::ComboBox::from_label("Tempo fader steps").selected_text(current).show_ui(ui, |ui| {
+        for (v, l) in steps {
+            ui.selectable_value(&mut core.settings.tempo_step_pct, v, l);
         }
     });
     ui.checkbox(&mut core.settings.keylock_on_load, "Key lock (pitch preserve) on load");
@@ -282,6 +289,75 @@ fn settings(ui: &mut Ui, core: &mut Core, st: &mut UiState) {
             (None, None) => "No model: a low-quality placeholder separator is used.".to_string(),
         };
         ui.label(RichText::new(note).small().weak());
+        // HT-Demucs: best quality, offline, downloaded on request.
+        let mut demucs = core.settings.stems_demucs.as_ref().map(|p| p.display().to_string()).unwrap_or_default();
+        ui.horizontal(|ui| {
+            ui.label("Demucs model");
+            let edit = egui::TextEdit::singleline(&mut demucs).hint_text("off: download it, or a path to a Demucs .onnx").desired_width(300.0);
+            if ui.add(edit).changed() {
+                let d = demucs.trim();
+                core.settings.stems_demucs = (!d.is_empty()).then(|| d.into());
+            }
+        });
+        let download = core.stems.demucs_download.as_ref().map(|d| d.state());
+        match download {
+            Some(crate::stems::DownloadState::Running { done, total }) => {
+                let mb = |b: u64| b as f64 / 1e6;
+                let text = match total {
+                    Some(t) => format!("Downloading HT-Demucs… {:.0} of {:.0} MB", mb(done), mb(t)),
+                    None => format!("Downloading HT-Demucs… {:.0} MB", mb(done)),
+                };
+                ui.label(RichText::new(text).small());
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
+            }
+            Some(crate::stems::DownloadState::Done(path)) => {
+                core.settings.stems_demucs = Some(path);
+                core.stems.demucs_download = None;
+            }
+            other => {
+                if let Some(crate::stems::DownloadState::Failed(e)) = other {
+                    ui.label(RichText::new(format!("Download failed: {e}")).small().color(egui::Color32::from_rgb(230, 90, 80)));
+                }
+                let missing = core.settings.stems_demucs.as_ref().is_none_or(|p| !p.exists());
+                if missing && ui.button("Download HT-Demucs (300 MB)").clicked() {
+                    core.stems.demucs_download =
+                        Some(crate::stems::Download::start(crate::stems::DEMUCS_URL, crate::stems::default_demucs_path()));
+                }
+            }
+        }
+        ui.label(
+            RichText::new(
+                "Best-quality stems, made when a track loads (about 1–3 minutes; the deck plays the full mix meanwhile) and kept in the prepared-stems folder. HT-Demucs as converted by the Mixxx project; its weights are for non-commercial use only.",
+            )
+            .small()
+            .weak(),
+        );
+
+        let mut ext = core.settings.stems_external.clone();
+        ui.horizontal(|ui| {
+            ui.label("External separator");
+            let edit = egui::TextEdit::singleline(&mut ext)
+                .hint_text("command, e.g. the Demucs add-on")
+                .desired_width(300.0);
+            if ui.add(edit).changed() {
+                core.settings.stems_external = ext.clone();
+            }
+        });
+        ui.label(
+            RichText::new(
+                "Optional, used before the model. Its stems are kept in the prepared-stems folder, so each track is separated once. Prepare whole folders ahead of a set with: dj --prepare-stems FOLDER",
+            )
+            .small()
+            .weak(),
+        );
+        let mut prepared = core.settings.stems_prepared_dir().display().to_string();
+        ui.horizontal(|ui| {
+            ui.label("Prepared stems");
+            if ui.add(egui::TextEdit::singleline(&mut prepared).desired_width(300.0)).changed() {
+                let p = prepared.trim();
+                core.settings.stems_prepared_dir = (!p.is_empty()).then(|| p.into());
+            }
+        });
         ui.horizontal(|ui| {
             ui.label("Cache");
             ui.add(egui::DragValue::new(&mut core.settings.stems_cache_mb).range(0..=200_000).suffix(" MB"));

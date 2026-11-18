@@ -127,6 +127,11 @@ pub fn stem_switch(name: &str) -> Option<usize> {
     }
 }
 
+/// Deck stem levels (`/deck/N/stemvocalslevel` etc., 0..1) -> stem index.
+pub fn stem_level(name: &str) -> Option<usize> {
+    stem_switch(name.strip_suffix("level")?)
+}
+
 pub const STEMS_ACAPELLA: [f32; 4] = [0.0, 0.0, 1.0, 0.0];
 pub const STEMS_INSTRUMENTAL: [f32; 4] = [1.0, 1.0, 0.0, 1.0];
 
@@ -183,9 +188,11 @@ pub struct Core {
     pub browser_query: String,
     loader_tx: Sender<LoadJob>,
     loader_rx: Receiver<LoadResult>,
-    stems: crate::stems::StemsWorker,
+    pub stems: crate::stems::StemsWorker,
     pub learn: bool,
     pub last_touched: Option<String>,
+    /// Last address a MIDI mapping changed, and when (the mixer shows that fader function).
+    pub midi_touched: Option<(String, std::time::Instant)>,
     pub status: VecDeque<(Instant, String)>,
     pub osc_in: Option<Receiver<(String, Vec<OscType>)>>,
     pub osc_out: Option<crate::osc::Sender>,
@@ -260,6 +267,7 @@ impl Core {
             stems: crate::stems::StemsWorker::new(),
             learn: false,
             last_touched: None,
+            midi_touched: None,
             status: VecDeque::new(),
             osc_in: None,
             osc_out: None,
@@ -486,6 +494,9 @@ impl Core {
                 path: lt.path.clone(),
                 model: crate::stems::resolve_model(self.settings.stems_model.as_deref()),
                 cache,
+                demucs: self.settings.stems_demucs.clone(),
+                external: self.settings.stems_external(),
+                prepared: Some(self.settings.stems_prepared_dir()),
             });
         }
         self.send(Command::Load { deck: d as u8, track: lt.track, start_at_first_cue: self.settings.load_at_first_cue });
@@ -1032,7 +1043,7 @@ impl Core {
             self.log(format!("Recording saved to {}", path.display()));
             return;
         }
-        let dir = dirs::audio_dir().or_else(dirs::home_dir).unwrap_or_else(|| PathBuf::from(".")).join("Collective Recordings");
+        let dir = dirs::audio_dir().or_else(dirs::home_dir).unwrap_or_else(|| PathBuf::from(".")).join("dj Recordings");
         let _ = std::fs::create_dir_all(&dir);
         let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
         let path = dir.join(format!("collective-{stamp}.wav"));
@@ -1391,6 +1402,10 @@ impl Core {
             [s] if stem_switch(s).is_some() => on.map(|o| DeckCmd::StemGain {
                 stem: stem_switch(s).unwrap() as u8,
                 gain: if o { 1.0 } else { 0.0 },
+            }),
+            [s] if stem_level(s).is_some() => f.map(|v| DeckCmd::StemGain {
+                stem: stem_level(s).unwrap() as u8,
+                gain: (v as f32).clamp(0.0, 1.0),
             }),
             ["acapella"] => on.and_then(|o| self.set_stems(d, if o { STEMS_ACAPELLA } else { [1.0; 4] })),
             ["instrumental"] => on.and_then(|o| self.set_stems(d, if o { STEMS_INSTRUMENTAL } else { [1.0; 4] })),
@@ -1766,6 +1781,7 @@ impl Core {
 
         let maps: Vec<MidiMapping> = self.profile.mappings.iter().filter(|m| m.source == src).cloned().collect();
         for m in maps {
+            self.midi_touched = Some((m.address.clone(), std::time::Instant::now()));
             let kind = addr_kind(&m.address);
             let v = if m.invert { 1.0 - value } else { value };
             match (m.mode, kind) {
@@ -2310,6 +2326,12 @@ mod tests {
         c.route("Deck/2/Acapella", &[OscType::Int(0)]);
         pump(&mut e, &mut c);
         assert_eq!(c.snap.decks[1].stem_gains, [1.0; 4]);
+
+        // Continuous levels, for faders.
+        assert_eq!(addr_kind("Deck/1/StemVocalsLevel"), Kind::Value);
+        assert!(c.route("Deck/2/StemVocalsLevel", &[OscType::Float(0.25)]));
+        pump(&mut e, &mut c);
+        assert_eq!(c.snap.decks[1].stem_gains, [1.0, 1.0, 0.25, 1.0]);
     }
 
     #[test]

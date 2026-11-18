@@ -89,6 +89,12 @@ impl Midi {
         v
     }
 
+    /// Whether a hardware controller is connected (virtual ports such as the macOS IAC driver,
+    /// "Midi Through" or network sessions do not count).
+    pub fn has_controller(&self) -> bool {
+        self.input_names.iter().any(|n| !is_virtual_port(n))
+    }
+
     pub fn has_output(&self) -> bool {
         self.output.is_some()
     }
@@ -172,4 +178,22 @@ fn spawn_clock(out: Arc<Mutex<MidiOutputConnection>>, clock: Arc<Clock>) {
             }
         })
         .ok();
+}
+
+pub fn is_virtual_port(name: &str) -> bool {
+    let n = name.to_lowercase();
+    ["iac", "through", "network", "session", "virtual", "loopmidi", "rtpmidi"].iter().any(|v| n.contains(v))
+}
+
+#[cfg(test)]
+mod port_tests {
+    #[test]
+    fn virtual_ports_are_not_controllers() {
+        use super::is_virtual_port;
+        assert!(is_virtual_port("IAC Driver Bus 1"));
+        assert!(is_virtual_port("Midi Through Port-0"));
+        assert!(is_virtual_port("Network Session 1"));
+        assert!(!is_virtual_port("XONE:K2"));
+        assert!(!is_virtual_port("Traktor Kontrol S4 MK3"));
+    }
 }

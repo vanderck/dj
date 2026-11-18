@@ -1,9 +1,10 @@
-# Collective
+# dj
 
 Live-performance DJ software written entirely in Rust. It's modelled on the
 feature set of Untitled Audio Syndicate's *Syndicate*: four decks, a full mixer
 with **VST3 channel inserts** (User Guide §7.4), sampler decks, a shared master
-clock, and MIDI/OSC control. It has its own name and code.
+clock, and MIDI/OSC control. It has its own name and code. (It was called Collective; the
+config folder and the `/Collective/` OSC prefix keep that name so existing setups work.)
 
 It's built for a **Mixed In Key** workflow. Collective doesn't detect BPM, key
 or cue points; it reads what Mixed In Key wrote into your files.
@@ -71,6 +72,32 @@ Settings → Stems), so reloading a track is instant.
 **Model.** Set an ONNX separation model in Settings → Stems (or the `STEMS_MODEL` environment
 variable). Without one, a low-quality placeholder separator is used and the deck says so in red.
 Models are trained with the pipeline in the stems repository.
+
+**HT-Demucs (best quality).** Settings → Stems → *Download HT-Demucs* (or
+`dj --download-demucs`) fetches the HT-Demucs ONNX conversion made by the
+[Mixxx project](https://github.com/mixxxdj/demucs) (300 MB) and uses it from then on: no Python
+needed. A track is separated when it loads (about 1–3 minutes; the deck plays the full mix
+meanwhile) and its stems are kept in the *Prepared stems* folder, so each track is separated
+once; `dj --prepare-stems FOLDER` does a whole crate in advance. HT-Demucs FT (four
+models, slightly better, 4× slower) works too: select any one of its four `name.<stem>.onnx`
+files. The Demucs weights are trained partly on non-commercial data, so Collective downloads
+them on request and never ships them.
+
+**External separator.** Settings → Stems → *External separator* takes any command
+that turns a WAV file into stem files; Collective tries it before the model and falls back to
+the model if it fails. Its stems are kept in the *Prepared stems* folder (never cleaned up
+automatically; about 32 MB per minute), so each track is separated once. Prepare a crate ahead of
+a set with:
+
+```bash
+/Applications/dj.app/Contents/MacOS/dj --prepare-stems ~/Music/Crate
+```
+
+Protocol: Collective runs `<command> INPUT.wav OUTPUT_DIR` (through `sh`); INPUT.wav is the
+decoded track (32-bit float stereo, the track's own sample rate). The command writes
+`OUTPUT_DIR/{drums,bass,vocals,other}.wav` (any rate, mono or stereo, PCM or float; `other` is
+optional) and exits 0. It may print `progress 0.42` and `name …` lines. The stems repository has
+a Python Demucs add-on, `models/tools/demucs_stems.py`.
 
 **Build.** The default `stems-onnx` feature downloads ONNX Runtime at build time and links it
 statically. Where that download is blocked, build with

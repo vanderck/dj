@@ -31,14 +31,26 @@ pub struct InsertBrowser {
 
 pub struct UiState {
     pub fx_open: [bool; 4],
-    /// What each channel fader controls (chosen with the ▾ next to CUE).
+    /// What each channel fader controls (set with the toggle rows for the selected fader, or
+    /// by MIDI changing one of its functions).
     pub fader_mode: [mixer::FaderMode; 4],
+    /// The fader the toggle rows apply to (tap a strip to select it).
+    pub fader_sel: usize,
+    /// Value each channel/mode had before its ON/OFF button switched it off.
+    pub fader_restore: std::collections::HashMap<(usize, mixer::FaderMode), f32>,
+    /// Controller layout this frame (see `Settings::layout`): slim cue pads, four full decks.
+    pub dense: bool,
+    /// Unsnapped tempo fader position during a drag (snapping would swallow small moves).
+    pub tempo_drag: Option<f32>,
+    /// The channel whose fader function MIDI just changed, outlined for a moment: (mode, channel, since).
+    pub fader_popup: Option<(mixer::FaderMode, usize, Instant)>,
+    /// The `Core::midi_touched` time already handled.
+    pub midi_seen: Option<Instant>,
     pub fx_edit: [[bool; 4]; 4],
     pub insert_browser: Option<InsertBrowser>,
     pub preset_name: [String; 4],
     pub settings_open: bool,
     pub mapping_open: bool,
-    pub bpm_edit: Option<String>,
     pub map_learn: Option<(usize, usize)>,
     pub new_folder: String,
     pub new_vst_path: String,
@@ -50,7 +62,6 @@ pub struct UiState {
     pub focus: [usize; 2],
     pub loop_size: [f64; 4],
     pub lane_zoom: f32,
-    pub taps: Vec<Instant>,
 }
 
 impl Default for UiState {
@@ -58,12 +69,17 @@ impl Default for UiState {
         Self {
             fx_open: [false; 4],
             fader_mode: [mixer::FaderMode::Level; 4],
+            fader_sel: 0,
+            fader_restore: Default::default(),
+            dense: false,
+            tempo_drag: None,
+            fader_popup: None,
+            midi_seen: None,
             fx_edit: [[false; 4]; 4],
             insert_browser: None,
             preset_name: Default::default(),
             settings_open: false,
             mapping_open: false,
-            bpm_edit: None,
             map_learn: None,
             new_folder: String::new(),
             new_vst_path: String::new(),
@@ -74,7 +90,6 @@ impl Default for UiState {
             focus: [0, 1],
             loop_size: [4.0; 4],
             lane_zoom: 1.0,
-            taps: Vec::new(),
         }
     }
 }
@@ -101,7 +116,7 @@ pub fn run() {
             viewport: egui::ViewportBuilder::default()
                 .with_inner_size([1600.0, 1000.0])
                 .with_min_inner_size([1100.0, 700.0])
-                .with_title("Collective")
+                .with_title("dj")
                 .with_icon(std::sync::Arc::new(
                     eframe::icon_data::from_png_bytes(include_bytes!("../../assets/icon-256.png")).unwrap_or_default(),
                 )),
@@ -222,10 +237,24 @@ impl eframe::App for App {
             let mixer_w = if self.core.external_routing() { 240.0 } else { (area.width() * 0.31).clamp(360.0, 640.0) };
             let deck_w = (area.width() - mixer_w - 2.0 * gap) / 2.0;
             let four = self.core.deck_count() >= 4;
+            self.ui.dense = match self.core.settings.layout {
+                crate::settings::LayoutMode::Controller => true,
+                crate::settings::LayoutMode::Touch => false,
+                crate::settings::LayoutMode::Auto => self.core.midi.has_controller(),
+            };
             // One row: badge, title, key, Swap, Cue, Play, Sync.
             let compact_h = 62.0;
             for side in 0..2 {
                 let x = if side == 0 { mid.left() } else { mid.right() - deck_w };
+                if four && self.ui.dense {
+                    // Controller layout: both decks of this side in full, stacked (1 over 3, 2 over 4).
+                    let dh = (mid.height() - gap) / 2.0;
+                    for (row, d) in [side, side + 2].into_iter().enumerate() {
+                        let dr = Rect::from_min_size(Pos2::new(x, mid.top() + row as f32 * (dh + gap)), Vec2::new(deck_w, dh));
+                        deck::big(ui, &mut self.core, &mut self.ui, d, dr);
+                    }
+                    continue;
+                }
                 let big_d = self.ui.focus[side];
                 let big_h = if four { mid.height() - compact_h - gap } else { mid.height() };
                 deck::big(ui, &mut self.core, &mut self.ui, big_d, Rect::from_min_size(Pos2::new(x, mid.top()), Vec2::new(deck_w, big_h)));

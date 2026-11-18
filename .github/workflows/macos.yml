@@ -70,18 +70,18 @@ jobs:
 
       - name: Check the bundle
         run: |
-          APP=target/package/Collective.app
+          APP=target/package/dj.app
           plutil -lint "$APP/Contents/Info.plist"
           test -s "$APP/Contents/Resources/AppIcon.icns" && /usr/libexec/PlistBuddy -c "Print :CFBundleIconFile" "$APP/Contents/Info.plist"
           test -s "$APP/Contents/Resources/stems-model.onnx" && echo "bundled model: $(du -h "$APP/Contents/Resources/stems-model.onnx" | cut -f1)"
           codesign --verify --strict --verbose=2 "$APP"
-          lipo -info "$APP/Contents/MacOS/Collective" | tee /dev/stderr | grep -q "x86_64 arm64"
-          "$APP/Contents/MacOS/Collective" --help > /dev/null
+          lipo -info "$APP/Contents/MacOS/dj" | tee /dev/stderr | grep -q "x86_64 arm64"
+          "$APP/Contents/MacOS/dj" --help > /dev/null
           hdiutil verify target/package/*.dmg
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Collective-macos
+          name: dj-macos
           path: target/package/*.dmg
 
       - name: Attach to release

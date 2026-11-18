@@ -17,7 +17,7 @@ stems-onnx = ["stems-core/onnx"]
 stems-onnx-dynamic = ["stems-core/onnx-dynamic"]
 
 [dependencies]
-stems-core = { git = "https://github.com/vanderck/stems", rev = "8b728e31c608bdccde8b04082b74442135a25566" }
+stems-core = { git = "https://github.com/vanderck/stems", rev = "cb42d15681f317f6036429ff9e75e3b848b5ab79" }
 collective-engine.workspace = true
 collective-library.workspace = true
 serde.workspace = true
@@ -25,6 +25,7 @@ serde_json.workspace = true
 anyhow.workspace = true
 rtrb.workspace = true
 hound.workspace = true
+ureq = { version = "3.5.2", default-features = false, features = ["native-tls"] }
 cpal.workspace = true
 midir.workspace = true
 rosc.workspace = true

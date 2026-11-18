@@ -67,6 +67,17 @@ fn badge_menu(ui: &mut Ui, core: &mut Core, d: usize, rect: Rect, size: f32) {
             core.set_deck_mode(d, DeckMode::Sampler);
             ui.close();
         }
+        ui.separator();
+        ui.horizontal(|ui| {
+            use collective_engine::deck::TempoRange as T;
+            ui.label("Tempo range");
+            let cur = core.snap.decks[d].tempo_range;
+            for (i, rg) in [T::Pct6, T::Pct10, T::Pct16, T::Pct50, T::Semitones12].iter().enumerate() {
+                if ui.selectable_label(cur == *rg, rg.label()).clicked() {
+                    act_i(core, &format!("Deck/{}/TempoRange", d + 1), i as i32);
+                }
+            }
+        });
         if core.decks[d].info.is_some() {
             let locked = core.decks[d].info.as_ref().map(|i| i.locked).unwrap_or(false);
             ui.separator();
@@ -108,7 +119,31 @@ fn title_block(ui: &Ui, core: &Core, d: usize, rect: Rect, big: bool) {
     };
     let (ts, as_) = if big { (17.0, 13.0) } else { (14.0, 12.0) };
     p.text(Pos2::new(rect.left(), rect.center().y - 1.0), Align2::LEFT_BOTTOM, title, bold(ts), TEXT);
+    // Stems status after the artist (the stems themselves are on the channel faders).
+    let status = if big { stems_status(core, d) } else { None };
+    let status_w = status.as_ref().map_or(0.0, |(t, _)| ui.painter().layout_no_wrap(format!(" · {t}"), sans(as_), TEXT).size().x);
+    let artist = fit_text(ui, &artist, sans(as_), (rect.width() - status_w).max(40.0));
+    let aw = if artist.is_empty() { 0.0 } else { ui.painter().layout_no_wrap(artist.clone(), sans(as_), TEXT).size().x };
     p.text(Pos2::new(rect.left(), rect.center().y + 2.0), Align2::LEFT_TOP, artist, sans(as_), TEXT_DIM);
+    if let Some((text, col)) = status {
+        let text = if aw > 0.0 { format!(" · {text}") } else { text };
+        p.text(Pos2::new(rect.left() + aw, rect.center().y + 2.0), Align2::LEFT_TOP, text, sans(as_), col);
+    }
+}
+
+/// Short stems status for the deck header: separation progress, or where the stems came from.
+fn stems_status(core: &Core, d: usize) -> Option<(String, Color32)> {
+    let v = core.snap.decks[d];
+    if !core.settings.stems_enabled || !v.loaded {
+        return None;
+    }
+    let source = core.decks[d].stems_source.as_deref();
+    match (core.decks[d].stems_progress, source) {
+        (Some(f), _) => Some((format!("stems {:.0}%", f * 100.0), DECK[d])),
+        (None, Some(src)) if v.stems_ready && src.contains("placeholder") => Some(("placeholder stems".into(), RED)),
+        (None, Some(src)) if v.stems_ready => Some((format!("stems: {src}"), TEXT_FAINT)),
+        _ => None,
+    }
 }
 
 /// Hold-to-preview CUE button behaviour.
@@ -136,24 +171,27 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
     let a = |s: &str| format!("Deck/{n}/{s}");
     let color = DECK[d];
     let is_master = core.snap.clock.owner == ClockOwner::Deck(d as u8);
-    let pad = 16.0;
+    // Controller layout: a MIDI controller has its own cue pads, so the pads become one slim
+    // row and everything is smaller, to fit two decks per side.
+    let dense = st.dense;
+    let pad = if dense { 10.0 } else { 16.0 };
     let r = rect.shrink(pad);
     let w = r.width();
     let gap = 8.0;
 
     // ---------------------------------------------------------- header
-    let hh = 44.0;
+    let hh = if dense { 34.0 } else { 44.0 };
     let badge = Rect::from_min_size(r.min, Vec2::splat(hh));
     badge_menu(ui, core, d, badge, 22.0);
     let time_w = 92.0;
     let time_r = Rect::from_min_size(Pos2::new(r.right() - time_w, r.top()), Vec2::new(time_w, hh));
-    ui.painter().text(time_r.right_center(), Align2::RIGHT_CENTER, mmss_remain(v.duration_secs - v.position_secs), mono(30.0), if v.loaded && v.playing && v.duration_secs - v.position_secs < 30.0 { RED } else { TEXT });
+    ui.painter().text(time_r.right_center(), Align2::RIGHT_CENTER, mmss_remain(v.duration_secs - v.position_secs), mono(if dense { 24.0 } else { 30.0 }), if v.loaded && v.playing && v.duration_secs - v.position_secs < 30.0 { RED } else { TEXT });
     let bpm_r = Rect::from_min_size(Pos2::new(time_r.left() - 88.0, r.top()), Vec2::new(80.0, hh));
     let p = ui.painter();
     // (The tempo change in % is shown inside the tempo slider.)
-    p.text(Pos2::new(bpm_r.right(), bpm_r.center().y), Align2::RIGHT_CENTER, if v.has_grid { format!("{:.2}", v.bpm) } else { "—".into() }, mono(22.0), TEXT);
+    p.text(Pos2::new(bpm_r.right(), bpm_r.center().y), Align2::RIGHT_CENTER, if v.has_grid { format!("{:.2}", v.bpm) } else { "—".into() }, mono(if dense { 18.0 } else { 22.0 }), TEXT);
     let key = core.key_text(core.deck_key(d));
-    let chip = Rect::from_min_size(Pos2::new(bpm_r.left() - 56.0, r.top() + 8.0), Vec2::new(46.0, 30.0));
+    let chip = Rect::from_min_size(Pos2::new(bpm_r.left() - 56.0, r.top() + (hh - 30.0).max(4.0) / 2.0), Vec2::new(46.0, (hh - 8.0).min(30.0)));
     if !key.is_empty() {
         key_chip(ui, chip, &key, key_border(core, d), 15.0);
     }
@@ -164,33 +202,37 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
     // Vertical scale: rows grow to fill the card (e.g. 2-deck mode) instead of leaving space
     // unused. Base layout heights: transport 52, pads 2×36+8, stems 26, tempo 30, loops 30 +
     // gaps; never smaller than today's sizes, at most 1.8×.
-    let stems_on = core.settings.stems_enabled;
-    let base = 52.0 + 10.0 + 2.0 * 36.0 + 8.0 + if stems_on { 10.0 + 26.0 + 10.0 } else { 14.0 } + 30.0 + 12.0 + 30.0;
-    let k = ((r.bottom() - (r.top() + hh + 12.0)) / base).clamp(1.0, 1.8);
+    // The stems row only exists without the internal mixer (otherwise stems are on the faders
+    // and their status is in the header).
+    let stems_on = core.settings.stems_enabled && core.external_routing();
+    let pads_base = if dense { 30.0 } else { 2.0 * 36.0 + 8.0 };
+    // Likewise the tempo slider: with the internal mixer, tempo is a fader function.
+    let tempo_on = core.external_routing();
+    let tempo_base = if tempo_on { 30.0 + 12.0 } else { 0.0 };
+    let base = 52.0 + 10.0 + pads_base + if stems_on { 10.0 + 26.0 + 10.0 } else { 14.0 } + tempo_base + 30.0;
+    let k = ((r.bottom() - (r.top() + hh + 12.0)) / base).clamp(if dense { 0.55 } else { 1.0 }, 1.8);
     let y = r.top() + hh + 12.0;
     let bh = 52.0 * k;
-    let big_w = (w - 3.0 * gap) / 4.0;
+    // (The main cue is the first pad of the cue row.)
+    let big_w = (w - 2.0 * gap) / 3.0;
     let mut x = r.left();
     let mut big_btn = |ui: &mut Ui, label: &str, style: Style, wf: f32| -> egui::Response {
         let rr = Rect::from_min_size(Pos2::new(x, y), Vec2::new(big_w * wf, bh));
         x += big_w * wf + gap;
         button(ui, rr, label, style, bold(17.0 * k.min(1.35)))
     };
-    let resp = big_btn(ui, "Cue", Style::Outline(ORANGE, false), 0.86);
-    learnable(core, &resp, &a("Cue"));
-    cue_hold(core, &resp, &a("Cue"));
     let play_style = if v.playing { Style::Fill(color) } else if v.play_pending { Style::Outline(color, true) } else { Style::Outline(color, false) };
-    let resp = big_btn(ui, if v.playing { "Pause" } else if v.play_pending { "Wait…" } else { "Play" }, play_style, 0.86);
+    let resp = big_btn(ui, if v.playing { "Pause" } else if v.play_pending { "Wait…" } else { "Play" }, play_style, 1.0);
     learnable(core, &resp, &a("PlayPause"));
     if resp.clicked() {
         act_i(core, &a("PlayPause"), 1);
     }
-    let resp = big_btn(ui, "Sync", if v.sync { Style::Light } else { Style::Dark }, 1.14);
+    let resp = big_btn(ui, "Sync", if v.sync { Style::Light } else { Style::Dark }, 1.0);
     learnable(core, &resp, &a("TempoSync"));
     if resp.clicked() {
         act_i(core, &a("TempoSync"), 1);
     }
-    let resp = big_btn(ui, if is_master { "Master" } else { "Follow" }, if is_master { Style::Fill(RED) } else { Style::Dark }, 1.14);
+    let resp = big_btn(ui, if is_master { "Master" } else { "Follow" }, if is_master { Style::Fill(RED) } else { Style::Dark }, 1.0);
     learnable(core, &resp, &a("TempoMaster"));
     if resp.clicked() {
         act_i(core, &a("TempoMaster"), 1);
@@ -200,30 +242,57 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
     // With stems enabled the pads are a little shorter to make room for the stems row.
     let y = y + bh + (if stems_on { 10.0 } else { 14.0 }) * k;
     // Pads take whatever height is left (rows below: stems 26+10+10, tempo 30+12, loops 30).
-    let below = (if stems_on { 10.0 + 26.0 + 10.0 } else { 14.0 } + 30.0 + 12.0 + 30.0) * k;
-    let ph = ((r.bottom() - y - 8.0 - below) / 2.0).clamp(28.0, 46.0 * k);
-    let pw = (w - 3.0 * gap) / 4.0;
-    for i in 0..8 {
-        let rr = Rect::from_min_size(Pos2::new(r.left() + (i % 4) as f32 * (pw + gap), y + (i / 4) as f32 * (ph + 8.0)), Vec2::new(pw, ph));
-        let set = v.hot_cues[i].is_some();
+    let below = (if stems_on { 10.0 + 26.0 + 10.0 } else { 14.0 } + tempo_base + 30.0) * k;
+    // The cue row: the main cue first, then the hot cues that are set (empty ones are not
+    // shown), then one "+" pad to set the next free one. At most 9 pads.
+    let (cols, rows) = if dense { (9, 1) } else { (5, 2) };
+    let ph = if dense { (r.bottom() - y - below).clamp(16.0, 40.0 * k) } else { ((r.bottom() - y - 8.0 - below) / 2.0).clamp(28.0, 46.0 * k) };
+    let pgap = if dense { 6.0 } else { gap };
+    let pw = (w - (cols - 1) as f32 * pgap) / cols as f32;
+    // Narrow pads show just the number (the pad colour says the rest).
+    let pad_labels = pw >= 80.0;
+    let pad_font = if dense { 13.0 } else { 16.0 };
+    let slot = |k: usize| Rect::from_min_size(Pos2::new(r.left() + (k % cols) as f32 * (pw + pgap), y + (k / cols) as f32 * (ph + 8.0)), Vec2::new(pw, ph));
+    let rad = CornerRadius::same(8);
+
+    let cue_r = slot(0);
+    let resp = ui.allocate_rect(cue_r, Sense::click_and_drag()).on_hover_text("Main cue: hold to preview, click while paused to set");
+    let p = ui.painter();
+    p.rect_filled(cue_r, rad, if resp.hovered() { dim(ORANGE, 0.30) } else { dim(ORANGE, 0.18) });
+    p.rect_stroke(cue_r, rad, Stroke::new(1.5, ORANGE), egui::StrokeKind::Inside);
+    p.text(cue_r.center(), Align2::CENTER_CENTER, "Cue", bold(pad_font), TEXT);
+    learnable(core, &resp, &a("Cue"));
+    cue_hold(core, &resp, &a("Cue"));
+
+    let set: Vec<usize> = (0..8).filter(|&i| v.hot_cues[i].is_some()).collect();
+    let next_free = (0..8).find(|&i| v.hot_cues[i].is_none());
+    let mut shown: Vec<(usize, bool)> = set.iter().map(|&i| (i, true)).collect();
+    if let Some(f) = next_free {
+        shown.push((f, false));
+    }
+    for (k, (i, is_set)) in shown.into_iter().enumerate() {
+        let rr = slot(k + 1);
         let name = core.decks[d].info.as_ref().and_then(|x| x.cues[i].as_ref()).map(|c| c.name.clone()).unwrap_or_default();
         let resp = ui.allocate_rect(rr, Sense::click_and_drag());
         let p = ui.painter();
-        let rad = CornerRadius::same(8);
-        if set {
+        if is_set {
             let c = CUE[i];
             p.rect_filled(rr, rad, if resp.hovered() { dim(c, 0.42) } else { dim(c, 0.32) });
             p.rect_stroke(rr, rad, Stroke::new(1.5, dim(c, 0.85)), egui::StrokeKind::Inside);
             let label = if !name.is_empty() { name } else if v.hot_cue_is_loop[i] { "Loop".into() } else { "Cue".into() };
-            p.text(Pos2::new(rr.left() + 14.0, rr.center().y), Align2::LEFT_CENTER, format!("{}", i + 1), bold(16.0), TEXT);
-            p.text(Pos2::new(rr.left() + 32.0, rr.center().y), Align2::LEFT_CENTER, label, sans(15.0), TEXT);
+            if pad_labels {
+                p.text(Pos2::new(rr.left() + 14.0, rr.center().y), Align2::LEFT_CENTER, format!("{}", i + 1), bold(pad_font), TEXT);
+                p.text(Pos2::new(rr.left() + 32.0, rr.center().y), Align2::LEFT_CENTER, label, sans(pad_font - 1.0), TEXT);
+            } else {
+                p.text(rr.center(), Align2::CENTER_CENTER, format!("{}", i + 1), bold(pad_font), TEXT);
+            }
         } else {
-            p.rect_filled(rr, rad, Color32::from_rgb(0x17, 0x17, 0x1b));
+            // "+": set hot cue `i` (the first free one) here.
             p.rect_stroke(rr, rad, Stroke::new(1.0, Color32::from_rgb(0x2a, 0x2a, 0x30)), egui::StrokeKind::Inside);
-            p.text(Pos2::new(rr.left() + 14.0, rr.center().y), Align2::LEFT_CENTER, format!("{}", i + 1), bold(16.0), TEXT_FAINT);
-            p.text(Pos2::new(rr.left() + 32.0, rr.center().y), Align2::LEFT_CENTER, "empty", sans(15.0), TEXT_FAINT);
+            p.text(rr.center(), Align2::CENTER_CENTER, "+", bold(pad_font + 2.0), if resp.hovered() { TEXT } else { TEXT_FAINT });
         }
-        let resp = resp.on_hover_text("Click: set / launch · Ctrl-click: delete · Alt-click: loop to next cue");
+        let tip = if is_set { "Click: launch · Ctrl-click: delete · Alt-click: loop to next cue" } else { "Set a hot cue at the playhead" };
+        let resp = resp.on_hover_text(tip);
         let addr = a(&format!("Cue{}", i + 1));
         learnable(core, &resp, &addr);
         if core.learn {
@@ -235,7 +304,7 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
             act_i(core, &a("DeleteCue"), i as i32 + 1);
         } else if resp.clicked() && mods.alt {
             act_i(core, &a("SetCueLoop"), i as i32 + 1);
-        } else if v.momentary_cues && set {
+        } else if v.momentary_cues && is_set {
             if resp.is_pointer_button_down_on() && ui.input(|i| i.pointer.primary_pressed()) {
                 act(core, &hc, &[rosc::OscType::Int(i as i32 + 1), rosc::OscType::Int(1)]);
             }
@@ -248,7 +317,7 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
     }
 
     // ---------------------------------------------------------- stems
-    let after_cues = y + 2.0 * ph + 8.0;
+    let after_cues = y + rows as f32 * ph + (rows - 1) as f32 * 8.0;
     let y = if stems_on {
         let stems_h = 26.0 * k;
         stems_row(ui, core, d, Rect::from_min_size(Pos2::new(r.left(), after_cues + 10.0 * k), Vec2::new(w, stems_h)));
@@ -257,8 +326,9 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
         after_cues + 14.0 * k
     };
 
-    // ---------------------------------------------------------- tempo
-    let th = 30.0 * k;
+    // ---------------------------------------------------------- tempo (external mixer only)
+    let th = if tempo_on { 30.0 * k } else { 0.0 };
+    if tempo_on {
     let minus = Rect::from_min_size(Pos2::new(r.left(), y), Vec2::new(36.0, th));
     let plus = Rect::from_min_size(Pos2::new(r.right() - 36.0, y), Vec2::new(36.0, th));
     let follower = v.sync && !is_master;
@@ -305,10 +375,10 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
             }
         }
     });
+    }
 
     // ---------------------------------------------------------- loops
-    // (Hi / Mid / Low / Filter live in the mixer: the ▾ next to each channel's CUE.)
-    let y = y + th + 12.0 * k;
+    let y = if tempo_on { y + th + 12.0 * k } else { y };
     let lh = 30.0 * k;
     let size = st.loop_size[d];
     let size_txt = if v.loop_on { beats_label(v.loop_beats) } else { beats_label(size) };
@@ -363,7 +433,8 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
     }
 }
 
-/// Stem toggles (light = audible), Acapella / Instr shortcuts, and separation status.
+/// External-mixer mode only: stem toggles (light = audible) and the separation status. With the
+/// internal mixer, stems are on the channel faders (Drums/Bass/Vocals/Other with ON/OFF).
 fn stems_row(ui: &mut Ui, core: &mut Core, d: usize, r: Rect) {
     let v = core.snap.decks[d];
     let n = d + 1;
@@ -371,39 +442,31 @@ fn stems_row(ui: &mut Ui, core: &mut Core, d: usize, r: Rect) {
     let color = DECK[d];
     let ready = v.stems_ready;
     let gap = 6.0;
-    let status_w = (r.width() * 0.22).clamp(80.0, 150.0);
-    let items: [(&str, &str, f32); 6] = [
+    let all: [(&str, &str, f32); 4] = [
         ("Drums", "StemDrums", 1.0),
         ("Bass", "StemBass", 1.0),
         ("Vocals", "StemVocals", 1.0),
         ("Other", "StemOther", 1.0),
-        ("Acapella", "Acapella", 1.2),
-        ("Instr", "Instrumental", 1.0),
     ];
-    let unit = (r.width() - status_w - gap * items.len() as f32) / items.iter().map(|i| i.2).sum::<f32>();
+    let status_w = (r.width() * 0.22).clamp(80.0, 150.0);
+    let items: Vec<(usize, &(&str, &str, f32))> = all.iter().enumerate().collect();
+    let unit = (r.width() - status_w - gap * items.len() as f32) / items.iter().map(|(_, i)| i.2).sum::<f32>();
     let mut x = r.left();
-    for (i, (label, addr, weight)) in items.iter().enumerate() {
+    for (i, (label, addr, weight)) in items {
         let rr = Rect::from_min_size(Pos2::new(x, r.top()), Vec2::new(unit * weight, r.height()));
         x += unit * weight + gap;
-        let on_ = match i {
-            0..=3 => v.stem_gains[i] > 0.5,
-            4 => v.stem_gains == crate::core::STEMS_ACAPELLA,
-            _ => v.stem_gains == crate::core::STEMS_INSTRUMENTAL,
-        };
+        let on_ = v.stem_gains[i] > 0.5;
         // Until the stems are ready, settings are shown in outline: they apply once separated.
-        let style = match (on_, ready, i < 4) {
-            (true, true, true) => Style::Light,
-            (true, true, false) => Style::Fill(color),
-            (true, false, _) => Style::Outline(TEXT_FAINT, false),
-            (false, _, _) => Style::Dark,
+        let style = match (on_, ready) {
+            (true, true) => Style::Light,
+            (true, false) => Style::Outline(TEXT_FAINT, false),
+            (false, _) => Style::Dark,
         };
         let tip = if ready { "Lit = audible" } else { "Still separating: the setting applies as soon as stems are ready" };
         let resp = button(ui, rr, label, style, bold(11.5)).on_hover_text(tip);
-        if i < 4 {
-            // Colour mark: the stem's colour in the waveform lanes.
-            let mark = Rect::from_min_size(Pos2::new(rr.left() + 6.0, rr.bottom() - 4.0), Vec2::new(rr.width() - 12.0, 2.0));
-            ui.painter().rect_filled(mark, CornerRadius::same(1), if on_ { STEM[i] } else { dim(STEM[i], 0.5) });
-        }
+        // Colour mark: the stem's colour in the waveform lanes.
+        let mark = Rect::from_min_size(Pos2::new(rr.left() + 6.0, rr.bottom() - 4.0), Vec2::new(rr.width() - 12.0, 2.0));
+        ui.painter().rect_filled(mark, CornerRadius::same(1), if on_ { STEM[i] } else { dim(STEM[i], 0.5) });
         learnable(core, &resp, &a(addr));
         if resp.clicked() && v.loaded {
             act_i(core, &a(addr), !on_ as i32);

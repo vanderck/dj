@@ -137,7 +137,7 @@ pub fn native_entries() -> Vec<CatalogEntry> {
         .map(|f| CatalogEntry {
             id: format!("native:{}", f.id()),
             name: f.name().into(),
-            vendor: "Collective".into(),
+            vendor: "dj".into(),
             category: f.category().into(),
             native: Some(*f),
             vst3: None,
@@ -222,7 +222,7 @@ pub fn instantiate(
 ) -> Result<(FxLive, Box<dyn Effect>, String, String)> {
     if let Some(nid) = id.strip_prefix("native:") {
         let n = NativeFx::from_id(nid).ok_or_else(|| anyhow!("unknown native effect {nid}"))?;
-        return Ok((FxLive::Native(n), n.create(sample_rate), n.name().into(), "Collective".into()));
+        return Ok((FxLive::Native(n), n.create(sample_rate), n.name().into(), "dj".into()));
     }
     let rec = vst3
         .iter()

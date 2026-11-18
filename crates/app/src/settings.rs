@@ -96,9 +96,31 @@ pub struct Settings {
     pub stems_model: Option<PathBuf>,
     /// Disk cache for separated stems (MB); 0 disables it.
     pub stems_cache_mb: u64,
+    /// HT-Demucs ONNX model (best quality, about 1-3 min per track; results become prepared stems).
+    /// `None` = off. See `stems::demucs_files` for HT-Demucs FT.
+    pub stems_demucs: Option<PathBuf>,
+    /// External separator command (e.g. the Demucs add-on), tried before the model; empty = off.
+    /// See `stems::external` for the protocol.
+    pub stems_external: String,
+    /// Where prepared stems (external separator, `--prepare-stems`) are kept; never cleaned up
+    /// automatically. `None` = `stems-prepared` in the config folder.
+    pub stems_prepared_dir: Option<PathBuf>,
     /// Mixing happens on an external (hardware) mixer: every deck goes to its own output pair,
     /// Collective's volume / trim / EQ / filter and the mixer section are bypassed and hidden.
     pub external_mixer: bool,
+    /// Screen layout: big touch controls, or (with a MIDI controller) four full decks with
+    /// slim cue pads. `Auto` picks Controller when a hardware MIDI input is connected.
+    pub layout: LayoutMode,
+    /// Tempo faders move in steps of this many percent (0 = continuous).
+    pub tempo_step_pct: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum LayoutMode {
+    #[default]
+    Auto,
+    Touch,
+    Controller,
 }
 
 impl Default for Settings {
@@ -135,12 +157,27 @@ impl Default for Settings {
             stems_enabled: true,
             stems_model: None,
             stems_cache_mb: 4096,
+            stems_demucs: None,
+            stems_external: String::new(),
+            stems_prepared_dir: None,
             external_mixer: false,
+            layout: LayoutMode::Auto,
+            tempo_step_pct: 0.0,
         }
     }
 }
 
 impl Settings {
+    pub fn stems_prepared_dir(&self) -> PathBuf {
+        self.stems_prepared_dir.clone().unwrap_or_else(|| config_dir().join("stems-prepared"))
+    }
+
+    /// The external separator command, if one is set.
+    pub fn stems_external(&self) -> Option<String> {
+        let c = self.stems_external.trim();
+        (!c.is_empty()).then(|| c.to_string())
+    }
+
     pub fn path() -> PathBuf {
         config_dir().join("settings.json")
     }

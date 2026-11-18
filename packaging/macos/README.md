@@ -4,9 +4,9 @@
 cargo xtask package-macos --universal
 ```
 
-builds Collective for Apple Silicon and Intel, merges them into one binary and writes:
+builds dj for Apple Silicon and Intel, merges them into one binary and writes:
 
-- `target/package/Collective.app`
+- `target/package/dj.app`
 - `target/package/Collective-<version>-macos-universal.dmg` (drag-to-Applications disk image)
 
 Run `cargo xtask help` for all options. Useful ones:
@@ -14,7 +14,7 @@ Run `cargo xtask help` for all options. Useful ones:
 | Option | Effect |
 |---|---|
 | `--model stems.onnx` | Bundle this stem-separation model in `Contents/Resources/` (used when none is set in Settings or `STEMS_MODEL`). Default: `packaging/models/stems-model.onnx`, currently a synthetic-data demo model ([details](../models/README.md)). `--no-model` leaves it out. |
-| `--icon icon.png` | App icon: a 1024×1024 PNG (converted with `sips`/`iconutil`) or an `.icns`. |
+| `--icon icon.png` | App icon: a 1024×1024 PNG (converted with `sips`/`iconutil`) or an `.icns`. Default: `packaging/macos/AppIcon.icns` (`AppIcon.png` is its 1024 px source). |
 | `--sign "Developer ID Application: …"` | Sign with your Developer ID (hardened runtime). Default: `$MACOS_SIGN_IDENTITY`, else ad-hoc. |
 | `--notarize` | Notarize and staple the `.dmg`. |
 | `--no-dmg` | Only build the `.app`. |
@@ -32,7 +32,7 @@ built for it. The build sets `MACOSX_DEPLOYMENT_TARGET` and `LSMinimumSystemVers
 
 - **Ad-hoc (default).** Runs on the Mac that built it. On other Macs Gatekeeper blocks the first
   launch: right-click the app → *Open*, or run
-  `xattr -dr com.apple.quarantine /Applications/Collective.app`.
+  `xattr -dr com.apple.quarantine /Applications/dj.app`.
 - **Developer ID + notarization.** Opens anywhere without warnings. Requires an Apple Developer
   account. Store notarization credentials once:
 
