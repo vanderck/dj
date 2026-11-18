@@ -111,6 +111,8 @@ pub struct Settings {
     /// Screen layout: big touch controls, or (with a MIDI controller) four full decks with
     /// slim cue pads. `Auto` picks Controller when a hardware MIDI input is connected.
     pub layout: LayoutMode,
+    /// Tempo faders move in steps of this many percent (0 = continuous).
+    pub tempo_step_pct: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -160,6 +162,7 @@ impl Default for Settings {
             stems_prepared_dir: None,
             external_mixer: false,
             layout: LayoutMode::Auto,
+            tempo_step_pct: 0.0,
         }
     }
 }

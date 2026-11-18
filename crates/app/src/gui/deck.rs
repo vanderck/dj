@@ -67,6 +67,17 @@ fn badge_menu(ui: &mut Ui, core: &mut Core, d: usize, rect: Rect, size: f32) {
             core.set_deck_mode(d, DeckMode::Sampler);
             ui.close();
         }
+        ui.separator();
+        ui.horizontal(|ui| {
+            use collective_engine::deck::TempoRange as T;
+            ui.label("Tempo range");
+            let cur = core.snap.decks[d].tempo_range;
+            for (i, rg) in [T::Pct6, T::Pct10, T::Pct16, T::Pct50, T::Semitones12].iter().enumerate() {
+                if ui.selectable_label(cur == *rg, rg.label()).clicked() {
+                    act_i(core, &format!("Deck/{}/TempoRange", d + 1), i as i32);
+                }
+            }
+        });
         if core.decks[d].info.is_some() {
             let locked = core.decks[d].info.as_ref().map(|i| i.locked).unwrap_or(false);
             ui.separator();
@@ -195,7 +206,10 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
     // and their status is in the header).
     let stems_on = core.settings.stems_enabled && core.external_routing();
     let pads_base = if dense { 30.0 } else { 2.0 * 36.0 + 8.0 };
-    let base = 52.0 + 10.0 + pads_base + if stems_on { 10.0 + 26.0 + 10.0 } else { 14.0 } + 30.0 + 12.0 + 30.0;
+    // Likewise the tempo slider: with the internal mixer, tempo is a fader function.
+    let tempo_on = core.external_routing();
+    let tempo_base = if tempo_on { 30.0 + 12.0 } else { 0.0 };
+    let base = 52.0 + 10.0 + pads_base + if stems_on { 10.0 + 26.0 + 10.0 } else { 14.0 } + tempo_base + 30.0;
     let k = ((r.bottom() - (r.top() + hh + 12.0)) / base).clamp(if dense { 0.55 } else { 1.0 }, 1.8);
     let y = r.top() + hh + 12.0;
     let bh = 52.0 * k;
@@ -230,7 +244,7 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
     // With stems enabled the pads are a little shorter to make room for the stems row.
     let y = y + bh + (if stems_on { 10.0 } else { 14.0 }) * k;
     // Pads take whatever height is left (rows below: stems 26+10+10, tempo 30+12, loops 30).
-    let below = (if stems_on { 10.0 + 26.0 + 10.0 } else { 14.0 } + 30.0 + 12.0 + 30.0) * k;
+    let below = (if stems_on { 10.0 + 26.0 + 10.0 } else { 14.0 } + tempo_base + 30.0) * k;
     let (cols, rows) = if dense { (8, 1) } else { (4, 2) };
     let ph = if dense { (r.bottom() - y - below).clamp(16.0, 40.0 * k) } else { ((r.bottom() - y - 8.0 - below) / 2.0).clamp(28.0, 46.0 * k) };
     let pgap = if dense { 6.0 } else { gap };
@@ -300,8 +314,9 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
         after_cues + 14.0 * k
     };
 
-    // ---------------------------------------------------------- tempo
-    let th = 30.0 * k;
+    // ---------------------------------------------------------- tempo (external mixer only)
+    let th = if tempo_on { 30.0 * k } else { 0.0 };
+    if tempo_on {
     let minus = Rect::from_min_size(Pos2::new(r.left(), y), Vec2::new(36.0, th));
     let plus = Rect::from_min_size(Pos2::new(r.right() - 36.0, y), Vec2::new(36.0, th));
     let follower = v.sync && !is_master;
@@ -348,10 +363,10 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
             }
         }
     });
+    }
 
     // ---------------------------------------------------------- loops
-    // (Hi / Mid / Low / Filter live in the mixer: the ▾ next to each channel's CUE.)
-    let y = y + th + 12.0 * k;
+    let y = if tempo_on { y + th + 12.0 * k } else { y };
     let lh = 30.0 * k;
     let size = st.loop_size[d];
     let size_txt = if v.loop_on { beats_label(v.loop_beats) } else { beats_label(size) };

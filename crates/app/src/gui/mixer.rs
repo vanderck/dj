@@ -1,8 +1,7 @@
-//! Centre mixer: tempo bar, the fader-function toggles, vertical channel strips.
+//! Centre mixer: the fader-function toggles and vertical channel strips. (Quantize and the
+//! menu sit in the library bar: `global_pills`.)
 
-use std::time::Instant;
-
-use eframe::egui::{self, Align2, Color32, CornerRadius, Pos2, Rect, Sense, Stroke, Ui, UiBuilder, Vec2};
+use eframe::egui::{self, Align2, Color32, CornerRadius, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 
 use collective_engine::dsp::gain_to_db;
 use collective_engine::engine::{ClockOwner, NUM_DECKS};
@@ -32,10 +31,9 @@ pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect) {
     if core.external_routing() {
         return external_panel(ui, core, st, r);
     }
-    top_bar(ui, core, st, Rect::from_min_size(r.min, Vec2::new(r.width(), 38.0)), false);
-    mode_row(ui, st, Rect::from_min_size(Pos2::new(r.left(), r.top() + 50.0), Vec2::new(r.width(), 70.0)));
+    mode_row(ui, st, Rect::from_min_size(r.min, Vec2::new(r.width(), 70.0)));
 
-    let strips = Rect::from_min_max(Pos2::new(r.left(), r.top() + 132.0), r.right_bottom());
+    let strips = Rect::from_min_max(Pos2::new(r.left(), r.top() + 82.0), r.right_bottom());
     let order: Vec<Option<usize>> = if core.deck_count() >= 4 { vec![Some(2), Some(0), None, Some(1), Some(3)] } else { vec![Some(0), None, Some(1)] };
     let gap = 10.0;
     let sw = (strips.width() - gap * (order.len() as f32 - 1.0)) / order.len() as f32;
@@ -48,100 +46,25 @@ pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect) {
     }
 }
 
-/// BPM, beat dots, Tap, Quantize, Rec and Menu. `stacked` lays them out in three short rows for
-/// the slim column used in external-mixer mode.
-fn top_bar(ui: &mut Ui, core: &mut Core, st: &mut UiState, r: Rect, stacked: bool) {
-    let s = core.snap;
-    // BPM: drag to change, double-click to type.
-    let bpm_r = Rect::from_min_size(r.min, Vec2::new(104.0, if stacked { 38.0 } else { r.height() }));
-    if let Some(text) = &mut st.bpm_edit {
-        let mut child = ui.new_child(UiBuilder::new().max_rect(bpm_r.shrink2(Vec2::new(0.0, 4.0))));
-        let resp = child.add(egui::TextEdit::singleline(text).font(mono(20.0)).desired_width(100.0));
-        if resp.lost_focus() {
-            if child.input(|i| i.key_pressed(egui::Key::Enter)) {
-                if let Ok(v) = text.trim().parse::<f32>() {
-                    act_f(core, "Header/BPM", v);
-                }
-            }
-            st.bpm_edit = None;
-        } else {
-            resp.request_focus();
-        }
-    } else {
-        let resp = ui.allocate_rect(bpm_r, Sense::click_and_drag());
-        let owner = match s.clock.owner {
-            ClockOwner::Header => "the header".to_string(),
-            ClockOwner::Deck(d) => format!("deck {}", d + 1),
-        };
-        let resp = resp.on_hover_text(format!("Master tempo (owned by {owner}). Drag (Shift: fine), double-click to type."));
-        ui.painter().text(bpm_r.left_center(), Align2::LEFT_CENTER, format!("{:.2}", s.clock.bpm), mono(26.0), TEXT);
-        learnable(core, &resp, "Header/BPM");
-        if resp.dragged() {
-            let fine = ui.input(|i| i.modifiers.shift);
-            let dv = resp.drag_delta().x as f64 * if fine { 0.01 } else { 0.1 };
-            if dv != 0.0 {
-                act_f(core, "Header/BPM", (s.clock.bpm + dv) as f32);
-            }
-        }
-        if resp.double_clicked() {
-            st.bpm_edit = Some(format!("{:.2}", s.clock.bpm));
-        }
-    }
-    // Beat dots.
-    let beat = (s.clock.beat.floor() as i64).rem_euclid(4) as usize;
-    for i in 0..4 {
-        let c = Pos2::new(bpm_r.right() + 4.0 + i as f32 * 12.0, bpm_r.center().y);
-        ui.painter().circle_filled(c, 4.5, if i == beat { RED } else { Color32::from_gray(70) });
-    }
-
-    let h = 30.0;
-    let rec_label = match &core.recorder {
+/// Quantize and Menu pills (they live in the library bar), right-aligned to `right`, `h` tall,
+/// at `y`. Returns the left edge used. While recording, Menu turns red with the elapsed time.
+pub fn global_pills(ui: &mut Ui, core: &mut Core, st: &mut UiState, right: f32, y: f32, h: f32) -> f32 {
+    let menu_label = match &core.recorder {
         Some(rec) => format!("● {}", super::widgets::fmt_time(rec.started.elapsed().as_secs_f64())),
-        None => "● Rec".into(),
+        None => "Menu".into(),
     };
-    let q_label = format!("Quantize {}", QUANTIZE_VALUES[core.session.quantize].1);
-    let (tap_r, q_r, rec_r, menu_r) = if stacked {
-        // Two rows under the BPM: Tap · Quantize, then Rec · Menu.
-        let y1 = bpm_r.bottom() + 8.0;
-        let y2 = y1 + h + 8.0;
-        let tap_w = pill_width(ui, "Tap", 12.0);
-        let rec_w = (r.width() - 8.0) / 2.0;
-        (
-            Rect::from_min_size(Pos2::new(r.left(), y1), Vec2::new(tap_w, h)),
-            Rect::from_min_max(Pos2::new(r.left() + tap_w + 8.0, y1), Pos2::new(r.right(), y1 + h)),
-            Rect::from_min_size(Pos2::new(r.left(), y2), Vec2::new(rec_w, h)),
-            Rect::from_min_max(Pos2::new(r.left() + rec_w + 8.0, y2), Pos2::new(r.right(), y2 + h)),
-        )
+    let menu_w = pill_width(ui, &menu_label, 13.0);
+    let menu_r = Rect::from_min_size(Pos2::new(right - menu_w, y), Vec2::new(menu_w, h));
+    let resp = if core.recorder.is_some() {
+        button(ui, menu_r, &menu_label, Style::Fill(dim(RED, 0.8)), bold(13.0)).on_hover_text("Recording the master output · Menu → Stop recording")
     } else {
-        // One row, from the right: Menu, Rec, Quantize, Tap.
-        let y = r.center().y - h / 2.0;
-        let mut x = r.right();
-        let mut place = |ui: &Ui, label: &str| {
-            let w = pill_width(ui, label, 12.0);
-            x -= w;
-            let rr = Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, h));
-            x -= 8.0;
-            rr
-        };
-        let menu_r = place(ui, "Menu");
-        let rec_r = place(ui, &rec_label);
-        let q_r = place(ui, &q_label);
-        let tap_r = place(ui, "Tap");
-        (tap_r, q_r, rec_r, menu_r)
+        pill(ui, menu_r, &menu_label, false)
     };
+    egui::Popup::menu(&resp).show(|ui| menu(ui, core, st));
 
-    let resp = pill(ui, tap_r, "Tap", false).on_hover_text("Tap tempo");
-    if resp.clicked() {
-        let now = Instant::now();
-        st.taps.retain(|t| now.duration_since(*t).as_secs_f32() < 2.5);
-        st.taps.push(now);
-        if st.taps.len() >= 3 {
-            let n = st.taps.len();
-            let span = st.taps[n - 1].duration_since(st.taps[0]).as_secs_f64();
-            let bpm = 60.0 * (n - 1) as f64 / span;
-            act_f(core, "Header/BPM", bpm as f32);
-        }
-    }
+    let q_label = format!("Quantize {}", QUANTIZE_VALUES[core.session.quantize].1);
+    let q_w = pill_width(ui, &q_label, 13.0);
+    let q_r = Rect::from_min_size(Pos2::new(menu_r.left() - 8.0 - q_w, y), Vec2::new(q_w, h));
     let q_on = core.session.quantize_on;
     let resp = pill(ui, q_r, &q_label, q_on).on_hover_text("Click: on/off · right-click: value");
     learnable(core, &resp, "Header/QuantizeOn");
@@ -156,26 +79,13 @@ fn top_bar(ui: &mut Ui, core: &mut Core, st: &mut UiState, r: Rect, stacked: boo
             }
         }
     });
-    let rec = core.recorder.is_some();
-    let resp = ui.allocate_rect(rec_r, Sense::click()).on_hover_text("Record the master output to WAV");
-    let p = ui.painter();
-    let rad = CornerRadius::same((h / 2.0) as u8);
-    p.rect_filled(rec_r, rad, if rec { dim(RED, 0.8) } else if resp.hovered() { CTRL_HOVER } else { CTRL });
-    let label = rec_label.trim_start_matches('●').trim().to_string();
-    p.circle_filled(Pos2::new(rec_r.left() + 15.0, rec_r.center().y), 4.5, if rec { Color32::WHITE } else { RED });
-    p.text(Pos2::new(rec_r.left() + 24.0, rec_r.center().y), Align2::LEFT_CENTER, label, bold(12.0), TEXT);
-    learnable(core, &resp, "Header/Record");
-    if resp.clicked() {
-        core.toggle_recording();
-    }
-    let resp = pill(ui, menu_r, "Menu", false);
-    egui::Popup::menu(&resp).show(|ui| menu(ui, core, st));
+    q_r.left()
 }
 
 /// External-mixer mode: no channel strips, just the clock controls and where each deck goes.
 fn external_panel(ui: &mut Ui, core: &mut Core, st: &mut UiState, r: Rect) {
-    top_bar(ui, core, st, Rect::from_min_size(r.min, Vec2::new(r.width(), 114.0)), true);
-    let mut y = r.top() + 136.0;
+    let _ = st;
+    let mut y = r.top() + 4.0;
     let p = ui.painter();
     p.text(Pos2::new(r.left(), y), Align2::LEFT_TOP, "OUTPUTS", mono(11.0), TEXT_DIM);
     y += 22.0;
@@ -206,6 +116,13 @@ fn external_panel(ui: &mut Ui, core: &mut Core, st: &mut UiState, r: Rect) {
 fn menu(ui: &mut Ui, core: &mut Core, st: &mut UiState) {
     if ui.button("Settings…").clicked() {
         st.settings_open = true;
+        ui.close();
+    }
+    let rec = core.recorder.is_some();
+    let resp = ui.selectable_label(rec, if rec { "Stop recording" } else { "Record mix…" }).on_hover_text("Record the master output to WAV");
+    learnable(core, &resp, "Header/Record");
+    if resp.clicked() {
+        core.toggle_recording();
         ui.close();
     }
     if ui.button("MIDI & keyboard mapping…").clicked() {
@@ -385,8 +302,30 @@ fn strip(ui: &mut Ui, core: &mut Core, st: &mut UiState, ch: usize, rect: Rect) 
     let level = mode == FaderMode::Level;
     let meter = if level { view.post_peak[0].max(view.post_peak[1]) } else { 0.0 };
     let fader_color = if p.mute && level { Color32::from_gray(90) } else { mode_color };
-    let (resp, new) = vfader(ui, track, t.value, fader_color, meter, t.centred);
-    if !level {
+    let (resp, mut new) = vfader(ui, track, t.value, fader_color, meter, t.centred);
+    if mode == FaderMode::Tempo {
+        // The deck's tempo change, on the fader; drags snap to the global step setting.
+        let dv = core.snap.decks[ch];
+        let step = core.settings.tempo_step_pct;
+        let pct = (dv.speed / dv.speed_mult.max(0.01) - 1.0) * 100.0;
+        let decimals = if step > 0.0 && step < 0.1 { 2 } else { 1 };
+        let follower = dv.sync && core.snap.clock.owner != ClockOwner::Deck(ch as u8);
+        let col = if pct.abs() < 0.005 { TEXT_DIM } else { mode_color };
+        ui.painter().text(Pos2::new(track.center().x, track.top() + 14.0), Align2::CENTER_CENTER, format!("{pct:+.decimals$}%"), mono(11.0), col);
+        if follower {
+            new = None; // a synced follower's tempo comes from the clock
+        } else if resp.drag_started() {
+            st.tempo_drag = Some(t.value);
+        }
+        if let (Some(raw), Some(_)) = (st.tempo_drag.as_mut(), new) {
+            let fine = ui.input(|i| i.modifiers.shift);
+            *raw = (*raw - resp.drag_delta().y / (track.height() - 20.0) * if fine { 0.2 } else { 1.0 }).clamp(0.0, 1.0);
+            new = Some(snap_tempo(*raw, dv.tempo_range, step));
+        }
+        if resp.drag_stopped() {
+            st.tempo_drag = None;
+        }
+    } else if !level {
         ui.painter().text(Pos2::new(track.center().x, track.top() + 14.0), Align2::CENTER_CENTER, mode.short(), bold(11.0), mode_color);
     }
     let hover = match mode {
@@ -411,6 +350,18 @@ fn strip(ui: &mut Ui, core: &mut Core, st: &mut UiState, ch: usize, rect: Rect) 
             act_f(core, &t.addr, t.full);
         }
     }
+}
+
+/// Tempo fader position (0..1, centre = 0 %) snapped so the speed change is a multiple of
+/// `step_pct` percent (0 = no snapping).
+pub fn snap_tempo(v: f32, range: collective_engine::deck::TempoRange, step_pct: f32) -> f32 {
+    if step_pct <= 0.0 {
+        return v;
+    }
+    let fader = (v as f64 * 2.0 - 1.0).clamp(-1.0, 1.0);
+    let pct = (range.speed(fader) - 1.0) * 100.0;
+    let snapped = (pct / step_pct as f64).round() * step_pct as f64;
+    ((range.fader_for_speed(1.0 + snapped / 100.0).clamp(-1.0, 1.0) + 1.0) / 2.0) as f32
 }
 
 /// The toggle rows above the channel strips: what every channel fader controls. Mixer
@@ -543,7 +494,13 @@ impl FaderMode {
             FaderMode::Mid => t(p.eq[1], mixer("EQ/Mid"), 0.5, 0.0, true),
             FaderMode::Low => t(p.eq[0], mixer("EQ/Low"), 0.5, 0.0, true),
             FaderMode::Filter => t(p.cutoff, mixer("Filter1"), 0.5, 0.5, true),
-            FaderMode::Tempo => t((core.snap.decks[ch].tempo_fader as f32 + 1.0) / 2.0, format!("Deck/{n}/Tempo"), 0.5, 0.5, true),
+            FaderMode::Tempo => {
+                // Synced followers show where their actual speed sits.
+                let v = &core.snap.decks[ch];
+                let follower = v.sync && core.snap.clock.owner != ClockOwner::Deck(ch as u8);
+                let fader = if follower { v.tempo_range.fader_for_speed(v.speed / v.speed_mult.max(0.01)) } else { v.tempo_fader };
+                t((fader.clamp(-1.0, 1.0) as f32 + 1.0) / 2.0, format!("Deck/{n}/Tempo"), 0.5, 0.5, true)
+            }
             _ => {
                 let i = self.stem().unwrap();
                 let name = ["Drums", "Bass", "Vocals", "Other"][i];
@@ -655,3 +612,19 @@ fn master_strip(ui: &mut Ui, core: &mut Core, rect: Rect) {
     let _ = NUM_DECKS;
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::snap_tempo;
+    use collective_engine::deck::TempoRange;
+
+    #[test]
+    fn tempo_snaps_to_whole_steps() {
+        // ±10 %: fader 0.5 + 0.0123 -> +0.246 %, snapped to 0.1 % steps -> +0.2 %.
+        let v = snap_tempo(0.5123, TempoRange::Pct10, 0.1);
+        let pct = (TempoRange::Pct10.speed(v as f64 * 2.0 - 1.0) - 1.0) * 100.0;
+        assert!((pct - 0.2).abs() < 1e-4, "{pct}");
+        assert_eq!(snap_tempo(0.5123, TempoRange::Pct10, 0.0), 0.5123);
+        assert!((snap_tempo(1.0, TempoRange::Pct6, 0.5) - 1.0).abs() < 1e-6);
+    }
+}

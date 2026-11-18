@@ -37,12 +37,13 @@ pub struct UiState {
     pub fader_restore: std::collections::HashMap<(usize, mixer::FaderMode), f32>,
     /// Controller layout this frame (see `Settings::layout`): slim cue pads, four full decks.
     pub dense: bool,
+    /// Unsnapped tempo fader position during a drag (snapping would swallow small moves).
+    pub tempo_drag: Option<f32>,
     pub fx_edit: [[bool; 4]; 4],
     pub insert_browser: Option<InsertBrowser>,
     pub preset_name: [String; 4],
     pub settings_open: bool,
     pub mapping_open: bool,
-    pub bpm_edit: Option<String>,
     pub map_learn: Option<(usize, usize)>,
     pub new_folder: String,
     pub new_vst_path: String,
@@ -54,7 +55,6 @@ pub struct UiState {
     pub focus: [usize; 2],
     pub loop_size: [f64; 4],
     pub lane_zoom: f32,
-    pub taps: Vec<Instant>,
 }
 
 impl Default for UiState {
@@ -64,12 +64,12 @@ impl Default for UiState {
             fader_mode: mixer::FaderMode::Level,
             fader_restore: Default::default(),
             dense: false,
+            tempo_drag: None,
             fx_edit: [[false; 4]; 4],
             insert_browser: None,
             preset_name: Default::default(),
             settings_open: false,
             mapping_open: false,
-            bpm_edit: None,
             map_learn: None,
             new_folder: String::new(),
             new_vst_path: String::new(),
@@ -80,7 +80,6 @@ impl Default for UiState {
             focus: [0, 1],
             loop_size: [4.0; 4],
             lane_zoom: 1.0,
-            taps: Vec::new(),
         }
     }
 }

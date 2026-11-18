@@ -109,7 +109,8 @@ pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect) {
             if core.library_scanning { " · scanning…" } else { "" }
         ),
     };
-    let info_r = Rect::from_min_max(Pos2::new(fr.right() + 12.0, y), Pos2::new(ir.left() - 12.0, y + bar_h));
+    let pills_left = super::mixer::global_pills(ui, core, st, ir.left() - 8.0, y, bar_h);
+    let info_r = Rect::from_min_max(Pos2::new(fr.right() + 12.0, y), Pos2::new(pills_left - 12.0, y + bar_h));
     ui.painter_at(info_r).text(Pos2::new(info_r.right(), info_r.center().y), Align2::RIGHT_CENTER, info, sans(12.5), TEXT_DIM);
 
     // ---------------------------------------------------------- rows

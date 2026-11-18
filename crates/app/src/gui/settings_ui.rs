@@ -166,6 +166,13 @@ fn settings(ui: &mut Ui, core: &mut Core, st: &mut UiState) {
             ui.selectable_value(&mut core.settings.tempo_range, r, r.label());
         }
     });
+    let steps: [(f32, &str); 6] = [(0.0, "Continuous"), (0.01, "0.01 %"), (0.05, "0.05 %"), (0.1, "0.1 %"), (0.5, "0.5 %"), (1.0, "1 %")];
+    let current = steps.iter().find(|(v, _)| (*v - core.settings.tempo_step_pct).abs() < 1e-6).map_or("Custom", |(_, l)| *l);
+    egui::ComboBox::from_label("Tempo fader steps").selected_text(current).show_ui(ui, |ui| {
+        for (v, l) in steps {
+            ui.selectable_value(&mut core.settings.tempo_step_pct, v, l);
+        }
+    });
     ui.checkbox(&mut core.settings.keylock_on_load, "Key lock (pitch preserve) on load");
     ui.checkbox(&mut core.settings.load_at_first_cue, "Load tracks at their first cue");
     ui.checkbox(&mut core.settings.use_replaygain, "Apply ReplayGain from tags");
