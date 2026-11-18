@@ -31,8 +31,11 @@ pub struct InsertBrowser {
 
 pub struct UiState {
     pub fx_open: [bool; 4],
-    /// What the channel faders control (the toggle row above the strips).
-    pub fader_mode: mixer::FaderMode,
+    /// What each channel fader controls (set with the toggle rows for the selected fader, or
+    /// by MIDI changing one of its functions).
+    pub fader_mode: [mixer::FaderMode; 4],
+    /// The fader the toggle rows apply to (tap a strip to select it).
+    pub fader_sel: usize,
     /// Value each channel/mode had before its ON/OFF button switched it off.
     pub fader_restore: std::collections::HashMap<(usize, mixer::FaderMode), f32>,
     /// Controller layout this frame (see `Settings::layout`): slim cue pads, four full decks.
@@ -65,7 +68,8 @@ impl Default for UiState {
     fn default() -> Self {
         Self {
             fx_open: [false; 4],
-            fader_mode: mixer::FaderMode::Level,
+            fader_mode: [mixer::FaderMode::Level; 4],
+            fader_sel: 0,
             fader_restore: Default::default(),
             dense: false,
             tempo_drag: None,

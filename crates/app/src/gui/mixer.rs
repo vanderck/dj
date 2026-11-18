@@ -31,6 +31,9 @@ pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect) {
     if core.external_routing() {
         return external_panel(ui, core, st, r);
     }
+    if st.fader_sel >= core.deck_count() {
+        st.fader_sel = 0;
+    }
     midi_popup(ui, core, st);
     mode_row(ui, st, Rect::from_min_size(r.min, Vec2::new(r.width(), 70.0)));
 
@@ -278,9 +281,19 @@ fn strip(ui: &mut Ui, core: &mut Core, st: &mut UiState, ch: usize, rect: Rect) 
         act_i(core, &a("Cue"), !p.cue as i32);
     }
 
+    // Tapping anywhere on the strip selects it: the toggle rows then set its function.
+    // (interact_pos, not press_origin: a quick tap can press and release within one frame.)
+    let pressed_here = ui.input(|i| i.pointer.primary_pressed() && i.pointer.interact_pos().is_some_and(|p| rect.contains(p)));
+    if pressed_here {
+        st.fader_sel = ch;
+    }
+    if st.fader_sel == ch {
+        ui.painter().rect_stroke(rect, CornerRadius::same(10), Stroke::new(2.5, color), egui::StrokeKind::Inside);
+    }
+
     // ON/OFF under the fader: switches what the fader controls fully off and back.
-    let mode = shown_mode(st);
-    // The channel a MIDI control just moved stands out while its function pops in.
+    let mode = st.fader_mode[ch];
+    // The channel a MIDI control just moved flashes in its function's colour.
     if st.fader_popup.is_some_and(|(_, c, _)| c == ch) {
         ui.painter().rect_stroke(rect.expand(1.5), CornerRadius::same(11), Stroke::new(2.0, mode.color(ch)), egui::StrokeKind::Outside);
     }
@@ -302,8 +315,26 @@ fn strip(ui: &mut Ui, core: &mut Core, st: &mut UiState, ch: usize, rect: Rect) 
         }
     }
 
+    // What this fader controls, clearly: a chip in the function's colour (volume: outline only).
+    let chip = Rect::from_min_size(Pos2::new(r.left() + 2.0, cue_r.bottom() + 8.0), Vec2::new(r.width() - 4.0, 24.0));
+    {
+        let name = mode.name().to_uppercase();
+        let font = bold(11.5);
+        let fits = ui.painter().layout_no_wrap(name.clone(), font.clone(), TEXT).size().x <= chip.width() - 8.0;
+        let label = if fits { name } else { mode.short().to_string() };
+        let p = ui.painter();
+        let rad = CornerRadius::same(6);
+        if mode == FaderMode::Level {
+            p.rect_stroke(chip, rad, Stroke::new(1.5, color), egui::StrokeKind::Inside);
+            p.text(chip.center(), Align2::CENTER_CENTER, label, font, color);
+        } else {
+            p.rect_filled(chip, rad, mode_color);
+            p.text(chip.center(), Align2::CENTER_CENTER, label, font, on(mode_color));
+        }
+    }
+
     // The fader: volume, an EQ band, the filter, a stem or the deck's tempo.
-    let track = Rect::from_min_max(Pos2::new(r.left() + 4.0, cue_r.bottom() + 12.0), Pos2::new(r.right() - 4.0, on_r.top() - 10.0));
+    let track = Rect::from_min_max(Pos2::new(r.left() + 4.0, chip.bottom() + 8.0), Pos2::new(r.right() - 4.0, on_r.top() - 10.0));
     let level = mode == FaderMode::Level;
     let meter = if level { view.post_peak[0].max(view.post_peak[1]) } else { 0.0 };
     let fader_color = if p.mute && level { Color32::from_gray(90) } else { mode_color };
@@ -316,7 +347,7 @@ fn strip(ui: &mut Ui, core: &mut Core, st: &mut UiState, ch: usize, rect: Rect) 
         let decimals = if step > 0.0 && step < 0.1 { 2 } else { 1 };
         let follower = dv.sync && core.snap.clock.owner != ClockOwner::Deck(ch as u8);
         let col = if pct.abs() < 0.005 { TEXT_DIM } else { mode_color };
-        ui.painter().text(Pos2::new(track.center().x, track.top() + 14.0), Align2::CENTER_CENTER, format!("{pct:+.decimals$}%"), mono(11.0), col);
+        ui.painter().text(Pos2::new(track.center().x, track.bottom() - 14.0), Align2::CENTER_CENTER, format!("{pct:+.decimals$}%"), mono(11.0), col);
         if follower {
             new = None; // a synced follower's tempo comes from the clock
         } else if resp.drag_started() {
@@ -330,8 +361,6 @@ fn strip(ui: &mut Ui, core: &mut Core, st: &mut UiState, ch: usize, rect: Rect) 
         if resp.drag_stopped() {
             st.tempo_drag = None;
         }
-    } else if !level {
-        ui.painter().text(Pos2::new(track.center().x, track.top() + 14.0), Align2::CENTER_CENTER, mode.short(), bold(11.0), mode_color);
     }
     let hover = match mode {
         FaderMode::Level => format!("Volume · {} · Ctrl-drag: trim ({:+.1} dB) · double-click: unity", core.settings.fader_curve.label(), p.trim_db),
@@ -360,19 +389,15 @@ fn strip(ui: &mut Ui, core: &mut Core, st: &mut UiState, ch: usize, rect: Rect) 
 /// How long the channel a MIDI control moved stays outlined.
 const POPUP_SECS: f32 = 2.0;
 
-/// The fader function on screen (the last one chosen with the toggles or changed over MIDI).
-fn shown_mode(st: &UiState) -> FaderMode {
-    st.fader_mode
-}
-
-/// Switch the faders to the function a MIDI mapping just changed (it stays), and outline that
-/// channel for `POPUP_SECS`.
+/// Switch the fader of the channel a MIDI mapping just changed to that function (it stays; the
+/// other faders keep theirs), select it, and flash its outline for `POPUP_SECS`.
 fn midi_popup(ui: &Ui, core: &Core, st: &mut UiState) {
     if let Some((addr, at)) = &core.midi_touched {
         if st.midi_seen != Some(*at) {
             st.midi_seen = Some(*at);
             if let Some((mode, ch)) = fader_function(addr) {
-                st.fader_mode = mode;
+                st.fader_mode[ch] = mode;
+                st.fader_sel = ch;
                 st.fader_popup = Some((mode, ch, *at));
             }
         }
@@ -434,8 +459,8 @@ pub fn snap_tempo(v: f32, range: collective_engine::deck::TempoRange, step_pct: 
     ((range.fader_for_speed(1.0 + snapped / 100.0).clamp(-1.0, 1.0) + 1.0) / 2.0) as f32
 }
 
-/// The toggle rows above the channel strips: what every channel fader controls. Mixer
-/// functions on the first row, stems and tempo on the second.
+/// The toggle rows above the channel strips: what the selected fader controls. Mixer functions
+/// on the first row, stems and tempo on the second.
 fn mode_row(ui: &mut Ui, st: &mut UiState, r: Rect) {
     let gap = 6.0;
     let rh = (r.height() - gap) / 2.0;
@@ -444,17 +469,18 @@ fn mode_row(ui: &mut Ui, st: &mut UiState, r: Rect) {
         let long = modes.iter().all(|m| pill_width(ui, m.name(), 12.0) <= w + 6.0);
         for (i, m) in modes.iter().enumerate() {
             let br = Rect::from_min_size(Pos2::new(r.left() + i as f32 * (w + gap), r.top() + row as f32 * (rh + gap)), Vec2::new(w, rh));
-            let selected = shown_mode(st) == *m;
+            let sel = st.fader_sel;
+            let selected = st.fader_mode[sel] == *m;
             let col = m.color(0);
             let style = if selected { Style::Fill(if m.is_stem() { col } else { LIGHT }) } else { Style::Dark };
             let label = if long { m.name() } else { m.short() };
-            let resp = button(ui, br, label, style, bold(12.0)).on_hover_text(format!("Channel faders control: {}", m.name()));
+            let resp = button(ui, br, label, style, bold(12.0)).on_hover_text(format!("Fader CH {} controls: {} (tap a fader to select it)", sel + 1, m.name()));
             if m.is_stem() && !selected {
                 let mark = Rect::from_min_size(Pos2::new(br.left() + 8.0, br.bottom() - 4.0), Vec2::new(br.width() - 16.0, 2.0));
                 ui.painter().rect_filled(mark, CornerRadius::same(1), col);
             }
             if resp.clicked() {
-                st.fader_mode = *m;
+                st.fader_mode[sel] = *m;
             }
         }
     }
