@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/engine", "crates/library", "crates/vst3host", "crates/vst3-testplugin", "crates/app", "xtask"]
+members = ["crates/engine", "crates/library", "crates/vst3host", "crates/vst3-testplugin", "crates/stems-core", "crates/app", "xtask"]
 
 [workspace.package]
 version = "0.1.0"
@@ -9,6 +9,9 @@ license = "MIT OR Apache-2.0"
 rust-version = "1.80"
 
 [workspace.dependencies]
+stems-core = { path = "crates/stems-core" }
+realfft = "3"
+ort = { version = "=2.0.0-rc.15", default-features = false }
 collective-engine = { path = "crates/engine" }
 collective-library = { path = "crates/library" }
 collective-vst3 = { path = "crates/vst3host" }

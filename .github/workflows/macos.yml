@@ -16,8 +16,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
+      # stems-core with ONNX Runtime: Demucs and model tests against the small test models.
+      - run: cargo test -p stems-core --features onnx
+      - run: cargo clippy -p stems-core --all-targets --features onnx -- -D warnings
+      - run: cargo fmt -p stems-core -- --check
 
   package:
     runs-on: macos-latest

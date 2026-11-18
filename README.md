@@ -6,7 +6,7 @@ with **VST3 channel inserts** (User Guide §7.4), sampler decks, a shared master
 clock, and MIDI/OSC control. It has its own name and code. (It was called Collective; the
 config folder and the `/Collective/` OSC prefix keep that name so existing setups work.)
 
-It's built for a **Mixed In Key** workflow. Collective doesn't detect BPM, key
+It's built for a **Mixed In Key** workflow. dj doesn't detect BPM, key
 or cue points; it reads what Mixed In Key wrote into your files.
 
 ## Build & run
@@ -18,10 +18,10 @@ cargo build --release
 ```
 
 ```bash
-./target/release/collective              # GUI
-./target/release/collective --headless   # engine + OSC/MIDI only (no window)
-./target/release/collective --info track.mp3   # show the tags Collective reads
-./target/release/collective --list-devices
+./target/release/dj              # GUI
+./target/release/dj --headless   # engine + OSC/MIDI only (no window)
+./target/release/dj --info track.mp3   # show the tags dj reads
+./target/release/dj --list-devices
 ```
 
 macOS app bundle and disk image (see [packaging/macos](packaging/macos/README.md)):
@@ -56,57 +56,40 @@ cargo test --workspace
 
 ## Stems
 
-Every track is separated into **drums, bass, vocals and other** in the background after it loads,
-using [`stems-core`](https://github.com/vanderck/stems). The deck plays the full mix until the stems
-are ready (a progress bar under the waveform shows how far it is), then each deck gets:
+Every track is separated into **drums, bass, vocals and other** in the background after it loads
+(`crates/stems-core`). The deck plays the full mix until the stems are ready; its header shows the
+progress and, afterwards, which separator made them.
 
-- **DRUMS / BASS / VOCALS / OTHER** toggles (lit = audible) and **ACAPELLA / INSTR** shortcuts.
-- Zero added latency: stems are mixed where the deck reads audio, before key lock, loops, slip and
-  hot cues, so all of those keep working.
-- MIDI learn and OSC: `/Collective/Deck/N/StemDrums`, `StemBass`, `StemVocals`, `StemOther`,
-  `Acapella`, `Instrumental` (switches, 1 = on), with feedback.
+**Separators**, tried in this order:
 
-Separated stems are cached (about 50 MB per minute of audio; size limit and *Clear cache* in
-Settings → Stems), so reloading a track is instant.
+1. **Prepared stems**: made earlier by Demucs (on load, or with `dj --prepare-stems FOLDER` before
+   a set) and kept in the *Prepared stems* folder (Settings → Stems; about 32 MB per minute, never
+   cleaned up automatically).
+2. **HT-Demucs**, the best quality: Settings → Stems → *Download HT-Demucs* (or
+   `dj --download-demucs`) fetches the ONNX conversion made by the
+   [Mixxx project](https://github.com/mixxxdj/demucs) (300 MB). About 1–3 minutes per track. Its
+   weights are trained partly on non-commercial data, so dj downloads them on request and never
+   ships them. HT-Demucs FT (four models, slightly better, 4× slower) works too: select any one of
+   its four `name.<stem>.onnx` files.
+3. **A small model** (Settings → Stems → Model, or `STEMS_MODEL`): seconds per track, more bleed.
+   See [docs/stems/MODEL_CONTRACT.md](docs/stems/MODEL_CONTRACT.md).
+4. Without any of these, a low-quality placeholder, and the deck says so in red.
 
-**Model.** Set an ONNX separation model in Settings → Stems (or the `STEMS_MODEL` environment
-variable). Without one, a low-quality placeholder separator is used and the deck says so in red.
-Models are trained with the pipeline in the stems repository.
+Results of 3 and 4 are cached (size limit and *Clear cache* in Settings → Stems).
 
-**HT-Demucs (best quality).** Settings → Stems → *Download HT-Demucs* (or
-`dj --download-demucs`) fetches the HT-Demucs ONNX conversion made by the
-[Mixxx project](https://github.com/mixxxdj/demucs) (300 MB) and uses it from then on: no Python
-needed. A track is separated when it loads (about 1–3 minutes; the deck plays the full mix
-meanwhile) and its stems are kept in the *Prepared stems* folder, so each track is separated
-once; `dj --prepare-stems FOLDER` does a whole crate in advance. HT-Demucs FT (four
-models, slightly better, 4× slower) works too: select any one of its four `name.<stem>.onnx`
-files. The Demucs weights are trained partly on non-commercial data, so Collective downloads
-them on request and never ships them.
-
-**External separator.** Settings → Stems → *External separator* takes any command
-that turns a WAV file into stem files; Collective tries it before the model and falls back to
-the model if it fails. Its stems are kept in the *Prepared stems* folder (never cleaned up
-automatically; about 32 MB per minute), so each track is separated once. Prepare a crate ahead of
-a set with:
-
-```bash
-/Applications/dj.app/Contents/MacOS/dj --prepare-stems ~/Music/Crate
-```
-
-Protocol: Collective runs `<command> INPUT.wav OUTPUT_DIR` (through `sh`); INPUT.wav is the
-decoded track (32-bit float stereo, the track's own sample rate). The command writes
-`OUTPUT_DIR/{drums,bass,vocals,other}.wav` (any rate, mono or stereo, PCM or float; `other` is
-optional) and exits 0. It may print `progress 0.42` and `name …` lines. The stems repository has
-a Python Demucs add-on, `models/tools/demucs_stems.py`.
+**Playing with stems**: each stem has a level on the channel faders (Drums / Bass / Vocals / Other,
+with ON/OFF). Stems are mixed where the deck reads audio, before key lock, loops, slip and hot
+cues, so there is no added latency. MIDI and OSC: `Deck/N/StemDrums` … `StemOther` (switches),
+`Deck/N/StemDrumsLevel` … (0–1), `Acapella`, `Instrumental`.
 
 **Build.** The default `stems-onnx` feature downloads ONNX Runtime at build time and links it
 statically. Where that download is blocked, build with
 `--no-default-features --features stems-onnx-dynamic` and set `ORT_DYLIB_PATH` to an existing
-`libonnxruntime` instead.
+`libonnxruntime` instead. stems-core's own tests: `cargo test -p stems-core --features onnx`.
 
 ## Mixed In Key
 
-Collective reads, from MP3, WAV, AIFF, FLAC, Ogg/Opus and M4A files:
+dj reads, from MP3, WAV, AIFF, FLAC, Ogg/Opus and M4A files:
 
 - **BPM**: `TBPM`, `BPM`, `tmpo`.
 - **Key**: `TKEY`, `INITIALKEY`, or iTunes `initialkey`, in Camelot (`8A`),
@@ -116,7 +99,7 @@ Collective reads, from MP3, WAV, AIFF, FLAC, Ogg/Opus and M4A files:
 - **Cue points and loops**: Serato Markers2 (MIK's "write cues to Serato"
   option). Hot cues keep their pad number, name and colour.
 - **Beat grid**: the Serato BeatGrid if present. Otherwise the tagged BPM is
-  anchored on the first cue. Only when there's no cue does Collective look for
+  anchored on the first cue. Only when there's no cue does dj look for
   where the kicks fall, still using the tagged BPM.
 
 Grid nudges (`⊢`, `‹`, `›` on the deck) and cues you set while performing are
@@ -131,7 +114,7 @@ energy boost; red: clash). The browser can show only compatible tracks.
 Each mixer channel has up to **4 inserts**. Open them with the channel's **FX**
 button.
 
-| | Syndicate | Collective |
+| | Syndicate | dj |
 |---|---|---|
 | Slots per channel, PRE/POST, ON, BYPASS ALL, drag to reorder | ✓ | ✓ |
 | Signal-flow line and latency compensation | ✓ | ✓ (every channel and the cue bus are time-aligned) |

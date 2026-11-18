@@ -1,49 +1,29 @@
-//! Real-time stem separation engine.
+//! Stem separation for dj: split whole tracks into drums, bass, vocals and other.
 //!
-//! This crate contains everything that is *not* plugin glue: the streaming STFT, the
-//! [`Separator`] abstraction (where an ML model plugs in), stem mixing with isolation, the
-//! Focus EQ (frequency + stereo-position isolation) and the soundfield analysis used by the UI.
+//! - [`demucs`]: HT-Demucs (ONNX), the high-quality separator (features `onnx` / `onnx-dynamic`).
+//! - [`offline`]: STFT mask separation with a small model ([`OnnxModel`], see
+//!   `docs/stems/MODEL_CONTRACT.md`) or the [`HeuristicSeparator`] placeholder.
 //!
-//! It has no dependency on any plugin framework so it can be unit-tested, benchmarked and reused
-//! from other front-ends (an offline CLI, a Swift/AUv3 shell over a C ABI, ...).
-//!
-//! For whole tracks (e.g. DJ software separating on load) use [`offline`], which returns each stem
-//! as its own sample-aligned buffer.
-//!
-//! Real-time contract: after [`StemEngine::new`] returns, [`StemEngine::process`] and
-//! [`StemEngine::reset`] never allocate, lock or block.
+//! Every function returns each stem as its own buffer, sample-aligned with the input.
 
 #[cfg(any(feature = "onnx", feature = "onnx-dynamic"))]
 pub mod demucs;
-mod engine;
-mod focus;
 mod model;
 pub mod offline;
 #[cfg(any(feature = "onnx", feature = "onnx-dynamic"))]
 mod onnx;
 mod resample;
 mod separator;
-mod settings;
-mod soundfield;
-mod threaded;
 
-pub use engine::StemEngine;
-pub use focus::focus_weight;
 pub use model::{MaskModel, ModelError, ModelSpec, INPUT_PLANES};
 #[cfg(any(feature = "onnx", feature = "onnx-dynamic"))]
 pub use onnx::{OnnxModel, OnnxOptions};
 pub use resample::resample;
 pub use separator::{HeuristicSeparator, Separator, StemMasks};
-pub use settings::{FocusMode, FocusSettings, Settings, StemSettings};
-pub use soundfield::{
-    band_center_hz, SoundfieldFrame, SoundfieldPoint, SOUNDFIELD_BANDS, SOUNDFIELD_MAX_HZ,
-    SOUNDFIELD_MIN_HZ,
-};
-pub use threaded::{SeparatorStats, ThreadedSeparator};
 
 pub use realfft::num_complex::Complex32;
 
-/// Number of stems produced by the separator.
+/// Number of stems.
 pub const NUM_STEMS: usize = 4;
 
 /// The stems, in the order used by every per-stem array in this crate.

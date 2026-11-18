@@ -495,7 +495,6 @@ impl Core {
                 model: crate::stems::resolve_model(self.settings.stems_model.as_deref()),
                 cache,
                 demucs: self.settings.stems_demucs.clone(),
-                external: self.settings.stems_external(),
                 prepared: Some(self.settings.stems_prepared_dir()),
             });
         }

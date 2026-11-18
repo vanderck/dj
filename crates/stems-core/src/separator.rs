@@ -1,10 +1,7 @@
 use crate::{Complex32, NUM_STEMS};
 
-/// Soft masks, one per stem, each `num_bins` long.
-///
-/// Contract for [`Separator`] implementations: every value is in `0..=1` and, per bin, the four
-/// masks sum to 1. That guarantees that with all stems at unity gain and isolation 0 the engine
-/// reconstructs the input exactly (apart from the latency).
+/// Soft masks, one per stem, each `num_bins` long. Every value is in `0..=1` and, per bin, the
+/// four masks sum to 1, so the stems add up to the input.
 pub struct StemMasks {
     pub masks: [Vec<f32>; NUM_STEMS],
 }
@@ -21,31 +18,14 @@ impl StemMasks {
     }
 }
 
-/// The source-separation model.
+/// Computes stem masks for an STFT, one frame (hop) at a time (see [`crate::offline`]).
 ///
-/// The engine calls [`Separator::separate`] once per STFT hop, on the audio thread, with the
-/// newest stereo spectrum. Implementations must not allocate, lock or block in `separate`.
-///
-/// Models that need future context return a non-zero [`Separator::lookahead_frames`]: the masks
-/// written by `separate` then belong to the frame `lookahead_frames` hops *before* the one passed
-/// in, and the engine delays the spectrum accordingly (adding `lookahead_frames * hop` samples of
-/// latency, which the plugin reports to the host).
-///
-/// A neural model (ONNX via `ort`, Core ML, ...) whose inference is too slow or too bursty for
-/// the audio thread should run on a worker thread and exchange frames through lock-free ring
-/// buffers; its `separate` then just pushes the new frame and pops the masks that are due. See
-/// `docs/ARCHITECTURE.md`.
-pub trait Separator: Send {
+/// With a non-zero [`Separator::lookahead_frames`], the masks written by `separate` belong to the
+/// frame that many hops *before* the one passed in.
+pub trait Separator {
     fn lookahead_frames(&self) -> usize {
         0
     }
-
-    /// Clear internal state (called when playback restarts).
-    fn reset(&mut self) {}
-
-    /// Offline (non-real-time) rendering: the separator may block until its results are ready
-    /// instead of falling back to stale ones, so bounces are always fully separated.
-    fn set_offline(&mut self, _offline: bool) {}
 
     /// `left`/`right` are the `fft_size / 2 + 1` complex bins of the newest frame.
     fn separate(&mut self, left: &[Complex32], right: &[Complex32], masks: &mut StemMasks);
@@ -58,8 +38,7 @@ pub trait Separator: Send {
 /// - Vocals: phantom-centre (L/R-coherent) energy in the 200 Hz – 6 kHz band.
 /// - Other: everything else.
 ///
-/// It exists so the full signal path, UI and host integration can be built and tested before a
-/// real model is available. Expect heavy bleed between stems.
+/// The last resort when no model is available. Expect heavy bleed between stems.
 pub struct HeuristicSeparator {
     bass_prior: Vec<f32>,
     vocal_band: Vec<f32>,
@@ -85,10 +64,6 @@ impl HeuristicSeparator {
 }
 
 impl Separator for HeuristicSeparator {
-    fn reset(&mut self) {
-        self.avg_mag.fill(0.0);
-    }
-
     fn separate(&mut self, left: &[Complex32], right: &[Complex32], out: &mut StemMasks) {
         let [drums, bass, vocals, other] = &mut out.masks;
 

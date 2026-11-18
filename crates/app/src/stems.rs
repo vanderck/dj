@@ -31,9 +31,7 @@ pub struct Request {
     pub cache: Option<(PathBuf, u64)>,
     /// HT-Demucs ONNX model (see [`demucs_files`]); tried first, results kept as prepared stems.
     pub demucs: Option<PathBuf>,
-    /// External separator command (see [`external`]); tried before `model`.
-    pub external: Option<String>,
-    /// Folder of prepared stems (from the external separator or `--prepare-stems`); checked
+    /// Folder of prepared stems (from Demucs, on load or with `--prepare-stems`); checked
     /// first and never evicted.
     pub prepared: Option<PathBuf>,
 }
@@ -190,17 +188,7 @@ fn run(job: Request, wanted: &[AtomicU64; NUM_DECKS], tx: &Sender<Update>, demuc
             Ok((buffers, name)) => return deliver_prepared(buffers, name),
             Err(OfflineError::Cancelled) => return,
             Err(e) => {
-                let error = format!("Demucs: {e}; using the next separator");
-                let _ = tx.send(Update::Failed { deck, track_id: id, error });
-            }
-        }
-    }
-    if let Some(command) = &job.external {
-        match external::run(&audio.frames, audio.sample_rate, command, &mut progress) {
-            Ok((buffers, name)) => return deliver_prepared(buffers, name),
-            Err(external::Error::Cancelled) => return,
-            Err(external::Error::Failed(e)) => {
-                let error = format!("external separator failed ({e}); using the built-in model");
+                let error = format!("Demucs: {e}; using the model instead");
                 let _ = tx.send(Update::Failed { deck, track_id: id, error });
             }
         }
@@ -473,36 +461,28 @@ pub enum Prepared {
     AlreadyPrepared,
 }
 
-/// Separate one file with the external separator into the prepared-stems folder, unless it is
-/// already there (for `collective --prepare-stems`). `progress` gets 0..=1.
-/// The separator `prepare_file` uses.
-pub enum Preparer<'a> {
-    Demucs { model: &'a Path, threads: usize, cache: &'a mut DemucsCache },
-    External(&'a str),
-}
-
-pub fn prepare_file(path: &Path, with: &mut Preparer, dir: &Path, progress: &mut dyn FnMut(f32)) -> Result<Prepared, String> {
+/// Separate one file with Demucs into the prepared-stems folder `dir`, unless it is already
+/// there (for `dj --prepare-stems`). `progress` gets 0..=1.
+pub fn prepare_file(
+    path: &Path,
+    model: &Path,
+    threads: usize,
+    cache: &mut DemucsCache,
+    dir: &Path,
+    progress: &mut dyn FnMut(f32),
+) -> Result<Prepared, String> {
     let audio = collective_library::decode(path).map_err(|e| format!("decoding: {e}"))?;
     let frames = audio.frames.len();
     let key = cache_key(path, PREPARED, frames);
     if cache::read(&dir.join(cache::file_name(key)), key, 0, frames).is_some() {
         return Ok(Prepared::AlreadyPrepared);
     }
-    let mut keep_going = |p| {
-        progress(p);
-        true
-    };
-    let (buffers, name) = match with {
-        Preparer::Demucs { model, threads, cache } => cache
-            .separate(model, *threads, &audio.frames, audio.sample_rate, &mut keep_going)
-            .map_err(|e| e.to_string())?,
-        Preparer::External(command) => {
-            external::run(&audio.frames, audio.sample_rate, command, &mut keep_going).map_err(|e| match e {
-                external::Error::Failed(e) => e,
-                external::Error::Cancelled => "cancelled".into(),
-            })?
-        }
-    };
+    let (buffers, name) = cache
+        .separate(model, threads, &audio.frames, audio.sample_rate, &mut |p| {
+            progress(p);
+            true
+        })
+        .map_err(|e| e.to_string())?;
     let stems = StemData::from_f32(
         0,
         &buffers[CoreStem::Drums as usize],
@@ -511,161 +491,6 @@ pub fn prepare_file(path: &Path, with: &mut Preparer, dir: &Path, progress: &mut
     );
     cache::write(dir, key, &stems, u64::MAX).map_err(|e| format!("writing {}: {e}", dir.display()))?;
     Ok(Prepared::Done(name))
-}
-
-/// External separator: any program that turns a WAV file into stem files, so separators that
-/// cannot ship with Collective (licence, size, Python) plug in from outside.
-///
-/// Collective runs `sh -c '<command> "$@"' collective INPUT.wav OUTPUT_DIR`, where INPUT.wav is
-/// the decoded track (32-bit float, stereo, at the track's own sample rate). The program writes
-/// `OUTPUT_DIR/{drums,bass,vocals,other}.wav` (any sample rate, mono or stereo, PCM or float;
-/// `other` is optional: Collective derives it) and exits with status 0. It may print lines
-/// `progress 0.42` and `name Some Separator` on stdout.
-pub mod external {
-    use super::*;
-    use std::collections::VecDeque;
-    use std::io::BufRead;
-    use std::process::{Command, Stdio};
-    use std::sync::Mutex;
-    use std::time::Duration;
-
-    pub enum Error {
-        /// `progress` returned false; the program was stopped.
-        Cancelled,
-        Failed(String),
-    }
-
-    /// Removes the exchange folder however `run` ends.
-    struct TempDir(PathBuf);
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-
-    pub fn run(
-        frames: &[[f32; 2]],
-        rate: u32,
-        command: &str,
-        progress: &mut dyn FnMut(f32) -> bool,
-    ) -> Result<(StemBuffers, String), Error> {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let fail = |e: String| Error::Failed(e);
-        let tmp = TempDir(std::env::temp_dir().join(format!(
-            "collective-stems-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        )));
-        let out_dir = tmp.0.join("stems");
-        fs::create_dir_all(&out_dir).map_err(|e| fail(format!("temp folder: {e}")))?;
-        let input = tmp.0.join("input.wav");
-        write_wav(&input, frames, rate).map_err(|e| fail(format!("writing input: {e}")))?;
-
-        let mut child = Command::new("/bin/sh")
-            .arg("-c")
-            .arg(format!("{command} \"$@\""))
-            .arg("collective")
-            .arg(&input)
-            .arg(&out_dir)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| fail(format!("starting it: {e}")))?;
-
-        let (line_tx, lines) = crossbeam_channel::unbounded::<String>();
-        let stdout = child.stdout.take().unwrap();
-        std::thread::spawn(move || {
-            for line in std::io::BufReader::new(stdout).lines().map_while(Result::ok) {
-                let _ = line_tx.send(line);
-            }
-        });
-        let tail = Arc::new(Mutex::new(VecDeque::<String>::new()));
-        let stderr = child.stderr.take().unwrap();
-        let t = tail.clone();
-        std::thread::spawn(move || {
-            for line in std::io::BufReader::new(stderr).lines().map_while(Result::ok) {
-                let mut t = t.lock().unwrap();
-                t.push_back(line);
-                if t.len() > 8 {
-                    t.pop_front();
-                }
-            }
-        });
-
-        let mut name = String::from("external separator");
-        let mut fraction = 0.0f32;
-        let status = loop {
-            while let Ok(line) = lines.try_recv() {
-                if let Some(p) = line.strip_prefix("progress ").and_then(|v| v.trim().parse::<f32>().ok()) {
-                    fraction = p.clamp(0.0, 1.0);
-                } else if let Some(n) = line.strip_prefix("name ") {
-                    name = n.trim().to_string();
-                }
-            }
-            if !progress(0.98 * fraction) {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(Error::Cancelled);
-            }
-            match child.try_wait() {
-                Ok(Some(status)) => break status,
-                Ok(None) => std::thread::sleep(Duration::from_millis(50)),
-                Err(e) => return Err(fail(format!("waiting for it: {e}"))),
-            }
-        };
-        if !status.success() {
-            std::thread::sleep(Duration::from_millis(50)); // let stderr drain
-            let tail = tail.lock().unwrap().iter().cloned().collect::<Vec<_>>().join(" | ");
-            return Err(fail(format!("{status}: {tail}")));
-        }
-
-        let mut stems: StemBuffers = Default::default();
-        for s in [CoreStem::Drums, CoreStem::Bass, CoreStem::Vocals] {
-            let path = out_dir.join(format!("{}.wav", s.name().to_lowercase()));
-            let (mut audio, r) = read_wav(&path).map_err(|e| fail(format!("{}: {e}", path.display())))?;
-            if r != rate {
-                audio = stems_core::resample(&audio, r, rate);
-            }
-            audio.resize(frames.len(), [0.0; 2]);
-            stems[s as usize] = audio;
-        }
-        Ok((stems, name))
-    }
-
-    fn write_wav(path: &Path, frames: &[[f32; 2]], rate: u32) -> Result<(), hound::Error> {
-        let spec = hound::WavSpec {
-            channels: 2,
-            sample_rate: rate,
-            bits_per_sample: 32,
-            sample_format: hound::SampleFormat::Float,
-        };
-        let mut w = hound::WavWriter::create(path, spec)?;
-        for f in frames {
-            w.write_sample(f[0])?;
-            w.write_sample(f[1])?;
-        }
-        w.finalize()
-    }
-
-    /// Any PCM or float WAV -> stereo frames (mono duplicated, extra channels dropped).
-    pub(super) fn read_wav(path: &Path) -> Result<(Vec<[f32; 2]>, u32), hound::Error> {
-        let mut r = hound::WavReader::open(path)?;
-        let spec = r.spec();
-        let ch = spec.channels.max(1) as usize;
-        let samples: Vec<f32> = match spec.sample_format {
-            hound::SampleFormat::Float => r.samples::<f32>().collect::<Result<_, _>>()?,
-            hound::SampleFormat::Int => {
-                let k = 1.0 / (1u64 << (spec.bits_per_sample - 1)) as f32;
-                r.samples::<i32>().map(|v| v.map(|v| v as f32 * k)).collect::<Result<_, _>>()?
-            }
-        };
-        let frames = samples
-            .chunks_exact(ch)
-            .map(|c| if ch == 1 { [c[0], c[0]] } else { [c[0], c[1]] })
-            .collect();
-        Ok((frames, spec.sample_rate))
-    }
 }
 
 mod cache {
@@ -798,7 +623,7 @@ mod tests {
 
         let w = StemsWorker::new();
         let t = track(11, 2.0);
-        w.request(Request { deck: 1, track: t.clone(), path: song.clone(), model: None, cache: cache.clone(), demucs: None, external: None, prepared: None });
+        w.request(Request { deck: 1, track: t.clone(), path: song.clone(), model: None, cache: cache.clone(), demucs: None, prepared: None });
         let Update::Done { deck, track_id, stems, source, .. } = wait(&w) else { panic!("expected stems") };
         assert_eq!((deck, track_id, source.as_str()), (1, 11, "placeholder separator"));
         assert_eq!(stems.len(), t.audio.frames.len());
@@ -809,7 +634,7 @@ mod tests {
 
         // Same file again (new track id): served from the cache, identical content.
         let t2 = track(12, 2.0);
-        w.request(Request { deck: 0, track: t2, path: song.clone(), model: None, cache: cache.clone(), demucs: None, external: None, prepared: None });
+        w.request(Request { deck: 0, track: t2, path: song.clone(), model: None, cache: cache.clone(), demucs: None, prepared: None });
         let Update::Done { track_id, stems: cached, source, .. } = wait(&w) else { panic!() };
         assert_eq!((track_id, source.as_str()), (12, "cache"));
         assert_eq!(cached.drums, stems.drums);
@@ -825,10 +650,10 @@ mod tests {
     #[test]
     fn cancelled_jobs_produce_nothing() {
         let w = StemsWorker::new();
-        w.request(Request { deck: 2, track: track(21, 30.0), path: PathBuf::from("/nonexistent"), model: None, cache: None, demucs: None, external: None, prepared: None });
+        w.request(Request { deck: 2, track: track(21, 30.0), path: PathBuf::from("/nonexistent"), model: None, cache: None, demucs: None, prepared: None });
         w.cancel(2);
         // A later request for another deck still completes, and nothing arrives for the cancelled one.
-        w.request(Request { deck: 3, track: track(22, 1.0), path: PathBuf::from("/nonexistent"), model: None, cache: None, demucs: None, external: None, prepared: None });
+        w.request(Request { deck: 3, track: track(22, 1.0), path: PathBuf::from("/nonexistent"), model: None, cache: None, demucs: None, prepared: None });
         let Update::Done { deck, track_id, .. } = wait(&w) else { panic!() };
         assert_eq!((deck, track_id), (3, 22));
     }
@@ -838,101 +663,10 @@ mod tests {
         let w = StemsWorker::new();
         let bad = std::env::temp_dir().join("collective-not-a-model.onnx");
         fs::write(&bad, b"nope").unwrap();
-        w.request(Request { deck: 0, track: track(31, 1.0), path: bad.clone(), model: Some(bad), cache: None, demucs: None, external: None, prepared: None });
+        w.request(Request { deck: 0, track: track(31, 1.0), path: bad.clone(), model: Some(bad), cache: None, demucs: None, prepared: None });
         let Update::Failed { track_id: 31, error, .. } = wait(&w) else { panic!("expected the model error first") };
         assert!(error.contains("placeholder"), "{error}");
         let Update::Done { track_id: 31, source, .. } = wait(&w) else { panic!("expected placeholder stems") };
-        assert_eq!(source, "placeholder separator");
-    }
-
-    /// A stand-in external separator: every stem is a copy of the input; counts its runs.
-    fn fake_separator(dir: &Path) -> String {
-        let script = dir.join("fake.sh");
-        fs::write(
-            &script,
-            "echo 'name Fake separator'\necho 'progress 0.5'\nfor s in drums bass vocals; do cp \"$1\" \"$2/$s.wav\"; done\necho run >> \"$(dirname \"$0\")/runs\"\n",
-        )
-        .unwrap();
-        format!("sh '{}'", script.display())
-    }
-
-    fn write_song(path: &Path, t: &Track) {
-        let spec = hound::WavSpec { channels: 2, sample_rate: t.audio.sample_rate, bits_per_sample: 32, sample_format: hound::SampleFormat::Float };
-        let mut w = hound::WavWriter::create(path, spec).unwrap();
-        for f in &t.audio.frames {
-            w.write_sample(f[0]).unwrap();
-            w.write_sample(f[1]).unwrap();
-        }
-        w.finalize().unwrap();
-    }
-
-    #[test]
-    fn external_separator_results_are_kept_as_prepared_stems() {
-        let dir = std::env::temp_dir().join(format!("collective-ext-test-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        let song = dir.join("song.wav");
-        let t = track(41, 2.0);
-        write_song(&song, &t);
-        let decoded = |id| {
-            let audio = collective_library::decode(&song).unwrap();
-            Arc::new(Track { id, audio, grid: None, gain: 1.0, cues: Default::default() })
-        };
-        let t = decoded(41);
-        let command = fake_separator(&dir);
-        let prepared = Some(dir.join("prepared"));
-
-        let w = StemsWorker::new();
-        let req = |_id: u64, track: Arc<Track>| Request {
-            deck: 0,
-            track,
-            path: song.clone(),
-            model: None,
-            cache: None,
-            demucs: None,
-            external: Some(command.clone()),
-            prepared: prepared.clone(),
-        };
-        w.request(req(41, t.clone()));
-        let Update::Done { stems, source, .. } = wait(&w) else { panic!("expected stems") };
-        assert_eq!(source, "Fake separator");
-        let i = 20_000;
-        let back = stems.drums[i][0] as f32 * stems.scale;
-        assert!((back - t.audio.frames[i][0]).abs() < 1e-3, "{back} vs {}", t.audio.frames[i][0]);
-
-        // Loading the same file again uses the prepared stems without running the separator.
-        w.request(req(42, decoded(42)));
-        let Update::Done { track_id: 42, source, .. } = wait(&w) else { panic!() };
-        assert_eq!(source, "prepared stems");
-        assert_eq!(fs::read_to_string(dir.join("runs")).unwrap().lines().count(), 1);
-
-        // `--prepare-stems` sees the same store.
-        let mut p = |_| {};
-        assert_eq!(prepare_file(&song, &mut Preparer::External(&command), &dir.join("prepared"), &mut p), Ok(Prepared::AlreadyPrepared));
-        let other = dir.join("other.wav");
-        write_song(&other, &track(43, 1.0));
-        assert_eq!(prepare_file(&other, &mut Preparer::External(&command), &dir.join("prepared"), &mut p), Ok(Prepared::Done("Fake separator".into())));
-        assert_eq!(fs::read_dir(dir.join("prepared")).unwrap().count(), 2);
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn external_separator_failure_is_reported_then_falls_back() {
-        let w = StemsWorker::new();
-        let command = "echo 'no GPU today' >&2; exit 3; true".to_string();
-        w.request(Request {
-            deck: 1,
-            track: track(51, 1.0),
-            path: PathBuf::from("/nonexistent"),
-            model: None,
-            cache: None,
-            demucs: None,
-            external: Some(command),
-            prepared: None,
-        });
-        let Update::Failed { track_id: 51, error, .. } = wait(&w) else { panic!("expected the failure first") };
-        assert!(error.contains("no GPU today") && error.contains('3'), "{error}");
-        let Update::Done { track_id: 51, source, .. } = wait(&w) else { panic!("expected fallback stems") };
         assert_eq!(source, "placeholder separator");
     }
 
@@ -953,7 +687,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("collective-demucs-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        let model = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/demucs_test.onnx"));
+        let model = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../stems-core/tests/data/demucs_test.onnx"));
         let t = track(61, 1.0);
         let req = |track, demucs: Option<PathBuf>| Request {
             deck: 2,
@@ -962,7 +696,6 @@ mod tests {
             model: None,
             cache: None,
             demucs,
-            external: None,
             prepared: Some(dir.join("prepared")),
         };
         let w = StemsWorker::new();
@@ -985,6 +718,29 @@ mod tests {
         assert!(error.contains("Demucs"), "{error}");
         let Update::Done { track_id: 63, source, .. } = wait(&w) else { panic!() };
         assert_eq!(source, "placeholder separator");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(any(feature = "stems-onnx", feature = "stems-onnx-dynamic"))]
+    #[test]
+    fn prepare_file_separates_once() {
+        let dir = std::env::temp_dir().join(format!("collective-prepare-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let song = dir.join("song.wav");
+        let t = track(71, 1.0);
+        let spec = hound::WavSpec { channels: 2, sample_rate: t.audio.sample_rate, bits_per_sample: 32, sample_format: hound::SampleFormat::Float };
+        let mut w = hound::WavWriter::create(&song, spec).unwrap();
+        for f in &t.audio.frames {
+            w.write_sample(f[0]).unwrap();
+            w.write_sample(f[1]).unwrap();
+        }
+        w.finalize().unwrap();
+        let model = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../stems-core/tests/data/demucs_test.onnx"));
+        let mut cache = DemucsCache::default();
+        let mut prepare = || prepare_file(&song, model, 2, &mut cache, &dir.join("prepared"), &mut |_| {});
+        assert_eq!(prepare(), Ok(Prepared::Done("HT-Demucs".into())));
+        assert_eq!(prepare(), Ok(Prepared::AlreadyPrepared));
         let _ = fs::remove_dir_all(&dir);
     }
 }

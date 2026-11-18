@@ -1,4 +1,4 @@
-//! Demucs runner against a tiny stand-in model (models/tools/make_demucs_test_model.py): each
+//! Demucs runner against a tiny stand-in model (tests/data/demucs_test*.onnx): each
 //! source is a fixed fraction of the input at the same sample, so chunking, padding, trimming,
 //! blending and normalisation errors all show up. Run as tests/onnx.rs says.
 #![cfg(any(feature = "onnx", feature = "onnx-dynamic"))]

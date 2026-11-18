@@ -3,7 +3,8 @@ name = "stems-core"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "Real-time-safe STFT stem separation engine (DSP core, no plugin dependencies)"
+license.workspace = true
+description = "Stem separation for dj: HT-Demucs (ONNX), STFT mask models and a heuristic placeholder"
 publish = false
 
 [features]
@@ -14,5 +15,4 @@ onnx-dynamic = ["dep:ort", "ort/std", "ort/ndarray", "ort/load-dynamic"]
 
 [dependencies]
 realfft.workspace = true
-rtrb.workspace = true
 ort = { workspace = true, optional = true }

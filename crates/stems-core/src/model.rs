@@ -1,4 +1,4 @@
-//! The interface between the engine and a separation model.
+//! The interface between offline separation and a mask-estimating model.
 //!
 //! See `docs/MODEL_CONTRACT.md` for the exact tensor layout and STFT conventions a trained model
 //! must follow.
@@ -68,16 +68,10 @@ impl ModelSpec {
         }
         Ok(())
     }
-
-    /// Whether the model can run at the host's sample rate without resampling.
-    pub fn matches_sample_rate(&self, host_rate: f32) -> bool {
-        (host_rate - self.sample_rate).abs() <= 0.01 * self.sample_rate
-    }
 }
 
-/// A mask-estimating model. Runs on the separator's worker thread, never on the audio thread, so
-/// it may allocate and take a variable amount of time.
-pub trait MaskModel: Send + 'static {
+/// A mask-estimating model.
+pub trait MaskModel {
     fn spec(&self) -> ModelSpec;
 
     /// Human-readable name for the UI.

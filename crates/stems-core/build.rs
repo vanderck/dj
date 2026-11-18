@@ -2,7 +2,7 @@
 //! `@available` checks, which call `___isPlatformVersionAtLeast` from clang's runtime library
 //! (`libclang_rt.osx.a`). rustc does not link that library, so release builds fail with an
 //! undefined symbol. Link it explicitly; `rustc-link-lib` propagates to every final binary
-//! (plugin, tests, examples).
+//! (dj, tests, examples).
 use std::path::PathBuf;
 use std::process::Command;
 
