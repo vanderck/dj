@@ -127,6 +127,11 @@ pub fn stem_switch(name: &str) -> Option<usize> {
     }
 }
 
+/// Deck stem levels (`/deck/N/stemvocalslevel` etc., 0..1) -> stem index.
+pub fn stem_level(name: &str) -> Option<usize> {
+    stem_switch(name.strip_suffix("level")?)
+}
+
 pub const STEMS_ACAPELLA: [f32; 4] = [0.0, 0.0, 1.0, 0.0];
 pub const STEMS_INSTRUMENTAL: [f32; 4] = [1.0, 1.0, 0.0, 1.0];
 
@@ -1395,6 +1400,10 @@ impl Core {
                 stem: stem_switch(s).unwrap() as u8,
                 gain: if o { 1.0 } else { 0.0 },
             }),
+            [s] if stem_level(s).is_some() => f.map(|v| DeckCmd::StemGain {
+                stem: stem_level(s).unwrap() as u8,
+                gain: (v as f32).clamp(0.0, 1.0),
+            }),
             ["acapella"] => on.and_then(|o| self.set_stems(d, if o { STEMS_ACAPELLA } else { [1.0; 4] })),
             ["instrumental"] => on.and_then(|o| self.set_stems(d, if o { STEMS_INSTRUMENTAL } else { [1.0; 4] })),
             ["pitchdown"] if trig => Some(DeckCmd::Semitones(self.snap.decks[d].semitones - 1.0)),
@@ -2313,6 +2322,12 @@ mod tests {
         c.route("Deck/2/Acapella", &[OscType::Int(0)]);
         pump(&mut e, &mut c);
         assert_eq!(c.snap.decks[1].stem_gains, [1.0; 4]);
+
+        // Continuous levels, for faders.
+        assert_eq!(addr_kind("Deck/1/StemVocalsLevel"), Kind::Value);
+        assert!(c.route("Deck/2/StemVocalsLevel", &[OscType::Float(0.25)]));
+        pump(&mut e, &mut c);
+        assert_eq!(c.snap.decks[1].stem_gains, [1.0, 1.0, 0.25, 1.0]);
     }
 
     #[test]

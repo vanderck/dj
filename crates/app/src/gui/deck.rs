@@ -108,7 +108,31 @@ fn title_block(ui: &Ui, core: &Core, d: usize, rect: Rect, big: bool) {
     };
     let (ts, as_) = if big { (17.0, 13.0) } else { (14.0, 12.0) };
     p.text(Pos2::new(rect.left(), rect.center().y - 1.0), Align2::LEFT_BOTTOM, title, bold(ts), TEXT);
+    // Stems status after the artist (the stems themselves are on the channel faders).
+    let status = if big { stems_status(core, d) } else { None };
+    let status_w = status.as_ref().map_or(0.0, |(t, _)| ui.painter().layout_no_wrap(format!(" · {t}"), sans(as_), TEXT).size().x);
+    let artist = fit_text(ui, &artist, sans(as_), (rect.width() - status_w).max(40.0));
+    let aw = if artist.is_empty() { 0.0 } else { ui.painter().layout_no_wrap(artist.clone(), sans(as_), TEXT).size().x };
     p.text(Pos2::new(rect.left(), rect.center().y + 2.0), Align2::LEFT_TOP, artist, sans(as_), TEXT_DIM);
+    if let Some((text, col)) = status {
+        let text = if aw > 0.0 { format!(" · {text}") } else { text };
+        p.text(Pos2::new(rect.left() + aw, rect.center().y + 2.0), Align2::LEFT_TOP, text, sans(as_), col);
+    }
+}
+
+/// Short stems status for the deck header: separation progress, or where the stems came from.
+fn stems_status(core: &Core, d: usize) -> Option<(String, Color32)> {
+    let v = core.snap.decks[d];
+    if !core.settings.stems_enabled || !v.loaded {
+        return None;
+    }
+    let source = core.decks[d].stems_source.as_deref();
+    match (core.decks[d].stems_progress, source) {
+        (Some(f), _) => Some((format!("stems {:.0}%", f * 100.0), DECK[d])),
+        (None, Some(src)) if v.stems_ready && src.contains("placeholder") => Some(("placeholder stems".into(), RED)),
+        (None, Some(src)) if v.stems_ready => Some((format!("stems: {src}"), TEXT_FAINT)),
+        _ => None,
+    }
 }
 
 /// Hold-to-preview CUE button behaviour.
@@ -164,7 +188,9 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
     // Vertical scale: rows grow to fill the card (e.g. 2-deck mode) instead of leaving space
     // unused. Base layout heights: transport 52, pads 2×36+8, stems 26, tempo 30, loops 30 +
     // gaps; never smaller than today's sizes, at most 1.8×.
-    let stems_on = core.settings.stems_enabled;
+    // The stems row only exists without the internal mixer (otherwise stems are on the faders
+    // and their status is in the header).
+    let stems_on = core.settings.stems_enabled && core.external_routing();
     let base = 52.0 + 10.0 + 2.0 * 36.0 + 8.0 + if stems_on { 10.0 + 26.0 + 10.0 } else { 14.0 } + 30.0 + 12.0 + 30.0;
     let k = ((r.bottom() - (r.top() + hh + 12.0)) / base).clamp(1.0, 1.8);
     let y = r.top() + hh + 12.0;
@@ -363,7 +389,8 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
     }
 }
 
-/// Stem toggles (light = audible), Acapella / Instr shortcuts, and separation status.
+/// External-mixer mode only: stem toggles (light = audible) and the separation status. With the
+/// internal mixer, stems are on the channel faders (Drums/Bass/Vocals/Other with ON/OFF).
 fn stems_row(ui: &mut Ui, core: &mut Core, d: usize, r: Rect) {
     let v = core.snap.decks[d];
     let n = d + 1;
@@ -371,39 +398,31 @@ fn stems_row(ui: &mut Ui, core: &mut Core, d: usize, r: Rect) {
     let color = DECK[d];
     let ready = v.stems_ready;
     let gap = 6.0;
-    let status_w = (r.width() * 0.22).clamp(80.0, 150.0);
-    let items: [(&str, &str, f32); 6] = [
+    let all: [(&str, &str, f32); 4] = [
         ("Drums", "StemDrums", 1.0),
         ("Bass", "StemBass", 1.0),
         ("Vocals", "StemVocals", 1.0),
         ("Other", "StemOther", 1.0),
-        ("Acapella", "Acapella", 1.2),
-        ("Instr", "Instrumental", 1.0),
     ];
-    let unit = (r.width() - status_w - gap * items.len() as f32) / items.iter().map(|i| i.2).sum::<f32>();
+    let status_w = (r.width() * 0.22).clamp(80.0, 150.0);
+    let items: Vec<(usize, &(&str, &str, f32))> = all.iter().enumerate().collect();
+    let unit = (r.width() - status_w - gap * items.len() as f32) / items.iter().map(|(_, i)| i.2).sum::<f32>();
     let mut x = r.left();
-    for (i, (label, addr, weight)) in items.iter().enumerate() {
+    for (i, (label, addr, weight)) in items {
         let rr = Rect::from_min_size(Pos2::new(x, r.top()), Vec2::new(unit * weight, r.height()));
         x += unit * weight + gap;
-        let on_ = match i {
-            0..=3 => v.stem_gains[i] > 0.5,
-            4 => v.stem_gains == crate::core::STEMS_ACAPELLA,
-            _ => v.stem_gains == crate::core::STEMS_INSTRUMENTAL,
-        };
+        let on_ = v.stem_gains[i] > 0.5;
         // Until the stems are ready, settings are shown in outline: they apply once separated.
-        let style = match (on_, ready, i < 4) {
-            (true, true, true) => Style::Light,
-            (true, true, false) => Style::Fill(color),
-            (true, false, _) => Style::Outline(TEXT_FAINT, false),
-            (false, _, _) => Style::Dark,
+        let style = match (on_, ready) {
+            (true, true) => Style::Light,
+            (true, false) => Style::Outline(TEXT_FAINT, false),
+            (false, _) => Style::Dark,
         };
         let tip = if ready { "Lit = audible" } else { "Still separating: the setting applies as soon as stems are ready" };
         let resp = button(ui, rr, label, style, bold(11.5)).on_hover_text(tip);
-        if i < 4 {
-            // Colour mark: the stem's colour in the waveform lanes.
-            let mark = Rect::from_min_size(Pos2::new(rr.left() + 6.0, rr.bottom() - 4.0), Vec2::new(rr.width() - 12.0, 2.0));
-            ui.painter().rect_filled(mark, CornerRadius::same(1), if on_ { STEM[i] } else { dim(STEM[i], 0.5) });
-        }
+        // Colour mark: the stem's colour in the waveform lanes.
+        let mark = Rect::from_min_size(Pos2::new(rr.left() + 6.0, rr.bottom() - 4.0), Vec2::new(rr.width() - 12.0, 2.0));
+        ui.painter().rect_filled(mark, CornerRadius::same(1), if on_ { STEM[i] } else { dim(STEM[i], 0.5) });
         learnable(core, &resp, &a(addr));
         if resp.clicked() && v.loaded {
             act_i(core, &a(addr), !on_ as i32);

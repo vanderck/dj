@@ -1,4 +1,4 @@
-//! Centre mixer: tempo bar, vertical channel strips, crossfader.
+//! Centre mixer: tempo bar, the fader-function toggles, vertical channel strips.
 
 use std::time::Instant;
 
@@ -33,8 +33,9 @@ pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect) {
         return external_panel(ui, core, st, r);
     }
     top_bar(ui, core, st, Rect::from_min_size(r.min, Vec2::new(r.width(), 38.0)), false);
+    mode_row(ui, st, Rect::from_min_size(Pos2::new(r.left(), r.top() + 50.0), Vec2::new(r.width(), 70.0)));
 
-    let strips = Rect::from_min_max(Pos2::new(r.left(), r.top() + 52.0), r.right_bottom());
+    let strips = Rect::from_min_max(Pos2::new(r.left(), r.top() + 132.0), r.right_bottom());
     let order: Vec<Option<usize>> = if core.deck_count() >= 4 { vec![Some(2), Some(0), None, Some(1), Some(3)] } else { vec![Some(0), None, Some(1)] };
     let gap = 10.0;
     let sw = (strips.width() - gap * (order.len() as f32 - 1.0)) / order.len() as f32;
@@ -327,18 +328,21 @@ fn strip(ui: &mut Ui, core: &mut Core, st: &mut UiState, ch: usize, rect: Rect) 
     strip_frame(ui, rect, color, !loaded);
     let r = rect.shrink2(Vec2::new(8.0, 12.0));
     let title_r = Rect::from_min_size(r.min, Vec2::new(r.width(), 16.0));
-    let tr = ui.allocate_rect(title_r, Sense::click()).on_hover_text("Right-click: mute, solo, trim, output…");
+    let tr = ui.allocate_rect(title_r, Sense::click()).on_hover_text("Right-click: effects, mute, solo, trim, output…");
     ui.painter().text(title_r.center(), Align2::CENTER_CENTER, if p.mute { format!("CH {n} · MUTE") } else { format!("CH {n}") }, mono(12.0), if p.mute { RED } else { TEXT_DIM });
-    tr.context_menu(|ui| channel_menu(ui, core, ch));
+    // Status dots: EQ/filter away from neutral, effects running.
+    let eq_moved = p.eq.iter().any(|v| (v - 0.5).abs() > 0.01) || (p.cutoff - 0.5).abs() > 0.01;
+    let fx_on = cm.fx.slots.iter().any(|s| s.is_some()) && !cm.fx.bypass_all;
+    for (i, (show, col)) in [(eq_moved, LIGHT), (fx_on, GREEN)].into_iter().enumerate() {
+        if show {
+            ui.painter().circle_filled(Pos2::new(title_r.right() - 4.0 - i as f32 * 8.0, title_r.center().y), 2.5, col);
+        }
+    }
+    tr.context_menu(|ui| channel_menu(ui, core, st, ch));
 
-    // CUE | mode ▾: the dropdown chooses what the fader below controls.
-    let mode = st.fader_mode[ch];
-    let pill = Rect::from_min_size(Pos2::new(r.left() + 2.0, title_r.bottom() + 10.0), Vec2::new(r.width() - 4.0, 28.0));
-    let mode_w = (pill.width() * 0.46).clamp(30.0, 46.0);
-    let cue_r = Rect::from_min_max(pill.min, Pos2::new(pill.right() - mode_w - 3.0, pill.bottom()));
-    let mode_r = Rect::from_min_max(Pos2::new(pill.right() - mode_w, pill.top()), pill.max);
+    let cue_r = Rect::from_min_size(Pos2::new(r.left() + 2.0, title_r.bottom() + 10.0), Vec2::new(r.width() - 4.0, 32.0));
     let cue_style = if p.cue { Style::Outline(ORANGE, true) } else { Style::Outline(Color32::from_gray(64), false) };
-    let resp = button(ui, cue_r, "CUE", cue_style, mono(12.0));
+    let resp = button(ui, cue_r, "CUE", cue_style, mono(12.5));
     if p.cue {
         ui.painter().rect_filled(cue_r, CornerRadius::same(6), alpha(ORANGE, 0.16));
     }
@@ -346,126 +350,212 @@ fn strip(ui: &mut Ui, core: &mut Core, st: &mut UiState, ch: usize, rect: Rect) 
     if resp.clicked() {
         act_i(core, &a("Cue"), !p.cue as i32);
     }
-    let mode_style = if mode == FaderMode::Level { Style::Outline(Color32::from_gray(64), false) } else { Style::Outline(LIGHT, true) };
-    let mode_label = if mode == FaderMode::Level { "▾".to_string() } else { format!("{}▾", mode.short()) };
-    let mode_btn = button(ui, mode_r, &mode_label, mode_style, bold(10.5)).on_hover_text("Fader function: level, Hi, Mid, Low, Filter · effects");
-    // Status dots: EQ/filter moved away from neutral, effects active.
-    let eq_moved = p.eq.iter().any(|v| (v - 0.5).abs() > 0.01) || (p.cutoff - 0.5).abs() > 0.01;
-    let fx_on = cm.fx.slots.iter().any(|s| s.is_some()) && !cm.fx.bypass_all;
-    for (i, (show, col)) in [(eq_moved, color), (fx_on, GREEN)].into_iter().enumerate() {
-        if show {
-            ui.painter().circle_filled(Pos2::new(mode_r.center().x - 3.0 + i as f32 * 6.0, mode_r.bottom() - 4.0), 2.0, col);
+
+    // ON/OFF under the fader: switches what the fader controls fully off and back.
+    let mode = st.fader_mode;
+    let t = mode.target(core, ch);
+    let on_r = Rect::from_min_max(Pos2::new(r.left() + 2.0, r.bottom() - 36.0), Pos2::new(r.right() - 2.0, r.bottom()));
+    let is_on = (t.value - t.off).abs() > 0.005;
+    let mode_color = mode.color(ch);
+    let on_style = if is_on { Style::Fill(mode_color) } else { Style::Outline(Color32::from_gray(70), false) };
+    let resp = button(ui, on_r, if is_on { "ON" } else { "OFF" }, on_style, bold(13.0))
+        .on_hover_text(format!("{}: switch fully off, then back to where it was", mode.name()));
+    learnable(core, &resp, &t.addr);
+    if resp.clicked() && !core.learn {
+        if is_on {
+            st.fader_restore.insert((ch, mode), t.value);
+            act_f(core, &t.addr, t.off);
+        } else {
+            let back = st.fader_restore.remove(&(ch, mode)).filter(|v| (v - t.off).abs() > 0.005).unwrap_or(t.full);
+            act_f(core, &t.addr, back);
         }
     }
-    egui::Popup::from_toggle_button_response(&mode_btn)
-        .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
-        .width(170.0)
-        .show(|ui| channel_dropdown(ui, core, st, ch));
 
-    // Fader: level, or whichever EQ band / filter the dropdown selected.
-    let track = Rect::from_min_max(Pos2::new(r.left() + 4.0, pill.bottom() + 14.0), Pos2::new(r.right() - 4.0, r.bottom()));
-    let (value, addr, default) = mode.target(&p, &a);
+    // The fader: volume, an EQ band, the filter, a stem or the deck's tempo.
+    let track = Rect::from_min_max(Pos2::new(r.left() + 4.0, cue_r.bottom() + 12.0), Pos2::new(r.right() - 4.0, on_r.top() - 10.0));
     let level = mode == FaderMode::Level;
     let meter = if level { view.post_peak[0].max(view.post_peak[1]) } else { 0.0 };
-    let fader_color = if p.mute && level { Color32::from_gray(90) } else if level { color } else { LIGHT };
-    let (resp, new) = vfader(ui, track, value, fader_color, meter, !level);
+    let fader_color = if p.mute && level { Color32::from_gray(90) } else { mode_color };
+    let (resp, new) = vfader(ui, track, t.value, fader_color, meter, t.centred);
     if !level {
-        ui.painter().text(Pos2::new(track.center().x, track.top() + 14.0), Align2::CENTER_CENTER, mode.name().to_uppercase(), bold(11.0), LIGHT);
+        ui.painter().text(Pos2::new(track.center().x, track.top() + 14.0), Align2::CENTER_CENTER, mode.short(), bold(11.0), mode_color);
     }
-    let hover = if level {
-        format!("Volume · {} · Ctrl-drag: trim ({:+.1} dB) · double-click: unity", core.settings.fader_curve.label(), p.trim_db)
-    } else {
-        format!("{} · double-click: neutral · ▾ → Level to return to volume", mode.name())
+    let hover = match mode {
+        FaderMode::Level => format!("Volume · {} · Ctrl-drag: trim ({:+.1} dB) · double-click: unity", core.settings.fader_curve.label(), p.trim_db),
+        FaderMode::Drums | FaderMode::Bass | FaderMode::Vocals | FaderMode::Other if !core.snap.decks[ch].stems_ready => {
+            format!("{} level · applies once the stems are separated · double-click: full", mode.name())
+        }
+        _ => format!("{} · double-click: {}", mode.name(), if t.centred { "centre" } else { "full" }),
     };
     let resp = resp.on_hover_text(hover);
-    learnable(core, &resp, &addr);
+    learnable(core, &resp, &t.addr);
     if !core.learn {
         if let Some(v) = new {
             if level && ui.input(|i| i.modifiers.command) {
-                let t = (p.trim_db / 12.0 + 0.5 + (v - p.volume)).clamp(0.0, 1.0);
-                act_f(core, &a("Trim"), t);
+                let tr = (p.trim_db / 12.0 + 0.5 + (v - p.volume)).clamp(0.0, 1.0);
+                act_f(core, &a("Trim"), tr);
             } else {
-                act_f(core, &addr, v);
+                act_f(core, &t.addr, v);
             }
         }
         if resp.double_clicked() {
-            act_f(core, &addr, default);
+            act_f(core, &t.addr, t.full);
         }
     }
 }
 
-/// What a channel fader controls.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The toggle rows above the channel strips: what every channel fader controls. Mixer
+/// functions on the first row, stems and tempo on the second.
+fn mode_row(ui: &mut Ui, st: &mut UiState, r: Rect) {
+    let gap = 6.0;
+    let rh = (r.height() - gap) / 2.0;
+    for (row, modes) in FaderMode::ALL.chunks(5).enumerate() {
+        let w = (r.width() - gap * 4.0) / 5.0;
+        let long = modes.iter().all(|m| pill_width(ui, m.name(), 12.0) <= w + 6.0);
+        for (i, m) in modes.iter().enumerate() {
+            let br = Rect::from_min_size(Pos2::new(r.left() + i as f32 * (w + gap), r.top() + row as f32 * (rh + gap)), Vec2::new(w, rh));
+            let selected = st.fader_mode == *m;
+            let col = m.color(0);
+            let style = if selected { Style::Fill(if m.is_stem() { col } else { LIGHT }) } else { Style::Dark };
+            let label = if long { m.name() } else { m.short() };
+            let resp = button(ui, br, label, style, bold(12.0)).on_hover_text(format!("Channel faders control: {}", m.name()));
+            if m.is_stem() && !selected {
+                let mark = Rect::from_min_size(Pos2::new(br.left() + 8.0, br.bottom() - 4.0), Vec2::new(br.width() - 16.0, 2.0));
+                ui.painter().rect_filled(mark, CornerRadius::same(1), col);
+            }
+            if resp.clicked() {
+                st.fader_mode = *m;
+            }
+        }
+    }
+}
+
+/// What the channel faders control.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum FaderMode {
     Level,
     High,
     Mid,
     Low,
     Filter,
+    Drums,
+    Bass,
+    Vocals,
+    Other,
+    Tempo,
+}
+
+/// Where a fader mode points for one channel.
+pub struct FaderTarget {
+    pub value: f32,
+    pub addr: String,
+    /// Double-click / ON value.
+    pub full: f32,
+    /// OFF value.
+    pub off: f32,
+    /// Bipolar control drawn from the centre (EQ, filter, tempo).
+    pub centred: bool,
 }
 
 impl FaderMode {
-    pub const ALL: [FaderMode; 5] = [FaderMode::Level, FaderMode::High, FaderMode::Mid, FaderMode::Low, FaderMode::Filter];
+    pub const ALL: [FaderMode; 10] = [
+        FaderMode::Level,
+        FaderMode::High,
+        FaderMode::Mid,
+        FaderMode::Low,
+        FaderMode::Filter,
+        FaderMode::Drums,
+        FaderMode::Bass,
+        FaderMode::Vocals,
+        FaderMode::Other,
+        FaderMode::Tempo,
+    ];
 
     pub fn name(self) -> &'static str {
         match self {
-            FaderMode::Level => "Level",
-            FaderMode::High => "Hi",
+            FaderMode::Level => "Volume",
+            FaderMode::High => "High",
             FaderMode::Mid => "Mid",
             FaderMode::Low => "Low",
             FaderMode::Filter => "Filter",
+            FaderMode::Drums => "Drums",
+            FaderMode::Bass => "Bass",
+            FaderMode::Vocals => "Vocals",
+            FaderMode::Other => "Other",
+            FaderMode::Tempo => "Tempo",
         }
     }
 
-    fn short(self) -> &'static str {
+    pub fn short(self) -> &'static str {
         match self {
-            FaderMode::Filter => "FLT",
+            FaderMode::Level => "VOL",
             FaderMode::High => "HI",
             FaderMode::Mid => "MID",
             FaderMode::Low => "LOW",
-            FaderMode::Level => "LVL",
+            FaderMode::Filter => "FLT",
+            FaderMode::Drums => "DRM",
+            FaderMode::Bass => "BAS",
+            FaderMode::Vocals => "VOX",
+            FaderMode::Other => "OTH",
+            FaderMode::Tempo => "TMP",
         }
     }
 
-    /// (current value, address, double-click default)
-    fn target(self, p: &collective_engine::mixer::ChannelParams, a: &dyn Fn(&str) -> String) -> (f32, String, f32) {
+    fn stem(self) -> Option<usize> {
         match self {
-            FaderMode::Level => (p.volume, a("Volume"), 1.0),
-            FaderMode::High => (p.eq[2], a("EQ/High"), 0.5),
-            FaderMode::Mid => (p.eq[1], a("EQ/Mid"), 0.5),
-            FaderMode::Low => (p.eq[0], a("EQ/Low"), 0.5),
-            FaderMode::Filter => (p.cutoff, a("Filter1"), 0.5),
+            FaderMode::Drums => Some(0),
+            FaderMode::Bass => Some(1),
+            FaderMode::Vocals => Some(2),
+            FaderMode::Other => Some(3),
+            _ => None,
+        }
+    }
+
+    pub fn is_stem(self) -> bool {
+        self.stem().is_some()
+    }
+
+    /// Fader colour on channel `ch`: the deck's for volume and tempo, the stem's for stems.
+    pub fn color(self, ch: usize) -> Color32 {
+        match self {
+            FaderMode::Level | FaderMode::Tempo => DECK[ch],
+            _ => self.stem().map_or(LIGHT, |i| STEM[i]),
+        }
+    }
+
+    pub fn target(self, core: &Core, ch: usize) -> FaderTarget {
+        let n = ch + 1;
+        let mixer = |s: &str| format!("Mixer/CH{n}/{s}");
+        let p = &core.session.channels[ch].params;
+        let t = |value, addr, full, off, centred| FaderTarget { value, addr, full, off, centred };
+        match self {
+            FaderMode::Level => t(p.volume, mixer("Volume"), 1.0, 0.0, false),
+            FaderMode::High => t(p.eq[2], mixer("EQ/High"), 0.5, 0.0, true),
+            FaderMode::Mid => t(p.eq[1], mixer("EQ/Mid"), 0.5, 0.0, true),
+            FaderMode::Low => t(p.eq[0], mixer("EQ/Low"), 0.5, 0.0, true),
+            FaderMode::Filter => t(p.cutoff, mixer("Filter1"), 0.5, 0.5, true),
+            FaderMode::Tempo => t((core.snap.decks[ch].tempo_fader as f32 + 1.0) / 2.0, format!("Deck/{n}/Tempo"), 0.5, 0.5, true),
+            _ => {
+                let i = self.stem().unwrap();
+                let name = ["Drums", "Bass", "Vocals", "Other"][i];
+                t(core.snap.decks[ch].stem_gains[i], format!("Deck/{n}/Stem{name}Level"), 1.0, 0.0, false)
+            }
         }
     }
 }
 
-/// The ▾ next to CUE: chooses what the fader controls, plus the channel's effects.
-fn channel_dropdown(ui: &mut Ui, core: &mut Core, st: &mut UiState, ch: usize) {
+/// Effects for a channel (in the channel's right-click menu).
+fn effects_menu(ui: &mut Ui, core: &mut Core, st: &mut UiState, ch: usize) {
     let n = ch + 1;
     let a = |s: &str| format!("Mixer/CH{n}/{s}");
     let cm = core.session.channels[ch].clone();
-    let p = cm.params;
     let view = core.snap.channels[ch];
-    ui.label(egui::RichText::new(format!("CH {n} fader")).font(mono(11.0)).color(TEXT_DIM));
-    for mode in FaderMode::ALL {
-        let (value, _, default) = mode.target(&p, &a);
-        // Show where each control sits: level in dB terms is on the fader; EQ as +/-.
-        let state = match mode {
-            FaderMode::Level => String::new(),
-            _ if value <= 0.001 && mode != FaderMode::Filter => "  kill".into(),
-            _ if (value - default).abs() <= 0.01 => String::new(),
-            _ => format!("  {:+.0}%", (value - default) * 200.0),
-        };
-        if ui.selectable_label(st.fader_mode[ch] == mode, format!("{}{state}", mode.name())).clicked() {
-            st.fader_mode[ch] = mode;
-        }
-    }
-    ui.separator();
     let slots = cm.fx.slots.iter().filter(|s| s.is_some()).count();
     let open = ui.selectable_label(st.fx_open[ch], format!("Effects ({slots})…"));
     learnable(core, &open, &a("FX"));
     if open.clicked() && !core.learn {
         st.fx_open[ch] = !st.fx_open[ch];
+        ui.close();
     }
     if slots > 0 {
         if ui.selectable_label(cm.fx.bypass_all, "Bypass effects").clicked() {
@@ -488,9 +578,11 @@ fn channel_dropdown(ui: &mut Ui, core: &mut Core, st: &mut UiState, ch: usize) {
     }
 }
 
-fn channel_menu(ui: &mut Ui, core: &mut Core, ch: usize) {
+fn channel_menu(ui: &mut Ui, core: &mut Core, st: &mut UiState, ch: usize) {
     let n = ch + 1;
     let a = |s: &str| format!("Mixer/CH{n}/{s}");
+    effects_menu(ui, core, st, ch);
+    ui.separator();
     let p = core.session.channels[ch].params;
     if ui.selectable_label(p.mute, "Mute").clicked() {
         act_i(core, &a("Mute"), !p.mute as i32);

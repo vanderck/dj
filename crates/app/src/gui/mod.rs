@@ -31,8 +31,10 @@ pub struct InsertBrowser {
 
 pub struct UiState {
     pub fx_open: [bool; 4],
-    /// What each channel fader controls (chosen with the ▾ next to CUE).
-    pub fader_mode: [mixer::FaderMode; 4],
+    /// What the channel faders control (the toggle row above the strips).
+    pub fader_mode: mixer::FaderMode,
+    /// Value each channel/mode had before its ON/OFF button switched it off.
+    pub fader_restore: std::collections::HashMap<(usize, mixer::FaderMode), f32>,
     pub fx_edit: [[bool; 4]; 4],
     pub insert_browser: Option<InsertBrowser>,
     pub preset_name: [String; 4],
@@ -57,7 +59,8 @@ impl Default for UiState {
     fn default() -> Self {
         Self {
             fx_open: [false; 4],
-            fader_mode: [mixer::FaderMode::Level; 4],
+            fader_mode: mixer::FaderMode::Level,
+            fader_restore: Default::default(),
             fx_edit: [[false; 4]; 4],
             insert_browser: None,
             preset_name: Default::default(),
