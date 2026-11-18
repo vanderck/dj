@@ -13,6 +13,8 @@
 //! Real-time contract: after [`StemEngine::new`] returns, [`StemEngine::process`] and
 //! [`StemEngine::reset`] never allocate, lock or block.
 
+#[cfg(any(feature = "onnx", feature = "onnx-dynamic"))]
+pub mod demucs;
 mod engine;
 mod focus;
 mod model;

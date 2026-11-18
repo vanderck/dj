@@ -31,6 +31,17 @@ def _torch_export(wrapper, example, path: str) -> str:
         return "legacy"
 
 
+def parity_inputs(example: torch.Tensor) -> list:
+    """Inputs for the ONNX/PyTorch check. Real music has what loud noise lacks: silent bins
+    (digital silence, the empty top octave of an MP3) and very quiet ones."""
+    g = torch.Generator().manual_seed(0)
+    quiet = torch.randn(example.shape, generator=g) * 1e-3
+    lowpassed = example.clone()
+    lowpassed[..., example.shape[-1] * 3 // 4 :] = 0.0
+    tilt = example * torch.logspace(1, -5, example.shape[-1])  # loud lows, near-silent highs
+    return [example, quiet, lowpassed, tilt, torch.zeros_like(example)]
+
+
 def load_checkpoint(path: str) -> StemsNet:
     ckpt = torch.load(path, map_location="cpu")
     net = StemsNet(ModelConfig.from_dict(ckpt["model_config"]))
@@ -40,7 +51,7 @@ def load_checkpoint(path: str) -> StemsNet:
 
 def export(net: StemsNet, out: str, name: str, check: bool = True) -> dict:
     cfg = net.cfg
-    wrapper = ExportWrapper(net.eval().cpu())
+    wrapper = ExportWrapper(net.eval().cpu()).eval()
     example = torch.randn(1, cfg.context_frames, 4, cfg.num_bins) * 10.0
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -63,13 +74,16 @@ def export(net: StemsNet, out: str, name: str, check: bool = True) -> dict:
 
     if check:
         sess = ort.InferenceSession(model.SerializeToString(), providers=["CPUExecutionProvider"])
-        x = example.numpy().astype(np.float32)
-        (got,) = sess.run(None, {sess.get_inputs()[0].name: x})
-        with torch.no_grad():
-            want = wrapper(example).numpy()
-        err = float(np.abs(got - want).max())
-        if got.shape != (1, 4, cfg.num_bins) or err > 1e-4:
-            raise RuntimeError(f"ONNX/PyTorch mismatch: shape {got.shape}, max abs err {err:.2e}")
+        err = 0.0
+        for x in parity_inputs(example):
+            (got,) = sess.run(None, {sess.get_inputs()[0].name: x.numpy()})
+            with torch.no_grad():
+                want = wrapper(x).numpy()
+            if got.shape != (1, 4, cfg.num_bins) or not np.isfinite(got).all():
+                raise RuntimeError(f"ONNX model gives shape {got.shape} / non-finite masks")
+            err = max(err, float(np.abs(got - want).max()))
+        if err > 1e-3:
+            raise RuntimeError(f"ONNX/PyTorch mismatch: max abs err {err:.2e}")
         props["parity_max_abs_err"] = f"{err:.2e}"
 
     onnx.save(model, out)

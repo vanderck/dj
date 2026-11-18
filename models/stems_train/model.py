@@ -36,8 +36,13 @@ def compress_planes(planes: torch.Tensor, power: float, eps: float = 1e-8) -> to
     """Compress magnitude to |X|^power, keeping phase. planes [..., 4, F, N] (re/im pairs)."""
     shape = planes.shape
     p = planes.reshape(*shape[:-3], 2, 2, *shape[-2:])
-    mag = torch.sqrt(p[..., 0:1, :, :].pow(2) + p[..., 1:2, :, :].pow(2) + eps)
-    return (p * mag.pow(power - 1.0)).reshape(shape)
+    mag2 = p[..., 0:1, :, :].pow(2) + p[..., 1:2, :, :].pow(2)
+    # (mag2 + eps)^((power-1)/2), written without a tiny additive constant: the ONNX exporter's
+    # optimiser treats `x + 1e-8` as `x + 0` and drops it, and then silent bins give 0^-0.7 = inf
+    # -> NaN, and quiet bins large errors, which the band mixer spreads to every band.
+    half = (power - 1.0) / 2
+    scale = (mag2 * (1.0 / eps) + 1.0).pow(half) * (eps**half)
+    return (p * scale).reshape(shape)
 
 
 class ChannelNorm(nn.Module):
