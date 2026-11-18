@@ -213,28 +213,26 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
     let k = ((r.bottom() - (r.top() + hh + 12.0)) / base).clamp(if dense { 0.55 } else { 1.0 }, 1.8);
     let y = r.top() + hh + 12.0;
     let bh = 52.0 * k;
-    let big_w = (w - 3.0 * gap) / 4.0;
+    // (The main cue is the first pad of the cue row.)
+    let big_w = (w - 2.0 * gap) / 3.0;
     let mut x = r.left();
     let mut big_btn = |ui: &mut Ui, label: &str, style: Style, wf: f32| -> egui::Response {
         let rr = Rect::from_min_size(Pos2::new(x, y), Vec2::new(big_w * wf, bh));
         x += big_w * wf + gap;
         button(ui, rr, label, style, bold(17.0 * k.min(1.35)))
     };
-    let resp = big_btn(ui, "Cue", Style::Outline(ORANGE, false), 0.86);
-    learnable(core, &resp, &a("Cue"));
-    cue_hold(core, &resp, &a("Cue"));
     let play_style = if v.playing { Style::Fill(color) } else if v.play_pending { Style::Outline(color, true) } else { Style::Outline(color, false) };
-    let resp = big_btn(ui, if v.playing { "Pause" } else if v.play_pending { "Wait…" } else { "Play" }, play_style, 0.86);
+    let resp = big_btn(ui, if v.playing { "Pause" } else if v.play_pending { "Wait…" } else { "Play" }, play_style, 1.0);
     learnable(core, &resp, &a("PlayPause"));
     if resp.clicked() {
         act_i(core, &a("PlayPause"), 1);
     }
-    let resp = big_btn(ui, "Sync", if v.sync { Style::Light } else { Style::Dark }, 1.14);
+    let resp = big_btn(ui, "Sync", if v.sync { Style::Light } else { Style::Dark }, 1.0);
     learnable(core, &resp, &a("TempoSync"));
     if resp.clicked() {
         act_i(core, &a("TempoSync"), 1);
     }
-    let resp = big_btn(ui, if is_master { "Master" } else { "Follow" }, if is_master { Style::Fill(RED) } else { Style::Dark }, 1.14);
+    let resp = big_btn(ui, if is_master { "Master" } else { "Follow" }, if is_master { Style::Fill(RED) } else { Style::Dark }, 1.0);
     learnable(core, &resp, &a("TempoMaster"));
     if resp.clicked() {
         act_i(core, &a("TempoMaster"), 1);
@@ -245,21 +243,39 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
     let y = y + bh + (if stems_on { 10.0 } else { 14.0 }) * k;
     // Pads take whatever height is left (rows below: stems 26+10+10, tempo 30+12, loops 30).
     let below = (if stems_on { 10.0 + 26.0 + 10.0 } else { 14.0 } + tempo_base + 30.0) * k;
-    let (cols, rows) = if dense { (8, 1) } else { (4, 2) };
+    // The cue row: the main cue first, then the hot cues that are set (empty ones are not
+    // shown), then one "+" pad to set the next free one. At most 9 pads.
+    let (cols, rows) = if dense { (9, 1) } else { (5, 2) };
     let ph = if dense { (r.bottom() - y - below).clamp(16.0, 40.0 * k) } else { ((r.bottom() - y - 8.0 - below) / 2.0).clamp(28.0, 46.0 * k) };
     let pgap = if dense { 6.0 } else { gap };
     let pw = (w - (cols - 1) as f32 * pgap) / cols as f32;
     // Narrow pads show just the number (the pad colour says the rest).
     let pad_labels = pw >= 80.0;
     let pad_font = if dense { 13.0 } else { 16.0 };
-    for i in 0..8 {
-        let rr = Rect::from_min_size(Pos2::new(r.left() + (i % cols) as f32 * (pw + pgap), y + (i / cols) as f32 * (ph + 8.0)), Vec2::new(pw, ph));
-        let set = v.hot_cues[i].is_some();
+    let slot = |k: usize| Rect::from_min_size(Pos2::new(r.left() + (k % cols) as f32 * (pw + pgap), y + (k / cols) as f32 * (ph + 8.0)), Vec2::new(pw, ph));
+    let rad = CornerRadius::same(8);
+
+    let cue_r = slot(0);
+    let resp = ui.allocate_rect(cue_r, Sense::click_and_drag()).on_hover_text("Main cue: hold to preview, click while paused to set");
+    let p = ui.painter();
+    p.rect_filled(cue_r, rad, if resp.hovered() { dim(ORANGE, 0.30) } else { dim(ORANGE, 0.18) });
+    p.rect_stroke(cue_r, rad, Stroke::new(1.5, ORANGE), egui::StrokeKind::Inside);
+    p.text(cue_r.center(), Align2::CENTER_CENTER, "Cue", bold(pad_font), TEXT);
+    learnable(core, &resp, &a("Cue"));
+    cue_hold(core, &resp, &a("Cue"));
+
+    let set: Vec<usize> = (0..8).filter(|&i| v.hot_cues[i].is_some()).collect();
+    let next_free = (0..8).find(|&i| v.hot_cues[i].is_none());
+    let mut shown: Vec<(usize, bool)> = set.iter().map(|&i| (i, true)).collect();
+    if let Some(f) = next_free {
+        shown.push((f, false));
+    }
+    for (k, (i, is_set)) in shown.into_iter().enumerate() {
+        let rr = slot(k + 1);
         let name = core.decks[d].info.as_ref().and_then(|x| x.cues[i].as_ref()).map(|c| c.name.clone()).unwrap_or_default();
         let resp = ui.allocate_rect(rr, Sense::click_and_drag());
         let p = ui.painter();
-        let rad = CornerRadius::same(8);
-        if set {
+        if is_set {
             let c = CUE[i];
             p.rect_filled(rr, rad, if resp.hovered() { dim(c, 0.42) } else { dim(c, 0.32) });
             p.rect_stroke(rr, rad, Stroke::new(1.5, dim(c, 0.85)), egui::StrokeKind::Inside);
@@ -271,16 +287,12 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
                 p.text(rr.center(), Align2::CENTER_CENTER, format!("{}", i + 1), bold(pad_font), TEXT);
             }
         } else {
-            p.rect_filled(rr, rad, Color32::from_rgb(0x17, 0x17, 0x1b));
+            // "+": set hot cue `i` (the first free one) here.
             p.rect_stroke(rr, rad, Stroke::new(1.0, Color32::from_rgb(0x2a, 0x2a, 0x30)), egui::StrokeKind::Inside);
-            if pad_labels {
-                p.text(Pos2::new(rr.left() + 14.0, rr.center().y), Align2::LEFT_CENTER, format!("{}", i + 1), bold(pad_font), TEXT_FAINT);
-                p.text(Pos2::new(rr.left() + 32.0, rr.center().y), Align2::LEFT_CENTER, "empty", sans(pad_font - 1.0), TEXT_FAINT);
-            } else {
-                p.text(rr.center(), Align2::CENTER_CENTER, format!("{}", i + 1), bold(pad_font), TEXT_FAINT);
-            }
+            p.text(rr.center(), Align2::CENTER_CENTER, "+", bold(pad_font + 2.0), if resp.hovered() { TEXT } else { TEXT_FAINT });
         }
-        let resp = resp.on_hover_text("Click: set / launch · Ctrl-click: delete · Alt-click: loop to next cue");
+        let tip = if is_set { "Click: launch · Ctrl-click: delete · Alt-click: loop to next cue" } else { "Set a hot cue at the playhead" };
+        let resp = resp.on_hover_text(tip);
         let addr = a(&format!("Cue{}", i + 1));
         learnable(core, &resp, &addr);
         if core.learn {
@@ -292,7 +304,7 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
             act_i(core, &a("DeleteCue"), i as i32 + 1);
         } else if resp.clicked() && mods.alt {
             act_i(core, &a("SetCueLoop"), i as i32 + 1);
-        } else if v.momentary_cues && set {
+        } else if v.momentary_cues && is_set {
             if resp.is_pointer_button_down_on() && ui.input(|i| i.pointer.primary_pressed()) {
                 act(core, &hc, &[rosc::OscType::Int(i as i32 + 1), rosc::OscType::Int(1)]);
             }

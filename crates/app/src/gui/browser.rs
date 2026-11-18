@@ -102,9 +102,8 @@ pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect) {
     let info = match core.status.back() {
         Some((t, m)) if t.elapsed().as_secs() < 6 => m.clone(),
         _ => format!(
-            "{} tracks · DSP {:.0}% · {} Hz{}",
+            "{} tracks · {} Hz{}",
             core.library.len(),
-            core.snap.cpu_load * 100.0,
             core.sample_rate as u32,
             if core.library_scanning { " · scanning…" } else { "" }
         ),
