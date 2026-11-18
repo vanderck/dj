@@ -39,7 +39,7 @@ pub struct UiState {
     pub dense: bool,
     /// Unsnapped tempo fader position during a drag (snapping would swallow small moves).
     pub tempo_drag: Option<f32>,
-    /// A fader function shown for a moment because MIDI changed it: (mode, channel, since).
+    /// The channel whose fader function MIDI just changed, outlined for a moment: (mode, channel, since).
     pub fader_popup: Option<(mixer::FaderMode, usize, Instant)>,
     /// The `Core::midi_touched` time already handled.
     pub midi_seen: Option<Instant>,

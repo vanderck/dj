@@ -357,20 +357,22 @@ fn strip(ui: &mut Ui, core: &mut Core, st: &mut UiState, ch: usize, rect: Rect) 
     }
 }
 
-/// How long a fader function stays shown after MIDI last changed it.
+/// How long the channel a MIDI control moved stays outlined.
 const POPUP_SECS: f32 = 2.0;
 
-/// The fader function on screen: one MIDI just changed, else the one chosen with the toggles.
+/// The fader function on screen (the last one chosen with the toggles or changed over MIDI).
 fn shown_mode(st: &UiState) -> FaderMode {
-    st.fader_popup.map_or(st.fader_mode, |(m, _, _)| m)
+    st.fader_mode
 }
 
-/// Pop in the fader function a MIDI mapping just changed; drop it again after `POPUP_SECS`.
+/// Switch the faders to the function a MIDI mapping just changed (it stays), and outline that
+/// channel for `POPUP_SECS`.
 fn midi_popup(ui: &Ui, core: &Core, st: &mut UiState) {
     if let Some((addr, at)) = &core.midi_touched {
         if st.midi_seen != Some(*at) {
             st.midi_seen = Some(*at);
             if let Some((mode, ch)) = fader_function(addr) {
+                st.fader_mode = mode;
                 st.fader_popup = Some((mode, ch, *at));
             }
         }
