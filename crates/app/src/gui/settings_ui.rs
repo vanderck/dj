@@ -386,17 +386,6 @@ fn settings(ui: &mut Ui, core: &mut Core, st: &mut UiState) {
     });
     ui.label(RichText::new("Each plugin is scanned in a separate process, so a broken plugin is listed as failed instead of crashing the app.").small().weak());
 
-    section(ui, "APPEARANCE");
-    ui.horizontal(|ui| {
-        if ui.checkbox(&mut core.settings.light_theme, "Light theme").changed() {
-            super::setup_style(ui.ctx(), core.settings.light_theme, core.settings.ui_scale);
-        }
-        ui.label("Scale");
-        if ui.add(egui::Slider::new(&mut core.settings.ui_scale, 0.5..=1.5)).drag_stopped() {
-            super::setup_style(ui.ctx(), core.settings.light_theme, core.settings.ui_scale);
-        }
-    });
-
     if changed_engine {
         let s = core.settings.clone();
         core.send(collective_engine::Command::FaderCurve(s.fader_curve));

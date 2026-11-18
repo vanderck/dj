@@ -130,7 +130,7 @@ pub fn run() {
             Box::new(move |cc| {
                 let (host, core) = slot.take().unwrap_or_else(crate::boot);
                 install_fonts(&cc.egui_ctx);
-                setup_style(&cc.egui_ctx, core.settings.light_theme, core.settings.ui_scale);
+                set_visuals(&cc.egui_ctx);
                 Ok(Box::new(App { core, _host: host, ui: UiState::default(), last_save: Instant::now() }))
             }),
         );
@@ -140,10 +140,6 @@ pub fn run() {
         }
     }
     eprintln!("No usable graphics backend. Use --headless for OSC/MIDI-only operation.");
-}
-
-pub fn setup_style(ctx: &egui::Context, _light: bool, scale: f32) {
-    set_visuals(ctx, scale);
 }
 
 /// Register a control for MIDI learn: clicking it while learning selects it.
@@ -198,14 +194,14 @@ impl App {
         }
     }
 
-    /// Scale the whole interface with the window from a 1600×1000 baseline.
+    /// Fit the interface to the window: the layout is designed for 1600×1000 points.
     fn autoscale(&self, ctx: &egui::Context) {
         let (size, native) = ctx.input(|i| (i.viewport_rect().size() * i.pixels_per_point(), i.viewport().native_pixels_per_point.unwrap_or(1.0)));
         if size.x <= 0.0 || size.y <= 0.0 {
             return;
         }
         let fit = (size.x / native / 1600.0).min(size.y / native / 1000.0).clamp(0.6, 2.0);
-        let want = (native * fit * self.core.settings.ui_scale).clamp(0.5, 3.0);
+        let want = (native * fit).clamp(0.5, 3.0);
         if (ctx.pixels_per_point() - want).abs() > 0.01 {
             ctx.set_pixels_per_point(want);
         }

@@ -211,7 +211,7 @@ pub fn mini_slider(ui: &mut Ui, rect: Rect, value: &mut f32, default: f32, label
     (r, lresp.clicked())
 }
 
-pub fn set_visuals(ctx: &egui::Context, scale: f32) {
+pub fn set_visuals(ctx: &egui::Context) {
     let mut v = egui::Visuals::dark();
     v.panel_fill = BG;
     v.window_fill = CARD;
@@ -228,5 +228,4 @@ pub fn set_visuals(ctx: &egui::Context, scale: f32) {
     v.window_corner_radius = CornerRadius::same(12);
     v.override_text_color = Some(TEXT);
     ctx.set_visuals(v);
-    ctx.set_pixels_per_point(scale.clamp(0.5, 2.0));
 }
