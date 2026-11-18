@@ -191,6 +191,8 @@ pub struct Core {
     pub stems: crate::stems::StemsWorker,
     pub learn: bool,
     pub last_touched: Option<String>,
+    /// Last address a MIDI mapping changed, and when (the mixer shows that fader function).
+    pub midi_touched: Option<(String, std::time::Instant)>,
     pub status: VecDeque<(Instant, String)>,
     pub osc_in: Option<Receiver<(String, Vec<OscType>)>>,
     pub osc_out: Option<crate::osc::Sender>,
@@ -265,6 +267,7 @@ impl Core {
             stems: crate::stems::StemsWorker::new(),
             learn: false,
             last_touched: None,
+            midi_touched: None,
             status: VecDeque::new(),
             osc_in: None,
             osc_out: None,
@@ -1778,6 +1781,7 @@ impl Core {
 
         let maps: Vec<MidiMapping> = self.profile.mappings.iter().filter(|m| m.source == src).cloned().collect();
         for m in maps {
+            self.midi_touched = Some((m.address.clone(), std::time::Instant::now()));
             let kind = addr_kind(&m.address);
             let v = if m.invert { 1.0 - value } else { value };
             match (m.mode, kind) {

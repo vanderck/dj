@@ -31,6 +31,7 @@ pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect) {
     if core.external_routing() {
         return external_panel(ui, core, st, r);
     }
+    midi_popup(ui, core, st);
     mode_row(ui, st, Rect::from_min_size(r.min, Vec2::new(r.width(), 70.0)));
 
     let strips = Rect::from_min_max(Pos2::new(r.left(), r.top() + 82.0), r.right_bottom());
@@ -278,7 +279,11 @@ fn strip(ui: &mut Ui, core: &mut Core, st: &mut UiState, ch: usize, rect: Rect) 
     }
 
     // ON/OFF under the fader: switches what the fader controls fully off and back.
-    let mode = st.fader_mode;
+    let mode = shown_mode(st);
+    // The channel a MIDI control just moved stands out while its function pops in.
+    if st.fader_popup.is_some_and(|(_, c, _)| c == ch) {
+        ui.painter().rect_stroke(rect.expand(1.5), CornerRadius::same(11), Stroke::new(2.0, mode.color(ch)), egui::StrokeKind::Outside);
+    }
     let t = mode.target(core, ch);
     let on_r = Rect::from_min_max(Pos2::new(r.left() + 2.0, r.bottom() - 36.0), Pos2::new(r.right() - 2.0, r.bottom()));
     let is_on = (t.value - t.off).abs() > 0.005;
@@ -352,6 +357,69 @@ fn strip(ui: &mut Ui, core: &mut Core, st: &mut UiState, ch: usize, rect: Rect) 
     }
 }
 
+/// How long a fader function stays shown after MIDI last changed it.
+const POPUP_SECS: f32 = 2.0;
+
+/// The fader function on screen: one MIDI just changed, else the one chosen with the toggles.
+fn shown_mode(st: &UiState) -> FaderMode {
+    st.fader_popup.map_or(st.fader_mode, |(m, _, _)| m)
+}
+
+/// Pop in the fader function a MIDI mapping just changed; drop it again after `POPUP_SECS`.
+fn midi_popup(ui: &Ui, core: &Core, st: &mut UiState) {
+    if let Some((addr, at)) = &core.midi_touched {
+        if st.midi_seen != Some(*at) {
+            st.midi_seen = Some(*at);
+            if let Some((mode, ch)) = fader_function(addr) {
+                st.fader_popup = Some((mode, ch, *at));
+            }
+        }
+    }
+    // `since` moves on with every new fader-function change, so it stays up while a knob turns.
+    if let Some((_, _, since)) = st.fader_popup {
+        if since.elapsed().as_secs_f32() > POPUP_SECS {
+            st.fader_popup = None;
+        } else {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+        }
+    }
+}
+
+/// The fader function and channel (0-based) an address controls, if any:
+/// `Mixer/CH2/EQ/Mid` -> (Mid, 1), `Deck/1/StemVocals` -> (Vocals, 0), `Deck/3/Tempo` -> (Tempo, 2).
+pub fn fader_function(addr: &str) -> Option<(FaderMode, usize)> {
+    let a = addr.trim_start_matches('/').to_ascii_lowercase();
+    let parts: Vec<&str> = a.split('/').collect();
+    let ch = |s: &str| s.parse::<usize>().ok().filter(|n| (1..=4).contains(n)).map(|n| n - 1);
+    match parts.as_slice() {
+        ["mixer", c, rest @ ..] => {
+            let ch = ch(c.strip_prefix("ch")?)?;
+            let mode = match rest {
+                ["volume"] => FaderMode::Level,
+                ["eq", "high"] => FaderMode::High,
+                ["eq", "mid"] => FaderMode::Mid,
+                ["eq", "low"] => FaderMode::Low,
+                ["filter1"] => FaderMode::Filter,
+                _ => return None,
+            };
+            Some((mode, ch))
+        }
+        ["deck", n, what] => {
+            let ch = ch(n)?;
+            let mode = match what.trim_end_matches("level") {
+                "stemdrums" => FaderMode::Drums,
+                "stembass" => FaderMode::Bass,
+                "stemvocals" => FaderMode::Vocals,
+                "stemother" => FaderMode::Other,
+                "tempo" | "temposlider" => FaderMode::Tempo,
+                _ => return None,
+            };
+            Some((mode, ch))
+        }
+        _ => None,
+    }
+}
+
 /// Tempo fader position (0..1, centre = 0 %) snapped so the speed change is a multiple of
 /// `step_pct` percent (0 = no snapping).
 pub fn snap_tempo(v: f32, range: collective_engine::deck::TempoRange, step_pct: f32) -> f32 {
@@ -374,7 +442,7 @@ fn mode_row(ui: &mut Ui, st: &mut UiState, r: Rect) {
         let long = modes.iter().all(|m| pill_width(ui, m.name(), 12.0) <= w + 6.0);
         for (i, m) in modes.iter().enumerate() {
             let br = Rect::from_min_size(Pos2::new(r.left() + i as f32 * (w + gap), r.top() + row as f32 * (rh + gap)), Vec2::new(w, rh));
-            let selected = st.fader_mode == *m;
+            let selected = shown_mode(st) == *m;
             let col = m.color(0);
             let style = if selected { Style::Fill(if m.is_stem() { col } else { LIGHT }) } else { Style::Dark };
             let label = if long { m.name() } else { m.short() };
@@ -615,7 +683,21 @@ fn master_strip(ui: &mut Ui, core: &mut Core, rect: Rect) {
 
 #[cfg(test)]
 mod tests {
-    use super::snap_tempo;
+    use super::{fader_function, snap_tempo, FaderMode};
+
+    #[test]
+    fn midi_addresses_map_to_fader_functions() {
+        assert_eq!(fader_function("Mixer/CH2/EQ/Mid"), Some((FaderMode::Mid, 1)));
+        assert_eq!(fader_function("/Mixer/CH1/Volume"), Some((FaderMode::Level, 0)));
+        assert_eq!(fader_function("Mixer/CH4/Filter1"), Some((FaderMode::Filter, 3)));
+        assert_eq!(fader_function("Deck/1/StemVocals"), Some((FaderMode::Vocals, 0)));
+        assert_eq!(fader_function("Deck/3/StemBassLevel"), Some((FaderMode::Bass, 2)));
+        assert_eq!(fader_function("Deck/2/TempoSlider"), Some((FaderMode::Tempo, 1)));
+        assert_eq!(fader_function("Deck/2/PlayPause"), None);
+        assert_eq!(fader_function("Mixer/CH1/Cue"), None);
+        assert_eq!(fader_function("Mixer/CH9/Volume"), None);
+    }
+
     use collective_engine::deck::TempoRange;
 
     #[test]

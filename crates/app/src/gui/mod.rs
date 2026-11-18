@@ -39,6 +39,10 @@ pub struct UiState {
     pub dense: bool,
     /// Unsnapped tempo fader position during a drag (snapping would swallow small moves).
     pub tempo_drag: Option<f32>,
+    /// A fader function shown for a moment because MIDI changed it: (mode, channel, since).
+    pub fader_popup: Option<(mixer::FaderMode, usize, Instant)>,
+    /// The `Core::midi_touched` time already handled.
+    pub midi_seen: Option<Instant>,
     pub fx_edit: [[bool; 4]; 4],
     pub insert_browser: Option<InsertBrowser>,
     pub preset_name: [String; 4],
@@ -65,6 +69,8 @@ impl Default for UiState {
             fader_restore: Default::default(),
             dense: false,
             tempo_drag: None,
+            fader_popup: None,
+            midi_seen: None,
             fx_edit: [[false; 4]; 4],
             insert_browser: None,
             preset_name: Default::default(),
