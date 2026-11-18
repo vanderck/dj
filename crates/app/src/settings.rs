@@ -96,6 +96,9 @@ pub struct Settings {
     pub stems_model: Option<PathBuf>,
     /// Disk cache for separated stems (MB); 0 disables it.
     pub stems_cache_mb: u64,
+    /// HT-Demucs ONNX model (best quality, about 1-3 min per track; results become prepared stems).
+    /// `None` = off. See `stems::demucs_files` for HT-Demucs FT.
+    pub stems_demucs: Option<PathBuf>,
     /// External separator command (e.g. the Demucs add-on), tried before the model; empty = off.
     /// See `stems::external` for the protocol.
     pub stems_external: String,
@@ -141,6 +144,7 @@ impl Default for Settings {
             stems_enabled: true,
             stems_model: None,
             stems_cache_mb: 4096,
+            stems_demucs: None,
             stems_external: String::new(),
             stems_prepared_dir: None,
             external_mixer: false,

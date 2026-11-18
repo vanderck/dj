@@ -183,7 +183,7 @@ pub struct Core {
     pub browser_query: String,
     loader_tx: Sender<LoadJob>,
     loader_rx: Receiver<LoadResult>,
-    stems: crate::stems::StemsWorker,
+    pub stems: crate::stems::StemsWorker,
     pub learn: bool,
     pub last_touched: Option<String>,
     pub status: VecDeque<(Instant, String)>,
@@ -486,6 +486,7 @@ impl Core {
                 path: lt.path.clone(),
                 model: crate::stems::resolve_model(self.settings.stems_model.as_deref()),
                 cache,
+                demucs: self.settings.stems_demucs.clone(),
                 external: self.settings.stems_external(),
                 prepared: Some(self.settings.stems_prepared_dir()),
             });

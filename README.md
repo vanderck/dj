@@ -72,7 +72,17 @@ Settings → Stems), so reloading a track is instant.
 variable). Without one, a low-quality placeholder separator is used and the deck says so in red.
 Models are trained with the pipeline in the stems repository.
 
-**External separator (e.g. Demucs).** Settings → Stems → *External separator* takes any command
+**HT-Demucs (best quality).** Settings → Stems → *Download HT-Demucs* (or
+`collective --download-demucs`) fetches the HT-Demucs ONNX conversion made by the
+[Mixxx project](https://github.com/mixxxdj/demucs) (300 MB) and uses it from then on: no Python
+needed. A track is separated when it loads (about 1–3 minutes; the deck plays the full mix
+meanwhile) and its stems are kept in the *Prepared stems* folder, so each track is separated
+once; `collective --prepare-stems FOLDER` does a whole crate in advance. HT-Demucs FT (four
+models, slightly better, 4× slower) works too: select any one of its four `name.<stem>.onnx`
+files. The Demucs weights are trained partly on non-commercial data, so Collective downloads
+them on request and never ships them.
+
+**External separator.** Settings → Stems → *External separator* takes any command
 that turns a WAV file into stem files; Collective tries it before the model and falls back to
 the model if it fails. Its stems are kept in the *Prepared stems* folder (never cleaned up
 automatically; about 32 MB per minute), so each track is separated once. Prepare a crate ahead of
@@ -86,8 +96,7 @@ Protocol: Collective runs `<command> INPUT.wav OUTPUT_DIR` (through `sh`); INPUT
 decoded track (32-bit float stereo, the track's own sample rate). The command writes
 `OUTPUT_DIR/{drums,bass,vocals,other}.wav` (any rate, mono or stereo, PCM or float; `other` is
 optional) and exits 0. It may print `progress 0.42` and `name …` lines. The stems repository has
-a Demucs add-on, `models/tools/demucs_stems.py`. Demucs' pretrained weights are for
-non-commercial use, which is why it is an add-on and not part of Collective.
+a Python Demucs add-on, `models/tools/demucs_stems.py`.
 
 **Build.** The default `stems-onnx` feature downloads ONNX Runtime at build time and links it
 statically. Where that download is blocked, build with

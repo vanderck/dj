@@ -692,6 +692,7 @@ dependencies = [
  "serde",
  "serde_json",
  "stems-core",
+ "ureq",
 ]
 
 [[package]]
@@ -3800,7 +3801,7 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 [[package]]
 name = "stems-core"
 version = "0.1.0"
-source = "git+https://github.com/vanderck/stems?rev=8b728e31c608bdccde8b04082b74442135a25566#8b728e31c608bdccde8b04082b74442135a25566"
+source = "git+https://github.com/vanderck/stems?rev=cb42d15681f317f6036429ff9e75e3b848b5ab79#cb42d15681f317f6036429ff9e75e3b848b5ab79"
 dependencies = [
  "ort",
  "realfft",

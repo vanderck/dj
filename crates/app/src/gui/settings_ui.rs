@@ -282,6 +282,50 @@ fn settings(ui: &mut Ui, core: &mut Core, st: &mut UiState) {
             (None, None) => "No model: a low-quality placeholder separator is used.".to_string(),
         };
         ui.label(RichText::new(note).small().weak());
+        // HT-Demucs: best quality, offline, downloaded on request.
+        let mut demucs = core.settings.stems_demucs.as_ref().map(|p| p.display().to_string()).unwrap_or_default();
+        ui.horizontal(|ui| {
+            ui.label("Demucs model");
+            let edit = egui::TextEdit::singleline(&mut demucs).hint_text("off: download it, or a path to a Demucs .onnx").desired_width(300.0);
+            if ui.add(edit).changed() {
+                let d = demucs.trim();
+                core.settings.stems_demucs = (!d.is_empty()).then(|| d.into());
+            }
+        });
+        let download = core.stems.demucs_download.as_ref().map(|d| d.state());
+        match download {
+            Some(crate::stems::DownloadState::Running { done, total }) => {
+                let mb = |b: u64| b as f64 / 1e6;
+                let text = match total {
+                    Some(t) => format!("Downloading HT-Demucs… {:.0} of {:.0} MB", mb(done), mb(t)),
+                    None => format!("Downloading HT-Demucs… {:.0} MB", mb(done)),
+                };
+                ui.label(RichText::new(text).small());
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
+            }
+            Some(crate::stems::DownloadState::Done(path)) => {
+                core.settings.stems_demucs = Some(path);
+                core.stems.demucs_download = None;
+            }
+            other => {
+                if let Some(crate::stems::DownloadState::Failed(e)) = other {
+                    ui.label(RichText::new(format!("Download failed: {e}")).small().color(egui::Color32::from_rgb(230, 90, 80)));
+                }
+                let missing = core.settings.stems_demucs.as_ref().is_none_or(|p| !p.exists());
+                if missing && ui.button("Download HT-Demucs (300 MB)").clicked() {
+                    core.stems.demucs_download =
+                        Some(crate::stems::Download::start(crate::stems::DEMUCS_URL, crate::stems::default_demucs_path()));
+                }
+            }
+        }
+        ui.label(
+            RichText::new(
+                "Best-quality stems, made when a track loads (about 1–3 minutes; the deck plays the full mix meanwhile) and kept in the prepared-stems folder. HT-Demucs as converted by the Mixxx project; its weights are for non-commercial use only.",
+            )
+            .small()
+            .weak(),
+        );
+
         let mut ext = core.settings.stems_external.clone();
         ui.horizontal(|ui| {
             ui.label("External separator");
