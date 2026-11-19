@@ -36,8 +36,6 @@ pub struct UiState {
     pub fader_mode: [mixer::FaderMode; 4],
     /// Group settings a fader popup's "turn off" switch saved, to restore them.
     pub group_restore: std::collections::HashMap<(usize, mixer::Group), Vec<f32>>,
-    /// Value each channel/mode had before its ON/OFF button switched it off.
-    pub fader_restore: std::collections::HashMap<(usize, mixer::FaderMode), f32>,
     /// Controller layout this frame (see `Settings::layout`): slim cue pads, four full decks.
     pub dense: bool,
     /// Unsnapped tempo fader position during a drag (snapping would swallow small moves).
@@ -72,7 +70,6 @@ impl Default for UiState {
             fx_open: [false; 4],
             fader_mode: [mixer::FaderMode::Level; 4],
             group_restore: Default::default(),
-            fader_restore: Default::default(),
             dense: false,
             tempo_drag: None,
             fader_popup: None,
@@ -229,6 +226,11 @@ impl eframe::App for App {
             let lanes_h = (h * 0.25).clamp(120.0, 360.0);
             let browser_h = (h * 0.26).clamp(150.0, 420.0);
             let lanes = Rect::from_min_size(area.min, Vec2::new(area.width(), lanes_h));
+            self.ui.dense = match self.core.settings.layout {
+                crate::settings::LayoutMode::Controller => true,
+                crate::settings::LayoutMode::Touch => false,
+                crate::settings::LayoutMode::Auto => self.core.midi.has_controller(),
+            };
             waves::show(ui, &mut self.core, &mut self.ui, lanes);
 
             let mid = Rect::from_min_max(Pos2::new(area.left(), lanes.bottom() + gap), Pos2::new(area.right(), area.bottom() - browser_h - gap));
@@ -236,11 +238,6 @@ impl eframe::App for App {
             let mixer_w = if self.core.external_routing() { 240.0 } else { (area.width() * 0.31).clamp(360.0, 640.0) };
             let deck_w = (area.width() - mixer_w - 2.0 * gap) / 2.0;
             let four = self.core.deck_count() >= 4;
-            self.ui.dense = match self.core.settings.layout {
-                crate::settings::LayoutMode::Controller => true,
-                crate::settings::LayoutMode::Touch => false,
-                crate::settings::LayoutMode::Auto => self.core.midi.has_controller(),
-            };
             // One row: badge, title, key, Swap, Cue, Play, Sync.
             let compact_h = 62.0;
             for side in 0..2 {

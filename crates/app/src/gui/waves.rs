@@ -17,7 +17,9 @@ pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect) {
     let n = core.deck_count();
     let focused: Vec<usize> = st.focus.to_vec();
     // Focused (big) decks get tall lanes.
-    let weights: Vec<f32> = (0..n).map(|d| if n <= 2 || focused.contains(&d) { 3.0 } else { 1.0 }).collect();
+    // Equal lanes when every deck is shown in full (controller layout); otherwise the two big
+    // decks get the large lanes.
+    let weights: Vec<f32> = (0..n).map(|d| if n <= 2 || st.dense || focused.contains(&d) { 3.0 } else { 1.0 }).collect();
     let prog_h = 6.0;
     let gap = 6.0;
     let total_w: f32 = weights.iter().sum();
