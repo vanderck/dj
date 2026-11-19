@@ -228,7 +228,9 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
     let y = r.top() + hh + 12.0;
     let bh = 52.0 * k;
     // (The main cue is the first pad of the cue row; dj picks the tempo master itself.)
-    let big_w = (w - gap) / 2.0;
+    // A third button, Mix, while this deck waits silently in a loop to be mixed in.
+    let mixable = mix_shown(core, d);
+    let big_w = if mixable { (w - 2.0 * gap) / 3.0 } else { (w - gap) / 2.0 };
     let mut x = r.left();
     let mut big_btn = |ui: &mut Ui, label: &str, style: Style, wf: f32| -> egui::Response {
         let rr = Rect::from_min_size(Pos2::new(x, y), Vec2::new(big_w * wf, bh));
@@ -245,6 +247,10 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
     learnable(core, &resp, &a("TempoSync"));
     if resp.clicked() {
         act_i(core, &a("TempoSync"), 1);
+    }
+    if mixable {
+        let rr = Rect::from_min_size(Pos2::new(x, y), Vec2::new(big_w, bh));
+        mix_button(ui, core, d, rr, bold(17.0 * k.min(1.35)));
     }
 
     // ---------------------------------------------------------- hot cues
@@ -564,6 +570,10 @@ pub fn compact(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: R
     let play_r = next(bw + 4.0);
     let cue_r = next(bw - 6.0);
     let swap_r = next(bw + 8.0);
+    let mix_r = (!sampler && mix_shown(core, d)).then(|| next(bw + 34.0));
+    if let Some(mix_r) = mix_r {
+        mix_button(ui, core, d, mix_r, bold(14.0));
+    }
     let resp = button(ui, swap_r, "⇄ Swap", Style::Outline(Color32::from_gray(110), false), bold(14.0)).on_hover_text("Show this deck in the large view");
     if resp.clicked() {
         st.focus[d % 2] = d;
@@ -590,7 +600,7 @@ pub fn compact(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: R
     if resp.clicked() {
         act_i(core, &play_addr, 1);
     }
-    let chip = Rect::from_min_size(Pos2::new(swap_r.left() - 48.0, r.top() + 7.0), Vec2::new(40.0, 24.0));
+    let chip = Rect::from_min_size(Pos2::new(mix_r.unwrap_or(swap_r).left() - 48.0, r.top() + 7.0), Vec2::new(40.0, 24.0));
     if !sampler {
         let key = core.key_text(core.deck_key(d));
         if !key.is_empty() {
@@ -778,4 +788,61 @@ fn sampler(ui: &mut Ui, core: &mut Core, d: usize, rect: Rect) {
     }
     let steps_txt = format!("Lane {} · {} steps", sel + 1, lp.steps);
     ui.painter().text(Pos2::new(r.right(), cy + 44.0), Align2::RIGHT_CENTER, steps_txt, sans(11.0), TEXT_DIM);
+}
+
+/// Whether deck `d` shows the Mix button: it can be mixed in now, or its mix is under way.
+fn mix_shown(core: &Core, d: usize) -> bool {
+    core.automix.as_ref().is_some_and(|m| m.plan.incoming == d) || core.mix_target(d).is_some()
+}
+
+/// Mix: bring this deck (silent, looping at a cue) into the playing track. Asks "Now" or
+/// "Best" unless the playing track ends within a minute; while a mix waits or runs, shows its
+/// state and a tap cancels it.
+fn mix_button(ui: &mut Ui, core: &mut Core, d: usize, rect: Rect, font: egui::FontId) {
+    if let Some(m) = core.automix.as_ref().filter(|m| m.plan.incoming == d) {
+        let beat = core.snap.decks[m.plan.outgoing].beat;
+        let bars = ((m.plan.start_beat - beat) / 4.0).ceil();
+        let label = if bars > 0.0 { format!("Mix in {bars:.0}") } else { "Mixing…".to_string() };
+        let resp = button(ui, rect, &label, Style::Fill(GREEN), font).on_hover_text(format!("{} — tap to cancel", m.plan.reason));
+        if resp.clicked() && !core.learn {
+            core.cancel_mix();
+        }
+        return;
+    }
+    let Some(out) = core.mix_target(d) else { return };
+    let resp = button(ui, rect, "Mix", Style::Outline(GREEN, true), font)
+        .on_hover_text(format!("Mix into deck {} (syncs this deck)", out + 1));
+    if core.mix_is_urgent(out) {
+        // Less than a minute of the playing track left: no question, mix now.
+        if resp.clicked() && !core.learn {
+            let plan = core.plan_now(d, out);
+            core.start_mix(plan);
+        }
+        return;
+    }
+    egui::Popup::from_toggle_button_response(&resp)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .width(300.0)
+        .show(|ui| {
+            ui.label(egui::RichText::new(format!("MIX INTO DECK {}", out + 1)).font(mono(11.0)).color(TEXT_DIM));
+            let now = core.plan_now(d, out);
+            let best = core.plan_best(d, out);
+            let bars_away = |p: &crate::core::MixPlan| ((p.start_beat - core.snap.decks[out].beat) / 4.0).ceil().max(0.0);
+            let options = [
+                ("Now", format!("{:.0} bars from the next bar · vocals out", now.length_beats / 4.0), now),
+                ("Best", format!("in {:.0} bars · {}", bars_away(&best), best.reason), best),
+            ];
+            for (title, detail, plan) in options {
+                let (r, _) = ui.allocate_exact_size(Vec2::new(300.0, 54.0), Sense::hover());
+                let resp = button(ui, r, "", Style::Dark, bold(15.0));
+                let p = ui.painter();
+                p.text(Pos2::new(r.left() + 14.0, r.top() + 17.0), Align2::LEFT_CENTER, title, bold(16.0), TEXT);
+                p.text(Pos2::new(r.left() + 14.0, r.bottom() - 15.0), Align2::LEFT_CENTER, detail, mono(11.0), TEXT_DIM);
+                if resp.clicked() {
+                    core.start_mix(plan);
+                    ui.close();
+                }
+                ui.add_space(6.0);
+            }
+        });
 }

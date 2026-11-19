@@ -58,6 +58,8 @@ pub enum DeckCmd {
     LoopIn,
     LoopOut,
     LoopExit,
+    /// Next quantize boundary: jump to the loop start and leave the loop.
+    ReleaseLoop,
     LoopScale(f64),
     FreeLoop(f64),
     LoopMove(f64),
@@ -523,6 +525,7 @@ impl Engine {
             DeckCmd::LoopIn => deck.loop_in(&ctx),
             DeckCmd::LoopOut => deck.loop_out(&ctx),
             DeckCmd::LoopExit => deck.loop_exit(),
+            DeckCmd::ReleaseLoop => deck.release_loop(&ctx),
             DeckCmd::LoopScale(f) => deck.loop_scale(f),
             DeckCmd::FreeLoop(ms) => deck.free_loop(ms),
             DeckCmd::LoopMove(b) => deck.loop_move(b),
