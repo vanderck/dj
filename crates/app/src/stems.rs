@@ -9,8 +9,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use collective_engine::engine::NUM_DECKS;
-use collective_engine::track::{Cue, StemData, Track};
+use dj_engine::engine::NUM_DECKS;
+use dj_engine::track::{Cue, StemData, Track};
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use stems_core::offline::{self, OfflineError, StemBuffers};
 use stems_core::Stem as CoreStem;
@@ -99,7 +99,7 @@ pub struct StemWave {
 
 impl StemWave {
     pub fn compute(mix: &[[f32; 2]], sample_rate: u32, stems: &StemData) -> Self {
-        let bins_per_sec = collective_library::waveform::BINS_PER_SEC;
+        let bins_per_sec = dj_library::waveform::BINS_PER_SEC;
         let per = (sample_rate as f64 / bins_per_sec).max(1.0);
         let bins = (mix.len() as f64 / per).ceil() as usize;
         let mut levels: [Vec<f32>; 4] = std::array::from_fn(|_| vec![0.0; bins]);
@@ -138,7 +138,7 @@ pub fn resolve_model(setting: Option<&Path>) -> Option<PathBuf> {
 /// File name of a model shipped with the app (see `cargo xtask package-macos --model`).
 pub const BUNDLED_MODEL: &str = "stems-model.onnx";
 
-/// `Collective.app/Contents/Resources/stems-model.onnx` on macOS, or next to the executable.
+/// `dj.app/Contents/Resources/stems-model.onnx` on macOS, or next to the executable.
 pub fn bundled_model() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
@@ -151,8 +151,8 @@ fn done(job: &Request, tx: &Sender<Update>, stems: StemData, source: String) {
     let wave = Arc::new(StemWave::compute(&audio.frames, audio.sample_rate, &stems));
     let cues = match (job.detect_cues, job.track.grid) {
         (true, Some(grid)) => {
-            let env = collective_library::analysis::Envelope::compute(audio);
-            Some(collective_library::analysis::detect_cues(audio, &env, &grid, Some(&stems)))
+            let env = dj_library::analysis::Envelope::compute(audio);
+            Some(dj_library::analysis::detect_cues(audio, &env, &grid, Some(&stems)))
         }
         _ => None,
     };
@@ -383,7 +383,7 @@ impl DemucsCache {
     }
 }
 
-/// Where Collective keeps a downloaded HT-Demucs model.
+/// Where dj keeps a downloaded HT-Demucs model.
 pub fn default_demucs_path() -> PathBuf {
     crate::settings::config_dir().join("models").join("htdemucs.onnx")
 }
@@ -484,7 +484,7 @@ pub fn prepare_file(
     dir: &Path,
     progress: &mut dyn FnMut(f32),
 ) -> Result<Prepared, String> {
-    let audio = collective_library::decode(path).map_err(|e| format!("decoding: {e}"))?;
+    let audio = dj_library::decode(path).map_err(|e| format!("decoding: {e}"))?;
     let frames = audio.frames.len();
     let key = cache_key(path, PREPARED, frames);
     if cache::read(&dir.join(cache::file_name(key)), key, 0, frames).is_some() {
@@ -592,7 +592,7 @@ mod cache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use collective_engine::track::AudioData;
+    use dj_engine::track::AudioData;
     use std::time::Duration;
 
     fn track(id: u64, secs: f32) -> Arc<Track> {
@@ -627,7 +627,7 @@ mod tests {
 
     #[test]
     fn separates_caches_and_reloads_from_cache() {
-        let dir = std::env::temp_dir().join(format!("collective-stems-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("dj-stems-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let song = dir.join("song.wav");
@@ -674,7 +674,7 @@ mod tests {
     #[test]
     fn model_errors_are_reported_then_fall_back_to_the_placeholder() {
         let w = StemsWorker::new();
-        let bad = std::env::temp_dir().join("collective-not-a-model.onnx");
+        let bad = std::env::temp_dir().join("dj-not-a-model.onnx");
         fs::write(&bad, b"nope").unwrap();
         w.request(Request { deck: 0, track: track(31, 1.0), path: bad.clone(), model: Some(bad), cache: None, demucs: None, detect_cues: false, prepared: None });
         let Update::Failed { track_id: 31, error, .. } = wait(&w) else { panic!("expected the model error first") };
@@ -697,7 +697,7 @@ mod tests {
     #[cfg(any(feature = "stems-onnx", feature = "stems-onnx-dynamic"))]
     #[test]
     fn demucs_stems_become_prepared_stems() {
-        let dir = std::env::temp_dir().join(format!("collective-demucs-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("dj-demucs-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let model = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../stems-core/tests/data/demucs_test.onnx"));
@@ -738,7 +738,7 @@ mod tests {
     #[cfg(any(feature = "stems-onnx", feature = "stems-onnx-dynamic"))]
     #[test]
     fn prepare_file_separates_once() {
-        let dir = std::env::temp_dir().join(format!("collective-prepare-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("dj-prepare-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let song = dir.join("song.wav");
@@ -761,7 +761,7 @@ mod tests {
     #[test]
     fn detects_cue_points_with_the_stems_when_asked() {
         let mut t = Arc::try_unwrap(track(81, 40.0)).ok().unwrap();
-        t.grid = Some(collective_engine::track::BeatGrid { bpm: 120.0, anchor_secs: 0.0 });
+        t.grid = Some(dj_engine::track::BeatGrid { bpm: 120.0, anchor_secs: 0.0 });
         let t = Arc::new(t);
         let w = StemsWorker::new();
         let req = |track: Arc<Track>, detect_cues| Request {

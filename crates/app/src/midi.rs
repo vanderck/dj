@@ -26,10 +26,10 @@ pub struct Midi {
 }
 
 pub fn list_ports() -> (Vec<String>, Vec<String>) {
-    let ins = MidiInput::new("collective-list")
+    let ins = MidiInput::new("dj-list")
         .map(|m| m.ports().iter().filter_map(|p| m.port_name(p).ok()).collect())
         .unwrap_or_default();
-    let outs = MidiOutput::new("collective-list")
+    let outs = MidiOutput::new("dj-list")
         .map(|m| m.ports().iter().filter_map(|p| m.port_name(p).ok()).collect())
         .unwrap_or_default();
     (ins, outs)
@@ -40,19 +40,21 @@ impl Midi {
         let (tx, rx) = unbounded();
         let mut inputs = Vec::new();
         let mut input_names = Vec::new();
-        if let Ok(probe) = MidiInput::new("collective") {
+        if let Ok(probe) = MidiInput::new("dj") {
             for port in probe.ports() {
                 let Ok(name) = probe.port_name(&port) else { continue };
-                if name.to_lowercase().contains("collective") {
+                // Our own ports (ALSA lists them as "dj:dj-out …"). Not "contains": controllers
+                // such as "DJControl …" must stay.
+                if name.to_lowercase().starts_with("dj:") {
                     continue;
                 }
                 if !settings.midi_inputs.is_empty() && !settings.midi_inputs.iter().any(|n| n == &name) {
                     continue;
                 }
-                let Ok(mut mi) = MidiInput::new("collective") else { continue };
+                let Ok(mut mi) = MidiInput::new("dj") else { continue };
                 mi.ignore(midir::Ignore::All);
                 let tx = tx.clone();
-                if let Ok(conn) = mi.connect(&port, "collective-in", move |_, msg, _| {
+                if let Ok(conn) = mi.connect(&port, "dj-in", move |_, msg, _| {
                     let _ = tx.send(msg.to_vec());
                 }, ()) {
                     inputs.push(conn);
@@ -62,9 +64,9 @@ impl Midi {
         }
         let mut output = None;
         let mut output_name = None;
-        if let (Some(want), Ok(mo)) = (&settings.midi_output, MidiOutput::new("collective")) {
+        if let (Some(want), Ok(mo)) = (&settings.midi_output, MidiOutput::new("dj")) {
             if let Some(port) = mo.ports().into_iter().find(|p| mo.port_name(p).ok().as_deref() == Some(want.as_str())) {
-                if let Ok(conn) = mo.connect(&port, "collective-out") {
+                if let Ok(conn) = mo.connect(&port, "dj-out") {
                     output = Some(Arc::new(Mutex::new(conn)));
                     output_name = Some(want.clone());
                 }

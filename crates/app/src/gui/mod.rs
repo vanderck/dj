@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Align2, Color32, CornerRadius, Pos2, Rect, Ui, Vec2};
 
-use collective_engine::fx::InsertPos;
+use dj_engine::fx::InsertPos;
 use rosc::OscType;
 
 use crate::core::Core;
@@ -60,7 +60,6 @@ pub struct UiState {
     pub browser_asc: bool,
     /// Which deck is shown large on the left (0 or 2) and right (1 or 3).
     pub focus: [usize; 2],
-    pub loop_size: [f64; 4],
     pub lane_zoom: f32,
 }
 
@@ -88,7 +87,6 @@ impl Default for UiState {
             browser_sort: browser::Col::Artist,
             browser_asc: true,
             focus: [0, 1],
-            loop_size: [4.0; 4],
             lane_zoom: 1.0,
         }
     }
@@ -104,8 +102,8 @@ pub struct App {
 pub fn run() {
     // Prefer wgpu; fall back to OpenGL (glow) where no wgpu surface can be
     // created (old GPUs/drivers, VMs, remote desktops). Override with
-    // COLLECTIVE_RENDERER=glow|wgpu.
-    let order = match std::env::var("COLLECTIVE_RENDERER").as_deref() {
+    // DJ_RENDERER=glow|wgpu.
+    let order = match std::env::var("DJ_RENDERER").as_deref() {
         Ok("glow") => vec![eframe::Renderer::Glow],
         Ok("wgpu") => vec![eframe::Renderer::Wgpu],
         _ => vec![eframe::Renderer::Wgpu, eframe::Renderer::Glow],
@@ -125,7 +123,7 @@ pub fn run() {
         };
         let slot = &mut booted;
         let res = eframe::run_native(
-            "Collective",
+            "dj",
             opts,
             Box::new(move |cc| {
                 let (host, core) = slot.take().unwrap_or_else(crate::boot);

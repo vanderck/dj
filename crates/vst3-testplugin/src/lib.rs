@@ -500,7 +500,7 @@ impl IPluginFactoryTrait for Factory {
     unsafe fn getFactoryInfo(&self, info: *mut PFactoryInfo) -> tresult {
         let info = &mut *info;
 
-        copy_cstring("Collective Test", &mut info.vendor);
+        copy_cstring("dj Test", &mut info.vendor);
         copy_cstring("https://example.com", &mut info.url);
         copy_cstring("someone@example.com", &mut info.email);
         info.flags = PFactoryInfo_::FactoryFlags_::kUnicode as int32;

@@ -2,6 +2,7 @@
 name = "dj"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "dj: live performance DJ software"
 
@@ -18,8 +19,8 @@ stems-onnx-dynamic = ["stems-core/onnx-dynamic"]
 
 [dependencies]
 stems-core.workspace = true
-collective-engine.workspace = true
-collective-library.workspace = true
+dj-engine.workspace = true
+dj-library.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
@@ -32,4 +33,4 @@ rosc.workspace = true
 crossbeam-channel.workspace = true
 eframe.workspace = true
 dirs.workspace = true
-collective-vst3.workspace = true
+dj-vst3.workspace = true

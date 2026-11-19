@@ -3,11 +3,11 @@
 
 use std::path::PathBuf;
 
-use collective_engine::deck::{Quantize, TempoRange};
-use collective_engine::engine::DeckMode;
-use collective_engine::fx::{InsertPos, MacroTarget, MACRO_TARGETS, MAX_SLOTS, NUM_MACROS};
-use collective_engine::mixer::{ChannelParams, MixMode, XfAssign};
-use collective_engine::sampler::{LaneParams, Pattern, Step, LANES, PATTERNS, STEPS};
+use dj_engine::deck::{Quantize, TempoRange};
+use dj_engine::engine::DeckMode;
+use dj_engine::fx::{InsertPos, MacroTarget, MACRO_TARGETS, MAX_SLOTS, NUM_MACROS};
+use dj_engine::mixer::{ChannelParams, MixMode, XfAssign};
+use dj_engine::sampler::{LaneParams, Pattern, Step, LANES, PATTERNS, STEPS};
 use serde::{Deserialize, Serialize};
 
 use crate::settings::{config_dir, load_json, save_json};
@@ -207,7 +207,7 @@ impl MasterModel {
             return 0.0;
         }
         let db = if v < 0.85 { -60.0 + 60.0 * (v / 0.85) } else { (v - 0.85) / 0.15 * 6.0 };
-        collective_engine::dsp::db_to_gain(db)
+        dj_engine::dsp::db_to_gain(db)
     }
 }
 

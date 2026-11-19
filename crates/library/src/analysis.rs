@@ -4,7 +4,7 @@
 //! Everything works on an onset/spectrum envelope computed once per track ([`Envelope`]):
 //! mono, decimated to ~22 kHz, 1024-point frames every 10 ms.
 
-use collective_engine::track::{AudioData, BeatGrid, Cue, CueKind, StemData};
+use dj_engine::track::{AudioData, BeatGrid, Cue, CueKind, StemData};
 use realfft::RealFftPlanner;
 
 const N: usize = 1024;

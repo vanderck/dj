@@ -1,11 +1,12 @@
 [package]
-name = "collective-vst3"
+name = "dj-vst3"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
-description = "Minimal VST3 effect host for Collective's channel inserts"
+description = "Minimal VST3 effect host for dj's channel inserts"
 
 [dependencies]
-collective-engine.workspace = true
+dj-engine.workspace = true
 vst3 = "0.3.0"
 libloading = "0.9.1"

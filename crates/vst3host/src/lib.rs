@@ -1,4 +1,4 @@
-//! A small, focused VST3 *effect* host for Collective's channel inserts.
+//! A small, focused VST3 *effect* host for dj's channel inserts.
 //!
 //! * Loads `.vst3` bundles on Linux, macOS and Windows.
 //! * Enumerates audio effect classes (with vendor and sub-categories for the
@@ -19,8 +19,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use collective_engine::dsp::Frame;
-use collective_engine::fx::{Effect, FxCtx};
+use dj_engine::dsp::Frame;
+use dj_engine::fx::{Effect, FxCtx};
 use vst3::Steinberg::Vst::*;
 use vst3::Steinberg::*;
 use vst3::{ComPtr, ComWrapper, Interface};

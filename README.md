@@ -4,14 +4,16 @@ Live-performance DJ software written entirely in Rust. It's modelled on the
 feature set of Untitled Audio Syndicate's *Syndicate*: four decks, a full mixer
 with **VST3 channel inserts** (User Guide §7.4), sampler decks, a shared master
 clock, and MIDI/OSC control. It has its own name and code. (It was called Collective; the
-config folder and the `/Collective/` OSC prefix keep that name so existing setups work.)
+first start moves the old `collective` settings folder to `dj`, and the old `/Collective/` OSC
+prefix becomes `/dj/`.)
 
-It's built for a **Mixed In Key** workflow. dj doesn't detect BPM, key
-or cue points; it reads what Mixed In Key wrote into your files.
+It's built for a **Mixed In Key** workflow: it reads the BPM, key, energy and cue points Mixed In
+Key wrote into your files. Tracks without them get BPM, beat grid, energy and cue points from
+dj's own analysis; keys are never guessed.
 
 ## Build & run
 
-Requires Rust 1.80+ (stable).
+Requires Rust 1.95+ (stable).
 
 ```bash
 cargo build --release
@@ -32,12 +34,12 @@ cargo xtask package-macos --universal
 
 Linux needs the ALSA development headers to build (`libasound2-dev` on
 Debian/Ubuntu). The GUI uses wgpu and falls back to OpenGL automatically; set
-`COLLECTIVE_RENDERER=glow` to force OpenGL.
+`DJ_RENDERER=glow` to force OpenGL.
 
 Settings, session, mappings, FX presets and per-track edits are stored as
-readable JSON in your config directory (`~/.config/collective` on Linux,
-`~/Library/Application Support/collective` on macOS,
-`%APPDATA%\collective` on Windows). Set `COLLECTIVE_CONFIG_DIR` to use another
+readable JSON in your config directory (`~/.config/dj` on Linux,
+`~/Library/Application Support/dj` on macOS,
+`%APPDATA%\dj` on Windows). Set `DJ_CONFIG_DIR` to use another
 folder.
 
 ## Workspace
@@ -46,9 +48,11 @@ folder.
 |---|---|
 | `crates/engine` | Realtime audio engine: decks, key-lock time-stretch, mixer, insert FX chain, native effects, sampler, clock, limiter. No allocation or locking on the audio thread. |
 | `crates/vst3host` | VST3 effect host (bundle loading, parameters, state, latency, process context). |
-| `crates/library` | Decoding (symphonia), tag reading (ID3, FLAC/Ogg, MP4, Serato markers), waveforms, folder scanning. |
-| `crates/app` | The application: audio I/O (cpal), GUI (egui), OSC, MIDI, sessions. |
+| `crates/library` | Decoding (symphonia), tag reading (ID3, FLAC/Ogg, MP4, Serato markers), waveforms, folder scanning, analysis of untagged tracks (BPM, grid, energy, cue points). |
+| `crates/stems-core` | Stem separation: HT-Demucs and small ONNX models, offline over whole tracks. |
+| `crates/app` | The application (`dj`): audio I/O (cpal), GUI (egui), stems, auto-mix, OSC, MIDI, sessions. |
 | `crates/vst3-testplugin` | A tiny VST3 gain plugin used to test the host end to end. |
+| `xtask` | `cargo xtask package-macos`: the `.app` and `.dmg`. |
 
 ```bash
 cargo test --workspace
@@ -77,8 +81,8 @@ progress and, afterwards, which separator made them.
 
 Results of 3 and 4 are cached (size limit and *Clear cache* in Settings → Stems).
 
-**Playing with stems**: each stem has a level on the channel faders (Drums / Bass / Vocals / Other,
-with ON/OFF). Stems are mixed where the deck reads audio, before key lock, loops, slip and hot
+**Playing with stems**: each stem's level can be put on its channel fader (Drums / Bass / Vocals /
+Other, in the fader popup), and the popup's *Stems* group turns them all back to the plain mix. Stems are mixed where the deck reads audio, before key lock, loops, slip and hot
 cues, so there is no added latency. MIDI and OSC: `Deck/N/StemDrums` … `StemOther` (switches),
 `Deck/N/StemDrumsLevel` … (0–1), `Acapella`, `Instrumental`.
 
@@ -152,35 +156,43 @@ editor (every automatable parameter, with the plugin's own value text).
 
 ## Interface
 
-One screen, scaled to the window (1600×1000 design baseline; Settings → Scale
-adjusts it further):
+One screen, laid out for 1600×1000 points and fitted to the window:
 
 - **Waveform lanes** across the top for all four decks, **beat-aligned**: every
   lane uses the same pixels-per-beat, so synced decks line up vertically.
-  Played audio is dimmed; bar lines, named cue flags and loops are drawn on the
-  lane, and a progress strip with cue ticks sits under each. Drag a lane to
-  scrub, scroll to zoom, click the strip to jump.
-- **Two large decks** (left and right) and **two compact decks** below them.
-  **Swap** brings a compact deck into the large view.
-  - Large: title/artist, Camelot key chip (green border = mixes with the
-    master, red = clash), BPM and pitch %, remaining time; Cue (hold),
-    Play/Pause, Sync, Master/Follow, Key lock, Slip, Reverse (Shift-click:
-    backspin), Roll; 8 named cue pads; tempo slider (right-click: range);
-    In / Out / ÷2 / loop size / ×2 / « » jump; Hi / Mid / Low / Filter (click a
-    label to kill/reset). With **Roll** on, the loop-size button rolls while
-    held.
-  - Right-click a deck's number for track/sampler mode, lock, grid tools and
-    eject. Sampler decks show their step grid in the large view.
-- **Mixer** in the middle: tempo (drag or double-click), beat dots, Tap,
-  Quantize (right-click for the value), Rec, Menu; strips ordered
-  CH 3 · CH 1 · MASTER · CH 2 · CH 4 with level in dB, CUE (LIMIT on master),
-  fader with live meter (Ctrl/Cmd-drag: trim), and − FX +; right-click a strip
-  title for mute, solo, trim, filter resonance/width and output; crossfader
-  (decks 1/3 left, 2/4 right).
-- **Browser**: search, All tracks / History, *Fits deck N (key)* harmonic
-  filter, track stats, Import folder; Title, Artist, BPM, Key (Camelot +
-  musical), Match/Boost tag, Energy, Time, Genre; a deck badge marks loaded
-  tracks; hover a row for load-to buttons, or drag it onto a deck or lane.
+  Played audio is dimmed; stems are drawn in their colours; bar lines, named cue
+  flags and loops are drawn on the lane, and a progress strip with cue ticks
+  sits under each. Drag a lane to scrub, scroll to zoom, click the strip to jump.
+- **Decks**: two large decks and two compact ones below (**Swap** brings a
+  compact deck into the large view). With a MIDI controller connected
+  (Menu → Layout: Auto / Touch / Controller), all four decks are full size with
+  one slim row of cue pads.
+  - Large: title/artist, key chip (green border = mixes with the master, red =
+    clash), BPM (`≈` = detected; **MASTER** on the deck that sets the tempo,
+    chosen automatically), remaining time; Play/Pause, Sync, and **Mix** when
+    the deck is waiting to be mixed in; cue pads: the main cue first, then the
+    hot cues that are set (up to 9 pads); loop In/Out/Exit, ÷2, loop size, ×2, « ».
+    A set hot cue pad loops from its cue at the loop size, or jumps to it
+    (Settings → Hot cue pads); controller pads do the same.
+  - Compact: Play/Pause, Cue, Sync, Swap (and Mix).
+  - Right-click (or long-press) a deck's number for track/sampler mode, tempo range, lock, grid tools,
+    *Detect cue points* and eject. Sampler decks show their step grid in the
+    large view.
+- **Mixer** in the middle: strips CH 3 · CH 1 · MASTER · CH 2 · CH 4. Each
+  fader shows one function, named on the chip above it: Volume, High, Mid,
+  Low, Filter, Drums, Bass, Vocals, Other or Tempo. Tap the chip for the
+  fader popup: pick the function, or turn a whole group back to neutral (EQ,
+  Stems, Tempo reset, Volume, Filter; ↺ restores). Moving a mapped MIDI
+  control switches that channel's fader to show it. Controls dj moves itself
+  (these buttons, Mix) are picked up: a controller fader takes over again once
+  moved to the new value, so nothing jumps. Muting is volume off: the
+  fader drops to the bottom. CUE per strip, LIMIT on the master. Tempo fine
+  steps: Settings.
+- **Browser**: search, All tracks / History, **Fits**: tracks whose key mixes
+  with the master deck and whose BPM is within ±5, best match first and
+  focused; Quantize and Menu (settings, recording, layout); Title, Artist, BPM,
+  Key (Camelot + musical), Match/Boost tag, Energy, Time, Genre; a deck badge marks loaded
+  tracks; drag a row onto a deck or lane, or hover for load-to buttons.
 
 Fonts: Inter and JetBrains Mono, bundled under the SIL Open Font License (see
 `crates/app/assets/fonts`). The GUI is egui with custom-painted controls.
@@ -189,8 +201,8 @@ Fonts: Inter and JetBrains Mono, bundled under the SIL Open Font License (see
 
 - **Decks**: 4 decks (or 2). Key lock with a WSOLA time-stretcher and
   independent transpose. Tempo ranges ±6/10/16/50 % or ±12 semitones. Sync with
-  continuous phase lock; MASTER/FOLLOW clock ownership with automatic handoff;
-  wallclock lock. Quantized launches (global or per deck), 8 hot cues
+  continuous phase lock; the tempo master is picked automatically (handoff when
+  it stops); wallclock lock. Quantized launches (global or per deck), 8 hot cues
   (momentary, cue-to-next-cue loops), loops (in/out, halve/double, move,
   free-loop), slip mode, slip loops (with dotted/triplet), beat/bar skip,
   reverse, backspin, tape stop, half/double speed, phase nudge.
@@ -213,8 +225,8 @@ Fonts: Inter and JetBrains Mono, bundled under the SIL Open Font License (see
 - **Mixer**: trim; 3-band full-kill EQ (LR4 crossovers, adjustable); one-knob
   CUTOFF/RES/WIDTH filter; fader curves (Linear dB / Constant power / Dipped /
   Fast cut); CUE/MUTE/SOLO; fader start. Outputs: master, none, or a direct
-  hardware pair (choose which stages apply). Crossfader with A/B/thru assign
-  on any channel, or a 4-deck vector pad.
+  hardware pair (choose which stages apply). Optional crossfader (A/B/thru per
+  channel) or 4-deck vector pad, controlled over MIDI/OSC (no on-screen control).
 - **Master**: look-ahead limiter, master/cue levels, cue mix, split cue,
   metronome, recording to 32-bit float WAV.
 - **Control**: MIDI learn (toggle/absolute/relative), LED feedback, MIDI clock
@@ -222,30 +234,30 @@ Fonts: Inter and JetBrains Mono, bundled under the SIL Open Font License (see
 
 ## OSC API
 
-UDP port 9090 by default. The address root defaults to `/Collective/`; set it
+UDP port 9090 by default. The address root defaults to `/dj/`; set it
 to `/Syndicate/` in Settings to keep existing controller layouts. Addresses are
 case-insensitive and bundles are accepted.
 
 Examples:
 
 ```
-/Collective/Header/BPM f 126.0
-/Collective/Header/Quantize i 4            (0 off, 1 = 2 bars … 7 = 1/32)
-/Collective/Deck/1/PlayPause i 1
-/Collective/Deck/2/BeatSkip i -8
-/Collective/Deck/1/HotCue i 3 i 1 … i 3 i 0 (hold cue 3)
-/Collective/Deck/1/SlipLoop/Quarter i 1 … i 0
-/Collective/Deck/1/Sampler/LaneSet i 3 s Volume f 0.8
-/Collective/Mixer/CH3/Volume f 0.75
-/Collective/Mixer/CH1/FX/Macro/2 f 0.4
-/Collective/Mixer/CH1/FX/Insert s native:echo s post
-/Collective/Feedback/Resend i 1
+/dj/Header/BPM f 126.0
+/dj/Header/Quantize i 4            (0 off, 1 = 2 bars … 7 = 1/32)
+/dj/Deck/1/PlayPause i 1
+/dj/Deck/2/BeatSkip i -8
+/dj/Deck/1/HotCue i 3 i 1 … i 3 i 0 (hold cue 3)
+/dj/Deck/1/SlipLoop/Quarter i 1 … i 0
+/dj/Deck/1/Sampler/LaneSet i 3 s Volume f 0.8
+/dj/Mixer/CH3/Volume f 0.75
+/dj/Mixer/CH1/FX/Macro/2 f 0.4
+/dj/Mixer/CH1/FX/Insert s native:echo s post
+/dj/Feedback/Resend i 1
 ```
 
 Deck, sampler, mixer and header routes follow the original's §14 tables
 (PlayPause, Playing, Cue, Cue1–8, SetCueLoop, TempoSync, TempoMaster,
 TempoSlider, Loop, LoopIn/Out, SlipLoop/…, Skip…, PitchPreserve, Pitch…,
-Phase…, WaveformSeek, Quantize, EQ/Low|Mid|High, Filter1–3, Mute/Solo/Cue,
+Phase…, WaveformSeek, LoopSize, Quantize, EQ/Low|Mid|High, Filter1–3, Mute/Solo/Cue,
 Output, FX, FX/Macro/n, and more). Feedback (when enabled) sends BPM, Clock
 beats, deck state, TrackInfo, Position/Progress/Time, LoopInfo, Cues,
 CueFire, Transport and mixer values, only when they change.
@@ -255,7 +267,7 @@ the value a button sends, e.g. `Deck/1/BeatSkip:-8`.
 
 ## Not included
 
-- **BPM / key / cue detection.** By design: Mixed In Key provides them.
+- **Key detection.** By design: Mixed In Key provides keys.
 - **Arrange mode, MIDI clips, OSC/automation clips.** Left out at your request.
 - **Plugin GUIs.** VST3 effects are edited with the generic parameter editor.
 - **VST3 instruments, Ableton Link, Syndicate NET, Rekordbox/Lexicon import,
@@ -264,6 +276,5 @@ the value a button sends, e.g. `Deck/1/BeatSkip:-8`.
   by a few milliseconds and aren't shifted for plugin latency.
 - Changing the audio device needs a restart.
 
-Tested on Linux (headless and under a virtual X display). The macOS and
-Windows code paths (VST3 bundle entry points, audio, GUI) compile from the same
-sources but haven't been run here.
+Used on macOS (Apple silicon) with a Xone:K2; the test suite runs on Linux and macOS (CI).
+Windows builds from the same sources but hasn't been run.

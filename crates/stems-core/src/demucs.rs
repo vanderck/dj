@@ -159,7 +159,7 @@ impl DemucsModel {
             .filter_map(|(i, s)| Some((i, stem_from_name(s)?)))
             .filter(|(_, stem)| {
                 only.as_deref()
-                    .map_or(true, |o| stem_from_name(o) == Some(*stem))
+                    .is_none_or(|o| stem_from_name(o) == Some(*stem))
             })
             .collect();
         if take.is_empty() {

@@ -7,15 +7,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use collective_engine::deck::{DeckEvent, Quantize, TempoRange};
-use collective_engine::engine::{ClockOwner, DeckCmd, DeckMode, SamplerCmd, NUM_DECKS};
-use collective_engine::fx::{InsertPos, MacroTarget, MACRO_TARGETS, MAX_SLOTS, NUM_MACROS};
-use collective_engine::mixer::{ChannelParams, ExtStages, MixMode, Output, XfAssign};
-use collective_engine::sampler::{LaneParams, Step, LANES, STEPS};
-use collective_engine::track::{Cue, CueKind, NUM_HOT_CUES};
-use collective_engine::{Command, Controller, Event, Garbage, Snapshot};
-use collective_library::scan::Entry;
-use collective_library::{GridSource, Key, LoadedTrack, Tags, TrackOverrides, Waveform};
+use dj_engine::deck::{DeckEvent, Quantize, TempoRange};
+use dj_engine::engine::{ClockOwner, DeckCmd, DeckMode, SamplerCmd, NUM_DECKS};
+use dj_engine::fx::{InsertPos, MacroTarget, MACRO_TARGETS, MAX_SLOTS, NUM_MACROS};
+use dj_engine::mixer::{ChannelParams, ExtStages, MixMode, Output, XfAssign};
+use dj_engine::sampler::{LaneParams, Step, LANES, STEPS};
+use dj_engine::track::{Cue, CueKind, NUM_HOT_CUES};
+use dj_engine::{Command, Controller, Event, Garbage, Snapshot};
+use dj_library::scan::Entry;
+use dj_library::{GridSource, Key, LoadedTrack, Tags, TrackOverrides, Waveform};
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use rosc::OscType;
 
@@ -73,19 +73,19 @@ pub struct DeckUi {
     /// Per-stem loudness of the loaded track, for the waveform lanes (once separated).
     pub stem_wave: Option<std::sync::Arc<crate::stems::StemWave>>,
     /// The loaded track as the engine has it (to request its stems again).
-    pub track: Option<Arc<collective_engine::track::Track>>,
+    pub track: Option<Arc<dj_engine::track::Track>>,
     /// Bar/beat last reported over OSC.
     last_beat: i64,
 }
 
 enum LoadJob {
-    Track { deck: usize, path: PathBuf, overrides: Option<TrackOverrides>, replaygain: bool, detect: collective_library::DetectOptions },
+    Track { deck: usize, path: PathBuf, overrides: Option<TrackOverrides>, replaygain: bool, detect: dj_library::DetectOptions },
     Sample { deck: usize, lane: usize, path: PathBuf },
 }
 
 enum LoadResult {
     Track { deck: usize, path: PathBuf, result: Result<LoadedTrack, String> },
-    Sample { deck: usize, lane: usize, path: PathBuf, result: Result<Arc<collective_engine::track::AudioData>, String> },
+    Sample { deck: usize, lane: usize, path: PathBuf, result: Result<Arc<dj_engine::track::AudioData>, String> },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -218,10 +218,13 @@ pub struct Core {
     pub automix: Option<automix::AutoMix>,
     /// MIDI pick-up: controls dj moved itself (lowercase address -> last MIDI value seen).
     pickup: HashMap<String, Option<f32>>,
+    /// Each deck's loop size in beats (the loop buttons, and hot cue pads in Loop mode).
+    pub loop_size: [f64; NUM_DECKS],
 }
 
 impl Core {
     pub fn new(ctl: Controller, sample_rate: f32, max_block: usize, settings: Settings, session: Session) -> Self {
+        let loop_size = [settings.default_loop_beats; NUM_DECKS];
         let (job_tx, job_rx) = unbounded::<LoadJob>();
         let (res_tx, res_rx) = unbounded::<LoadResult>();
         for _ in 0..2 {
@@ -234,13 +237,13 @@ impl Core {
                         let r = match job {
                             LoadJob::Track { deck, path, overrides, replaygain, detect } => LoadResult::Track {
                                 deck,
-                                result: collective_library::load(&path, overrides.as_ref(), replaygain, detect).map_err(|e| e.to_string()),
+                                result: dj_library::load(&path, overrides.as_ref(), replaygain, detect).map_err(|e| e.to_string()),
                                 path,
                             },
                             LoadJob::Sample { deck, lane, path } => LoadResult::Sample {
                                 deck,
                                 lane,
-                                result: collective_library::load_sample(&path).map_err(|e| e.to_string()),
+                                result: dj_library::load_sample(&path).map_err(|e| e.to_string()),
                                 path,
                             },
                         };
@@ -294,11 +297,12 @@ impl Core {
             dirty_since: None,
             automix: None,
             pickup: HashMap::new(),
+            loop_size,
         };
         // VST3 catalog from cache immediately; refresh in the background.
         let cache: ScanCache = crate::settings::load_json(&ScanCache::path());
         core.apply_scan(cache);
-        let mut library: Vec<collective_library::scan::Entry> = crate::settings::load_json(&crate::settings::config_dir().join("library-cache.json"));
+        let mut library: Vec<dj_library::scan::Entry> = crate::settings::load_json(&crate::settings::config_dir().join("library-cache.json"));
         core.fill_detected(&mut library);
         core.library = library;
         core.start_osc();
@@ -474,7 +478,7 @@ impl Core {
             path: path.to_path_buf(),
             overrides,
             replaygain: self.settings.use_replaygain,
-            detect: collective_library::DetectOptions {
+            detect: dj_library::DetectOptions {
                 prefer_detected_cues: self.settings.cue_points == crate::settings::CuePoints::Detected,
                 // With stems on, cue points wait for the stems (better); otherwise from the mix.
                 cues_from_mix: !self.settings.stems_enabled,
@@ -508,7 +512,7 @@ impl Core {
         });
     }
 
-    fn loaded_track(&self, d: usize) -> Option<Arc<collective_engine::track::Track>> {
+    fn loaded_track(&self, d: usize) -> Option<Arc<dj_engine::track::Track>> {
         self.decks[d].track.clone()
     }
 
@@ -636,7 +640,7 @@ impl Core {
     }
 
     /// Library entries without BPM / energy tags get the values detected earlier.
-    fn fill_detected(&self, library: &mut [collective_library::scan::Entry]) {
+    fn fill_detected(&self, library: &mut [dj_library::scan::Entry]) {
         for e in library.iter_mut().filter(|e| e.bpm.is_none() || e.energy.is_none()) {
             if let Some(o) = self.trackdb.tracks.get(&TrackDb::key(&e.path)) {
                 if e.bpm.is_none() && o.grid_detected {
@@ -674,7 +678,7 @@ impl Core {
     }
 
     /// Persist a grid edit (e.g. "grid start here" or BPM correction).
-    pub fn set_grid(&mut self, d: usize, grid: collective_engine::track::BeatGrid) {
+    pub fn set_grid(&mut self, d: usize, grid: dj_engine::track::BeatGrid) {
         self.deck_cmd(d, DeckCmd::SetGrid(Some(grid)));
         if let Some(info) = self.decks[d].info.as_mut() {
             info.grid_source = Some(GridSource::User);
@@ -687,7 +691,7 @@ impl Core {
     pub fn grid_start_here(&mut self, d: usize) {
         let v = self.snap.decks[d];
         if v.has_grid {
-            self.set_grid(d, collective_engine::track::BeatGrid { bpm: v.track_bpm, anchor_secs: v.position_secs });
+            self.set_grid(d, dj_engine::track::BeatGrid { bpm: v.track_bpm, anchor_secs: v.position_secs });
         }
     }
 
@@ -697,7 +701,7 @@ impl Core {
             // anchor = position - beat * spb
             let spb = 60.0 / v.track_bpm;
             let anchor = v.position_secs - v.beat * spb + ms / 1000.0;
-            self.set_grid(d, collective_engine::track::BeatGrid { bpm: v.track_bpm, anchor_secs: anchor });
+            self.set_grid(d, dj_engine::track::BeatGrid { bpm: v.track_bpm, anchor_secs: anchor });
         }
     }
 
@@ -711,7 +715,7 @@ impl Core {
         let cache = self.library.clone();
         let (tx, rx) = unbounded();
         std::thread::spawn(move || {
-            let _ = tx.send(collective_library::scan::scan(&roots, &cache));
+            let _ = tx.send(dj_library::scan::scan(&roots, &cache));
         });
         self.library_rx = Some(rx);
         self.library_scanning = true;
@@ -845,7 +849,7 @@ impl Core {
             model.on = r.on;
             model.mix = r.mix;
             if let (FxLive::Vst3(h), Some((c, e))) = (&live, &r.vst3_state) {
-                h.load_state(&collective_vst3::State { component: fxcat::unb64(c), controller: fxcat::unb64(e) });
+                h.load_state(&dj_vst3::State { component: fxcat::unb64(c), controller: fxcat::unb64(e) });
                 model.params = live.defaults(); // re-read from the controller
                 model.vst3_state = r.vst3_state.clone();
             } else if r.params.len() == model.params.len() {
@@ -1152,7 +1156,7 @@ impl Core {
         let dir = dirs::audio_dir().or_else(dirs::home_dir).unwrap_or_else(|| PathBuf::from(".")).join("dj Recordings");
         let _ = std::fs::create_dir_all(&dir);
         let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-        let path = dir.join(format!("collective-{stamp}.wav"));
+        let path = dir.join(format!("dj-{stamp}.wav"));
         let (prod, mut cons) = rtrb::RingBuffer::<[f32; 2]>::new((self.sample_rate as usize) * 8);
         let spec = hound::WavSpec {
             channels: 2,
@@ -1192,7 +1196,7 @@ impl Core {
 
     // ------------------------------------------------------------ routing
 
-    /// Strip the configured root ("/Collective/", or "/Syndicate/" for
+    /// Strip the configured root ("/dj/", or "/Syndicate/" for
     /// compatibility) from an incoming address.
     pub fn strip_root<'a>(&self, addr: &'a str) -> Option<&'a str> {
         let root = self.settings.osc_root.trim_end_matches('/');
@@ -1396,23 +1400,24 @@ impl Core {
             ["playing"] => on.map(DeckCmd::SetPlaying),
             ["cue"] => Some(DeckCmd::Cue(pressed)),
             ["gridstart"] if trig => Some(DeckCmd::GridStart),
+            // A hot cue pad (screen, MIDI, keys): see `pad_press`.
             [c] if c.starts_with("cue") && c.len() == 4 => {
                 let i = c[3..].parse::<u8>().ok().filter(|i| (1..=8).contains(i));
-                if let (Some(i), true) = (i, trig) {
-                    self.deck_cmd(d, DeckCmd::HotCue { idx: i - 1, pressed: true });
-                    Some(DeckCmd::HotCue { idx: i - 1, pressed: false })
-                } else {
-                    None
+                match (i, trig) {
+                    (Some(i), true) => self.pad_press(d, i - 1),
+                    _ => None,
                 }
             }
             ["hotcue"] => match ints {
-                [i] if (1..=8).contains(i) => {
-                    self.deck_cmd(d, DeckCmd::HotCue { idx: (*i - 1) as u8, pressed: true });
-                    Some(DeckCmd::HotCue { idx: (*i - 1) as u8, pressed: false })
-                }
+                [i] if (1..=8).contains(i) => self.pad_press(d, (*i - 1) as u8),
+                // Press and release (momentary cues): the plain hot cue.
                 [i, p, ..] if (1..=8).contains(i) => Some(DeckCmd::HotCue { idx: (*i - 1) as u8, pressed: *p != 0 }),
                 _ => None,
             },
+            ["loopsize"] => f.filter(|b| *b > 0.0).map(|b| {
+                self.loop_size[d] = (b as f64).clamp(1.0 / 32.0, 64.0);
+                DeckCmd::DefaultLoopBeats(self.loop_size[d])
+            }),
             ["setcueloop"] => ints.first().filter(|i| (1..=8).contains(*i)).map(|i| DeckCmd::CueLoop((*i - 1) as u8)),
             // Cue number, then the loop length in beats (default: the deck's loop size).
             ["cuebeatloop"] => match ints.first() {
@@ -1420,7 +1425,7 @@ impl Core {
                     let beats = args.get(1).and_then(|a| arg_f(std::slice::from_ref(a))).filter(|b| *b > 0.0);
                     Some(DeckCmd::CueBeatLoop {
                         idx: (*i - 1) as u8,
-                        beats: beats.map_or(self.settings.default_loop_beats, |b| b as f64),
+                        beats: beats.map_or(self.loop_size[d], |b| b as f64),
                     })
                 }
                 _ => None,
@@ -1660,7 +1665,7 @@ impl Core {
     }
 
     fn set_lane_control(&mut self, d: usize, lane: usize, ctl: &str, v: f32) {
-        use collective_engine::sampler::{Direction, Rhythm};
+        use dj_engine::sampler::{Direction, Rhythm};
         self.set_lane(d, lane, |p| match ctl {
             "attack" => p.attack = v.clamp(0.0, 1.0),
             "hold" => p.hold = v.clamp(0.0, 1.0),
@@ -1948,12 +1953,61 @@ impl Core {
                     } else {
                         v
                     };
-                    if self.pickup_allows(&m.address, scaled) {
+                    if self.pickup_allows(&m.address, v) {
                         self.route(&m.address, &[OscType::Float(scaled)]);
                     }
                 }
             }
         }
+    }
+
+    /// A hot cue pad pressed: an empty pad sets the cue; a set pad loops from it at the deck's loop
+    /// size or jumps to it (Settings → Hot cue pads), the same on screen and on a controller.
+    fn pad_press(&mut self, d: usize, idx: u8) -> Option<DeckCmd> {
+        let set = self.snap.decks[d].hot_cues.get(idx as usize).is_some_and(|c| c.is_some());
+        if set && self.settings.cue_pads == crate::settings::CuePadMode::Loop {
+            return Some(DeckCmd::CueBeatLoop { idx, beats: self.loop_size[d] });
+        }
+        self.deck_cmd(d, DeckCmd::HotCue { idx, pressed: true });
+        Some(DeckCmd::HotCue { idx, pressed: false })
+    }
+
+    /// Set a control from dj itself (auto-mix, the fader popup's group buttons) and have MIDI pick
+    /// it up: a controller's absolute fader or knob for it is ignored until moved to (or across)
+    /// the new value, so it doesn't jump.
+    pub fn set_picked_up(&mut self, addr: &str, v: f32) {
+        self.route(addr, &[OscType::Float(v)]);
+        if let Some((key, _)) = self.pickup_point(addr) {
+            self.pickup.entry(key).or_insert(None);
+        }
+    }
+
+    /// Whether a controller's absolute value `v` (0..1) for `addr` applies, under pick-up.
+    pub(super) fn pickup_allows(&mut self, addr: &str, v: f32) -> bool {
+        let Some((key, cur)) = self.pickup_point(addr) else { return true };
+        let Some(last) = self.pickup.get(&key).copied() else { return true };
+        let crossed = last.is_some_and(|l| (l - cur) * (v - cur) <= 0.0);
+        if crossed || (v - cur).abs() < 0.03 {
+            self.pickup.remove(&key);
+            true
+        } else {
+            self.pickup.insert(key, Some(v));
+            false
+        }
+    }
+
+    /// Pick-up identity and current value (0..1) of a control. Addresses for the same control
+    /// share it (`Deck/N/Tempo` 0..1 and `Deck/N/TempoSlider` -1..1).
+    fn pickup_point(&self, addr: &str) -> Option<(String, f32)> {
+        let a = addr.trim_matches('/').to_ascii_lowercase();
+        let parts: Vec<&str> = a.split('/').collect();
+        if let ["deck", n, "tempo" | "temposlider"] = parts.as_slice() {
+            let d = n.parse::<usize>().ok()?.checked_sub(1)?;
+            let v = self.snap.decks.get(d)?;
+            return Some((format!("deck/{n}/tempo"), (v.tempo_fader as f32 + 1.0) / 2.0));
+        }
+        let cur = self.value_state(&a)?;
+        Some((a, cur))
     }
 
     /// Current 0..1 value of a knob address (for relative encoders).
@@ -2293,7 +2347,7 @@ impl Core {
             for slot in 0..MAX_SLOTS {
                 if let Some(FxLive::Vst3(h)) = self.fx_live[ch][slot].clone() {
                     let flags = h.take_restart_flags();
-                    if collective_vst3::Vst3Handle::latency_changed(flags) {
+                    if dj_vst3::Vst3Handle::latency_changed(flags) {
                         self.send(Command::FxLatency { ch: ch as u8, slot: slot as u8, samples: h.latency() });
                     }
                     for (id, v) in h.take_edits() {
@@ -2358,15 +2412,15 @@ fn drop_garbage(g: Garbage) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use collective_engine::{create, EngineConfig};
+    use dj_engine::{create, EngineConfig};
 
-    /// Tests share the process-wide `COLLECTIVE_CONFIG_DIR`; hold this for the whole test.
+    /// Tests share the process-wide `DJ_CONFIG_DIR`; hold this for the whole test.
     static CONFIG_DIR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    fn core() -> (collective_engine::Engine, Core, std::sync::MutexGuard<'static, ()>) {
+    fn core() -> (dj_engine::Engine, Core, std::sync::MutexGuard<'static, ()>) {
         let guard = CONFIG_DIR_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let dir = std::env::temp_dir().join(format!("collective-core-test-{}-{:?}", std::process::id(), std::thread::current().id()));
-        std::env::set_var("COLLECTIVE_CONFIG_DIR", &dir);
+        let dir = std::env::temp_dir().join(format!("dj-core-test-{}-{:?}", std::process::id(), std::thread::current().id()));
+        std::env::set_var("DJ_CONFIG_DIR", &dir);
         let (engine, ctl) = create(EngineConfig { sample_rate: 48000.0, max_block: 512, max_latency: 4096 });
         let settings = Settings { osc_enabled: false, vst3_enabled: false, library_folders: vec![], ..Default::default() };
         let mut c = Core::new(ctl, 48000.0, 512, settings, Session::default());
@@ -2374,7 +2428,7 @@ mod tests {
         (engine, c, guard)
     }
 
-    fn pump(e: &mut collective_engine::Engine, c: &mut Core) {
+    fn pump(e: &mut dj_engine::Engine, c: &mut Core) {
         for _ in 0..4 {
             e.process(512);
         }
@@ -2488,10 +2542,12 @@ mod tests {
             }
         }
         for d in 0..2 {
-            c.deck_cmd(d, DeckCmd::SetGrid(Some(collective_engine::track::BeatGrid { bpm: 120.0, anchor_secs: 0.0 })));
+            c.deck_cmd(d, DeckCmd::SetGrid(Some(dj_engine::track::BeatGrid { bpm: 120.0, anchor_secs: 0.0 })));
         }
         c.route("Mixer/CH1/Volume", &[OscType::Float(0.9)]);
-        c.route("Mixer/CH2/Volume", &[OscType::Float(0.0)]);
+        // Deck 2 is silent by mute (fader up): the mix must unmute it and fade it in from 0.
+        c.route("Mixer/CH2/Volume", &[OscType::Float(0.6)]);
+        c.route("Mixer/CH2/Mute", &[OscType::Int(1)]);
         c.deck_cmd(0, DeckCmd::Play);
         // Deck 2 waits silently in a 4-beat loop at a cue 8 s in.
         c.deck_cmd(1, DeckCmd::SetCue { idx: 0, secs: Some(8.0), end_secs: None });
@@ -2523,6 +2579,7 @@ mod tests {
         pump(&mut e, &mut c);
         assert_eq!(c.snap.clock.owner, ClockOwner::Deck(0));
         assert!(c.snap.decks[1].sync);
+        assert!(!c.session.channels[1].params.mute && c.session.channels[1].params.volume == 0.0, "unmuted at volume 0");
         assert!(c.mix_target(1).is_none(), "one mix at a time");
 
         let low = |c: &Core, ch: usize| c.session.channels[ch].params.eq[0];
@@ -2556,6 +2613,7 @@ mod tests {
         assert!(c.snap.decks[1].playing);
         assert_eq!(vol(&c, 0), 0.0);
         assert!((vol(&c, 1) - 1.0).abs() < 1e-6);
+        assert!(!c.session.channels[1].params.mute);
         assert!((low(&c, 0) - 0.5).abs() < 1e-6 && (low(&c, 1) - 0.5).abs() < 1e-6);
         // The incoming track played on from its cue (12 s of mix after 8 s).
         assert!(c.snap.decks[1].position_secs > 18.0, "{}", c.snap.decks[1].position_secs);
@@ -2572,6 +2630,71 @@ mod tests {
         c.pickup.insert("mixer/ch2/volume".into(), None);
         assert!(!c.pickup_allows("Mixer/CH2/Volume", 0.2));
         assert!(c.pickup_allows("Mixer/CH2/Volume", 0.8), "jumped across 0.5");
+    }
+
+    #[test]
+    fn hot_cue_pads_loop_or_jump_the_same_on_screen_and_midi() {
+        let (mut e, mut c, _config) = core();
+        c.load_track(0, &kick_wav("pads.wav", 30));
+        let deadline = Instant::now() + std::time::Duration::from_secs(60);
+        while !(c.snap.decks[0].loaded && c.decks[0].info.is_some()) {
+            assert!(Instant::now() < deadline, "track never loaded");
+            pump(&mut e, &mut c);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        c.deck_cmd(0, DeckCmd::SetGrid(Some(dj_engine::track::BeatGrid { bpm: 120.0, anchor_secs: 0.0 })));
+        c.route("Header/QuantizeOn", &[OscType::Int(0)]);
+        c.deck_cmd(0, DeckCmd::SetCue { idx: 0, secs: Some(4.0), end_secs: None });
+        c.deck_cmd(0, DeckCmd::Play);
+        for _ in 0..30 {
+            pump(&mut e, &mut c);
+        }
+        assert!(c.snap.decks[0].playing);
+
+        // Loop mode (default), at the deck's loop size, which the loop buttons set.
+        assert!(c.route("Deck/1/LoopSize", &[OscType::Float(8.0)]));
+        assert_eq!(c.loop_size[0], 8.0);
+        assert!(c.route("Deck/1/Cue1", &[OscType::Int(1)]), "a pad press, as from the K2");
+        for _ in 0..4 {
+            pump(&mut e, &mut c);
+        }
+        let v = c.snap.decks[0];
+        assert!(v.loop_on && v.loop_beats == 8.0 && (v.loop_start_secs - 4.0).abs() < 0.01, "{} {} {}", v.loop_on, v.loop_beats, v.loop_start_secs);
+
+        // Jump mode: the same press jumps to the cue and plays on, no loop.
+        c.route("Deck/1/LoopExit", &[OscType::Int(1)]);
+        c.settings.cue_pads = crate::settings::CuePadMode::Jump;
+        c.route("Deck/1/Cue1", &[OscType::Int(1)]);
+        for _ in 0..4 {
+            pump(&mut e, &mut c);
+        }
+        let v = c.snap.decks[0];
+        assert!(!v.loop_on && v.playing && v.position_secs >= 4.0 && v.position_secs < 4.5, "{} {}", v.loop_on, v.position_secs);
+
+        // An empty pad sets a cue in either mode.
+        c.route("Deck/1/Cue2", &[OscType::Int(1)]);
+        for _ in 0..2 {
+            pump(&mut e, &mut c);
+        }
+        assert!(c.snap.decks[0].hot_cues[1].is_some());
+    }
+
+    #[test]
+    fn group_buttons_are_picked_up_including_tempo_aliases() {
+        let (mut e, mut c, _config) = core();
+        // The fader popup's Volume / EQ groups write through pick-up.
+        c.route("Mixer/CH1/Volume", &[OscType::Float(0.8)]);
+        c.set_picked_up("Mixer/CH1/Volume", 0.0);
+        assert!(!c.pickup_allows("/Mixer/CH1/Volume", 0.8), "fader still up: ignored");
+        assert_eq!(c.session.channels[0].params.volume, 0.0);
+        assert!(c.pickup_allows("/Mixer/CH1/Volume", 0.02), "reached: follows again");
+        // Tempo reset writes Deck/N/Tempo (0..1); a controller on TempoSlider (-1..1) is the
+        // same control.
+        c.set_picked_up("Deck/2/Tempo", 0.5);
+        pump(&mut e, &mut c);
+        assert!(!c.pickup_allows("Deck/2/TempoSlider", 0.9));
+        assert!(c.pickup_allows("Deck/2/TempoSlider", 0.4), "crossed 0 %");
+        assert!(c.pickup_allows("Deck/2/TempoSlider", 0.9), "then free");
     }
 
     #[test]
@@ -2637,8 +2760,8 @@ mod tests {
     #[test]
     fn osc_root_and_mixer_routes() {
         let (mut e, mut c, _config) = core();
-        assert_eq!(c.strip_root("/Collective/Deck/1/PlayPause"), Some("Deck/1/PlayPause"));
-        assert_eq!(c.strip_root("/collective/mixer/ch1/volume"), Some("mixer/ch1/volume"));
+        assert_eq!(c.strip_root("/dj/Deck/1/PlayPause"), Some("Deck/1/PlayPause"));
+        assert_eq!(c.strip_root("/DJ/mixer/ch1/volume"), Some("mixer/ch1/volume"));
         c.settings.osc_root = "/Syndicate/".into();
         assert_eq!(c.strip_root("/Syndicate/Mixer/CH3/Volume"), Some("Mixer/CH3/Volume"));
         assert_eq!(c.strip_root("/Other/Mixer/CH3/Volume"), None);
@@ -2685,7 +2808,7 @@ mod tests {
         assert!((c.session.channels[0].params.volume - 64.0 / 127.0).abs() < 1e-6);
         // ":value" suffix fixes the value sent.
         assert!(c.route("Deck/1/Quantize:6", &[]));
-        assert_eq!(c.session.decks[0].quantize, collective_engine::deck::Quantize::Beats(0.5));
+        assert_eq!(c.session.decks[0].quantize, dj_engine::deck::Quantize::Beats(0.5));
         pump(&mut e, &mut c);
     }
 

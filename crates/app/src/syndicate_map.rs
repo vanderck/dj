@@ -1,7 +1,7 @@
 //! Import MIDI mappings exported by Syndicate (`.sdcmap`, "syndicate-midi-mapping" JSON).
 //!
 //! Each binding's `target` (e.g. `deck.1.cue.2`, `mixer.ch3.volume`) is translated to the matching
-//! Collective address (`Deck/1/Cue2`, `Mixer/CH3/Volume`); `kind` 0 is a CC, 1 a note; `channel`
+//! dj address (`Deck/1/Cue2`, `Mixer/CH3/Volume`); `kind` 0 is a CC, 1 a note; `channel`
 //! and `number` are taken as raw MIDI values (channel 0..15).
 
 use serde::Deserialize;
@@ -56,7 +56,7 @@ pub struct ImportReport {
     pub format_version: u32,
 }
 
-/// Translate a Syndicate target to a Collective address.
+/// Translate a Syndicate target to a dj address.
 pub fn address_for(target: &str) -> Option<String> {
     let p: Vec<&str> = target.split('.').collect();
     let n = |s: &str| s.parse::<u8>().ok().filter(|n| (1..=4).contains(n));

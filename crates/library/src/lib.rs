@@ -15,8 +15,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
-use collective_engine::dsp::db_to_gain;
-use collective_engine::track::{AudioData, BeatGrid, Cue, CueKind, Track, NUM_HOT_CUES};
+use dj_engine::dsp::db_to_gain;
+use dj_engine::track::{AudioData, BeatGrid, Cue, CueKind, Track, NUM_HOT_CUES};
 use serde::{Deserialize, Serialize};
 use symphonia::core::codecs::audio::AudioDecoderOptions;
 use symphonia::core::errors::Error as SymError;
@@ -311,7 +311,7 @@ mod tests {
         let mut wav = b"RIFF".to_vec();
         wav.extend_from_slice(&(body.len() as u32).to_le_bytes());
         wav.extend_from_slice(&body);
-        let dir = std::env::temp_dir().join(format!("collective-lib-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("dj-lib-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("t.wav");
         std::fs::write(&p, &wav).unwrap();
@@ -348,7 +348,7 @@ mod tests {
         let chunk = |id: &[u8], b: &[u8]| [id.to_vec(), (b.len() as u32).to_le_bytes().to_vec(), b.to_vec()].concat();
         let body = [b"WAVE".to_vec(), chunk(b"fmt ", &fmt), chunk(b"data", &pcm)].concat();
         let wav = [b"RIFF".to_vec(), (body.len() as u32).to_le_bytes().to_vec(), body].concat();
-        let dir = std::env::temp_dir().join(format!("collective-detect-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("dj-detect-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("untagged.wav");
         std::fs::write(&p, &wav).unwrap();

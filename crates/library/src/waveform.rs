@@ -1,7 +1,7 @@
 //! 3-band waveform (low / mid / high RMS + peak per bin) and beat alignment.
 
-use collective_engine::dsp::{Biquad, Lr4Crossover};
-use collective_engine::track::AudioData;
+use dj_engine::dsp::{Biquad, Lr4Crossover};
+use dj_engine::track::AudioData;
 
 pub const BINS_PER_SEC: f64 = 150.0;
 

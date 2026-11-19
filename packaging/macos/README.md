@@ -7,7 +7,7 @@ cargo xtask package-macos --universal
 builds dj for Apple Silicon and Intel, merges them into one binary and writes:
 
 - `target/package/dj.app`
-- `target/package/Collective-<version>-macos-universal.dmg` (drag-to-Applications disk image)
+- `target/package/dj-<version>-macos-universal.dmg` (drag-to-Applications disk image)
 
 Run `cargo xtask help` for all options. Useful ones:
 
@@ -37,16 +37,16 @@ built for it. The build sets `MACOSX_DEPLOYMENT_TARGET` and `LSMinimumSystemVers
   account. Store notarization credentials once:
 
   ```bash
-  xcrun notarytool store-credentials collective --apple-id you@example.com --team-id TEAMID
+  xcrun notarytool store-credentials dj --apple-id you@example.com --team-id TEAMID
   ```
 
   then build with:
 
   ```bash
-  NOTARY_KEYCHAIN_PROFILE=collective cargo xtask package-macos --universal --sign "Developer ID Application: Your Name (TEAMID)" --notarize
+  NOTARY_KEYCHAIN_PROFILE=dj cargo xtask package-macos --universal --sign "Developer ID Application: Your Name (TEAMID)" --notarize
   ```
 
-`entitlements.plist` disables library validation: Collective loads third-party VST3 plugins, which
+`entitlements.plist` disables library validation: dj loads third-party VST3 plugins, which
 the hardened runtime would otherwise refuse because they are signed by other developers.
 
 ## CI

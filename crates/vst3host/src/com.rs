@@ -55,7 +55,7 @@ impl IHostApplicationTrait for HostApplication {
         if name.is_null() {
             return kInvalidArgument;
         }
-        copy_wstring("Collective", &mut *name);
+        copy_wstring("dj", &mut *name);
         kResultOk
     }
 

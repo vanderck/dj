@@ -13,7 +13,7 @@ use std::process::{Command, ExitCode};
 const APP_NAME: &str = "dj";
 const EXECUTABLE: &str = "dj";
 const CARGO_BIN: &str = "dj";
-const DEFAULT_BUNDLE_ID: &str = "com.github.vanderck.collective";
+const DEFAULT_BUNDLE_ID: &str = "com.github.vanderck.dj";
 /// The statically linked ONNX Runtime (stem separation) is built for macOS 13.4.
 const DEFAULT_MIN_MACOS: &str = "13.4";
 const BUNDLED_MODEL_NAME: &str = "stems-model.onnx";
@@ -38,7 +38,7 @@ Options:
   --no-dmg               Only build the .app
   --features <list>      Extra cargo features for the app (comma separated)
   --no-default-features  Build the app without its default features
-  --bundle-id <id>       CFBundleIdentifier (default com.github.vanderck.collective)
+  --bundle-id <id>       CFBundleIdentifier (default com.github.vanderck.dj)
   --min-macos <version>  LSMinimumSystemVersion / deployment target (default 13.4)
   --binary <path>        Package an existing binary instead of building (works on any OS;
                          signing and the .dmg still need macOS)

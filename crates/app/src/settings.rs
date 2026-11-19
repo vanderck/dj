@@ -3,16 +3,32 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use collective_engine::deck::TempoRange;
-use collective_engine::mixer::{ExtStages, FaderCurve};
-use collective_library::TrackOverrides;
+use dj_engine::deck::TempoRange;
+use dj_engine::mixer::{ExtStages, FaderCurve};
+use dj_library::TrackOverrides;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 pub fn config_dir() -> PathBuf {
-    if let Ok(p) = std::env::var("COLLECTIVE_CONFIG_DIR") {
+    if let Ok(p) = std::env::var("DJ_CONFIG_DIR") {
         return PathBuf::from(p);
     }
-    dirs::config_dir().unwrap_or_else(|| PathBuf::from(".")).join("collective")
+    static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir = dirs::config_dir().unwrap_or_else(|| PathBuf::from(".")).join("dj");
+        // dj was called Collective: move its settings folder over once.
+        if let Some(old) = legacy_config_dir() {
+            if !dir.exists() && old.is_dir() {
+                let _ = std::fs::rename(&old, &dir);
+            }
+        }
+        dir
+    })
+    .clone()
+}
+
+/// The settings folder from when dj was called Collective.
+fn legacy_config_dir() -> Option<PathBuf> {
+    dirs::config_dir().map(|d| d.join("collective"))
 }
 
 pub fn load_json<T: DeserializeOwned + Default>(path: &Path) -> T {
@@ -101,7 +117,7 @@ pub struct Settings {
     /// automatically. `None` = `stems-prepared` in the config folder.
     pub stems_prepared_dir: Option<PathBuf>,
     /// Mixing happens on an external (hardware) mixer: every deck goes to its own output pair,
-    /// Collective's volume / trim / EQ / filter and the mixer section are bypassed and hidden.
+    /// dj's volume / trim / EQ / filter and the mixer section are bypassed and hidden.
     pub external_mixer: bool,
     /// Whose cue points a track gets: Mixed In Key's tags (detection only for tracks without
     /// cues) or dj's detection for every track. Cues you set yourself are always kept.
@@ -111,6 +127,9 @@ pub struct Settings {
     pub layout: LayoutMode,
     /// Tempo faders move in steps of this many percent (0 = continuous).
     pub tempo_step_pct: f32,
+    /// What a set hot cue pad does, on screen and on a controller: loop from the cue (at the
+    /// deck's loop size) or jump to it.
+    pub cue_pads: CuePadMode,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -120,6 +139,15 @@ pub enum CuePoints {
     Tags,
     /// dj detects the cue points of every track (from its stems).
     Detected,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum CuePadMode {
+    /// Start a loop at the cue, of the deck's loop size.
+    #[default]
+    Loop,
+    /// Jump to the cue and play on.
+    Jump,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -148,7 +176,7 @@ impl Default for Settings {
             use_replaygain: false,
             osc_enabled: true,
             osc_port: 9090,
-            osc_root: "/Collective/".into(),
+            osc_root: "/dj/".into(),
             osc_feedback: false,
             osc_feedback_host: "127.0.0.1".into(),
             osc_feedback_port: 9096,
@@ -167,6 +195,7 @@ impl Default for Settings {
             external_mixer: false,
             layout: LayoutMode::Auto,
             cue_points: CuePoints::Tags,
+            cue_pads: CuePadMode::Loop,
             tempo_step_pct: 0.0,
         }
     }
@@ -182,7 +211,23 @@ impl Settings {
     }
 
     pub fn load() -> Self {
-        load_json(&Self::path())
+        let mut s: Self = load_json(&Self::path());
+        s.migrate_from_collective();
+        s
+    }
+
+    /// Settings saved by Collective: paths into its old settings folder (a downloaded model)
+    /// now live in dj's, and its default OSC root becomes dj's.
+    fn migrate_from_collective(&mut self) {
+        if self.osc_root.trim_matches('/').eq_ignore_ascii_case("collective") {
+            self.osc_root = "/dj/".into();
+        }
+        let (Some(old), new) = (legacy_config_dir(), config_dir()) else { return };
+        for p in [&mut self.stems_model, &mut self.stems_demucs, &mut self.stems_prepared_dir].into_iter().flatten() {
+            if let Ok(rest) = p.strip_prefix(&old) {
+                *p = new.join(rest);
+            }
+        }
     }
 
     pub fn save(&self) -> anyhow::Result<()> {
@@ -313,5 +358,31 @@ impl TrackDb {
 
     pub fn key(p: &Path) -> String {
         p.to_string_lossy().into_owned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn collective_settings_move_to_dj() {
+        let old = legacy_config_dir().unwrap();
+        let mut s = Settings {
+            osc_root: "/Collective/".into(),
+            stems_demucs: Some(old.join("models").join("htdemucs.onnx")),
+            stems_model: Some(PathBuf::from("/elsewhere/model.onnx")),
+            ..Default::default()
+        };
+        s.migrate_from_collective();
+        assert_eq!(s.osc_root, "/dj/");
+        // (Other tests point DJ_CONFIG_DIR elsewhere meanwhile, so only check the move.)
+        let moved = s.stems_demucs.unwrap();
+        assert!(!moved.starts_with(&old) && moved.ends_with("models/htdemucs.onnx"), "{moved:?}");
+        assert_eq!(s.stems_model, Some(PathBuf::from("/elsewhere/model.onnx")), "other paths stay");
+        // A root the user chose stays.
+        let mut s = Settings { osc_root: "/Syndicate/".into(), ..Default::default() };
+        s.migrate_from_collective();
+        assert_eq!(s.osc_root, "/Syndicate/");
     }
 }

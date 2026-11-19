@@ -3,10 +3,10 @@
 
 use eframe::egui::{self, Align2, Color32, CornerRadius, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 
-use collective_engine::dsp::gain_to_db;
-use collective_engine::engine::{ClockOwner, NUM_DECKS};
-use collective_engine::fx::SlotHealth;
-use collective_engine::mixer::Output;
+use dj_engine::dsp::gain_to_db;
+use dj_engine::engine::{ClockOwner, NUM_DECKS};
+use dj_engine::fx::SlotHealth;
+use dj_engine::mixer::Output;
 
 use super::skin::*;
 use super::{act_f, act_i, learnable, UiState};
@@ -250,7 +250,7 @@ fn strip(ui: &mut Ui, core: &mut Core, st: &mut UiState, ch: usize, rect: Rect) 
     let p = cm.params;
     let view = core.snap.channels[ch];
     let color = DECK[ch];
-    let loaded = core.snap.decks[ch].loaded || core.session.decks[ch].mode == collective_engine::engine::DeckMode::Sampler;
+    let loaded = core.snap.decks[ch].loaded || core.session.decks[ch].mode == dj_engine::engine::DeckMode::Sampler;
     strip_frame(ui, rect, color, !loaded);
     let r = rect.shrink2(Vec2::new(8.0, 12.0));
     let title_r = Rect::from_min_size(r.min, Vec2::new(r.width(), 16.0));
@@ -432,7 +432,7 @@ pub fn fader_function(addr: &str) -> Option<(FaderMode, usize)> {
 
 /// Tempo fader position (0..1, centre = 0 %) snapped so the speed change is a multiple of
 /// `step_pct` percent (0 = no snapping).
-pub fn snap_tempo(v: f32, range: collective_engine::deck::TempoRange, step_pct: f32) -> f32 {
+pub fn snap_tempo(v: f32, range: dj_engine::deck::TempoRange, step_pct: f32) -> f32 {
     if step_pct <= 0.0 {
         return v;
     }
@@ -556,14 +556,15 @@ impl Group {
             act_i(core, &format!("Mixer/CH{}/Mute", ch + 1), 0); // volume off replaces mute
         }
         let (ctl, neutral) = self.controls(core, ch);
+        // Picked up: a controller fader for these takes over again once moved to the new value.
         if active {
             st.group_restore.insert((ch, self), ctl.iter().map(|(_, v)| *v).collect());
             for (addr, _) in &ctl {
-                act_f(core, addr, neutral);
+                core.set_picked_up(addr, neutral);
             }
         } else if let Some(saved) = st.group_restore.remove(&(ch, self)) {
             for ((addr, _), v) in ctl.iter().zip(saved) {
-                act_f(core, addr, v);
+                core.set_picked_up(addr, v);
             }
         }
     }
@@ -807,7 +808,7 @@ mod tests {
         assert_eq!(fader_function("Mixer/CH9/Volume"), None);
     }
 
-    use collective_engine::deck::TempoRange;
+    use dj_engine::deck::TempoRange;
 
     #[test]
     fn tempo_snaps_to_whole_steps() {

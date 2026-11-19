@@ -4,9 +4,9 @@ use std::path::PathBuf;
 
 use eframe::egui::{self, Align2, Color32, CornerRadius, Pos2, Rect, Sense, Ui, UiBuilder, Vec2};
 
-use collective_engine::engine::DeckMode;
-use collective_library::key::Compat;
-use collective_library::scan::Entry;
+use dj_engine::engine::DeckMode;
+use dj_library::key::Compat;
+use dj_library::scan::Entry;
 
 use super::skin::*;
 use super::UiState;
@@ -53,7 +53,7 @@ fn key_rank(c: Compat) -> Option<u8> {
 
 /// Lower is better: the key fit first, then the tempo distance (each key step outweighs the
 /// whole ±5 BPM window).
-fn fit_score(e: &Entry, reference: collective_library::key::Key, ref_bpm: Option<f64>) -> f64 {
+fn fit_score(e: &Entry, reference: dj_library::key::Key, ref_bpm: Option<f64>) -> f64 {
     let rank = e.key.and_then(|k| key_rank(k.compat(reference))).unwrap_or(9) as f64;
     let bpm = match (ref_bpm, e.bpm) {
         (Some(r), Some(b)) => (b - r).abs(),
@@ -98,7 +98,7 @@ pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect) {
     // Harmonic filter against the master / playing deck.
     let reference = core.reference_key();
     let ref_deck = match core.snap.clock.owner {
-        collective_engine::engine::ClockOwner::Deck(d) => Some(d as usize),
+        dj_engine::engine::ClockOwner::Deck(d) => Some(d as usize),
         _ => (0..core.deck_count()).find(|&d| core.snap.decks[d].playing),
     };
     // The reference tempo: the deck's current BPM (what a new track has to match).
@@ -345,7 +345,7 @@ pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use collective_library::key::Key;
+    use dj_library::key::Key;
 
     fn entry(key: &str, bpm: f64) -> Entry {
         Entry { key: Key::parse(key), bpm: Some(bpm), ..Default::default() }

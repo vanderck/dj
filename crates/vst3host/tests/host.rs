@@ -3,28 +3,28 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use collective_engine::fx::{Effect, FxCtx};
-use collective_vst3::{find_bundles, instantiate, scan_bundle, PluginInfo};
+use dj_engine::fx::{Effect, FxCtx};
+use dj_vst3::{find_bundles, instantiate, scan_bundle, PluginInfo};
 
 fn build_fixture() -> PathBuf {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let st = Command::new(cargo)
-        .args(["build", "-q", "-p", "collective-vst3-testplugin"])
+        .args(["build", "-q", "-p", "dj-vst3-testplugin"])
         .current_dir(&root)
         .status()
         .expect("cargo build");
     assert!(st.success());
     let target = std::env::var("CARGO_TARGET_DIR").map(PathBuf::from).unwrap_or_else(|_| root.join("target"));
     let (lib, sub) = if cfg!(target_os = "windows") {
-        ("collective_vst3_testplugin.dll", "x86_64-win/TestGain.vst3")
+        ("dj_vst3_testplugin.dll", "x86_64-win/TestGain.vst3")
     } else if cfg!(target_os = "macos") {
-        ("libcollective_vst3_testplugin.dylib", "MacOS/TestGain")
+        ("libdj_vst3_testplugin.dylib", "MacOS/TestGain")
     } else {
-        ("libcollective_vst3_testplugin.so", "")
+        ("libdj_vst3_testplugin.so", "")
     };
     let src = target.join("debug").join(lib);
-    let dir = std::env::temp_dir().join(format!("collective-vst3-test-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("dj-vst3-test-{}", std::process::id()));
     let bundle = dir.join("TestGain.vst3");
     let bin = if sub.is_empty() {
         bundle.join("Contents").join(format!("{}-linux", std::env::consts::ARCH)).join("TestGain.so")
@@ -46,7 +46,7 @@ fn scan_instantiate_process_and_restore_state() {
     assert_eq!(classes.len(), 1);
     let info: PluginInfo = classes[0].clone();
     assert!(info.name.starts_with("Gain"));
-    assert_eq!(info.vendor, "Collective Test");
+    assert_eq!(info.vendor, "dj Test");
     assert_eq!(PluginInfo::cid_from_id(&info.id()), Some(info.cid));
 
     let (handle, mut fx) = instantiate(&info, 48000.0, 256).expect("instantiate");
