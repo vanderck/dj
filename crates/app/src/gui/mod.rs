@@ -60,7 +60,6 @@ pub struct UiState {
     pub browser_asc: bool,
     /// Which deck is shown large on the left (0 or 2) and right (1 or 3).
     pub focus: [usize; 2],
-    pub loop_size: [f64; 4],
     pub lane_zoom: f32,
 }
 
@@ -88,7 +87,6 @@ impl Default for UiState {
             browser_sort: browser::Col::Artist,
             browser_asc: true,
             focus: [0, 1],
-            loop_size: [4.0; 4],
             lane_zoom: 1.0,
         }
     }

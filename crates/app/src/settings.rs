@@ -127,6 +127,9 @@ pub struct Settings {
     pub layout: LayoutMode,
     /// Tempo faders move in steps of this many percent (0 = continuous).
     pub tempo_step_pct: f32,
+    /// What a set hot cue pad does, on screen and on a controller: loop from the cue (at the
+    /// deck's loop size) or jump to it.
+    pub cue_pads: CuePadMode,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -136,6 +139,15 @@ pub enum CuePoints {
     Tags,
     /// dj detects the cue points of every track (from its stems).
     Detected,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum CuePadMode {
+    /// Start a loop at the cue, of the deck's loop size.
+    #[default]
+    Loop,
+    /// Jump to the cue and play on.
+    Jump,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -183,6 +195,7 @@ impl Default for Settings {
             external_mixer: false,
             layout: LayoutMode::Auto,
             cue_points: CuePoints::Tags,
+            cue_pads: CuePadMode::Loop,
             tempo_step_pct: 0.0,
         }
     }

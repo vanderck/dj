@@ -556,14 +556,15 @@ impl Group {
             act_i(core, &format!("Mixer/CH{}/Mute", ch + 1), 0); // volume off replaces mute
         }
         let (ctl, neutral) = self.controls(core, ch);
+        // Picked up: a controller fader for these takes over again once moved to the new value.
         if active {
             st.group_restore.insert((ch, self), ctl.iter().map(|(_, v)| *v).collect());
             for (addr, _) in &ctl {
-                act_f(core, addr, neutral);
+                core.set_picked_up(addr, neutral);
             }
         } else if let Some(saved) = st.group_restore.remove(&(ch, self)) {
             for ((addr, _), v) in ctl.iter().zip(saved) {
-                act_f(core, addr, v);
+                core.set_picked_up(addr, v);
             }
         }
     }

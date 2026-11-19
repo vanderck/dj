@@ -181,6 +181,14 @@ fn settings(ui: &mut Ui, core: &mut Core, st: &mut UiState) {
     ui.checkbox(&mut core.settings.keylock_on_load, "Key lock (pitch preserve) on load");
     ui.checkbox(&mut core.settings.load_at_first_cue, "Load tracks at their first cue");
     ui.horizontal(|ui| {
+        use crate::settings::CuePadMode;
+        ui.label("Hot cue pads");
+        ui.selectable_value(&mut core.settings.cue_pads, CuePadMode::Loop, "Loop from the cue")
+            .on_hover_text("A set pad starts a loop at its cue, of the deck's loop size (on screen and on your controller)");
+        ui.selectable_value(&mut core.settings.cue_pads, CuePadMode::Jump, "Jump to the cue")
+            .on_hover_text("A set pad jumps to its cue and plays on (on screen and on your controller)");
+    });
+    ui.horizontal(|ui| {
         use crate::settings::CuePoints;
         ui.label("Cue points");
         ui.selectable_value(&mut core.settings.cue_points, CuePoints::Tags, "Mixed In Key")

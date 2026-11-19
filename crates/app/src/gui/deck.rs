@@ -306,7 +306,13 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
             p.rect_stroke(rr, rad, Stroke::new(1.0, Color32::from_rgb(0x2a, 0x2a, 0x30)), egui::StrokeKind::Inside);
             p.text(rr.center(), Align2::CENTER_CENTER, "+", bold(pad_font + 2.0), if resp.hovered() { TEXT } else { TEXT_FAINT });
         }
-        let tip = if is_set { "Click: loop from this cue (loop size below) · Ctrl-click: delete · Alt-click: loop to the next cue" } else { "Set a hot cue at the playhead" };
+        let tip = if !is_set {
+            "Set a hot cue at the playhead"
+        } else if core.settings.cue_pads == crate::settings::CuePadMode::Loop {
+            "Click: loop from this cue (loop size below) · Ctrl-click: delete · Alt-click: loop to the next cue"
+        } else {
+            "Click: jump to this cue · Ctrl-click: delete · Alt-click: loop to the next cue"
+        };
         let resp = resp.on_hover_text(tip);
         let addr = a(&format!("Cue{}", i + 1));
         learnable(core, &resp, &addr);
@@ -326,11 +332,10 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
             if resp.drag_stopped() || resp.clicked() {
                 act(core, &hc, &[rosc::OscType::Int(i as i32 + 1), rosc::OscType::Int(0)]);
             }
-        } else if resp.clicked() && is_set {
-            // A set cue launches as a loop starting at the cue, of the deck's loop size.
-            act(core, &a("CueBeatLoop"), &[rosc::OscType::Int(i as i32 + 1), rosc::OscType::Float(st.loop_size[d] as f32)]);
         } else if resp.clicked() {
-            act_i(core, &hc, i as i32 + 1);
+            // Like a controller pad: sets an empty cue; a set one loops from it or jumps to it
+            // (Settings → Hot cue pads).
+            act_i(core, &addr, 1);
         }
     }
 
@@ -398,7 +403,7 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
     // ---------------------------------------------------------- loops
     let y = if tempo_on { y + th + 12.0 * k } else { y };
     let lh = 30.0 * k;
-    let size = st.loop_size[d];
+    let size = core.loop_size[d];
     let size_txt = if v.loop_on { beats_label(v.loop_beats) } else { beats_label(size) };
     let pending = core.decks[d].loop_in_pending && !v.loop_on;
     let in_out = if v.loop_on { "Exit" } else if pending { "Out" } else { "In" };
@@ -424,7 +429,7 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
             1 | 3 => {
                 if resp.clicked() {
                     let f = if i == 1 { 0.5 } else { 2.0 };
-                    st.loop_size[d] = (size * f).clamp(1.0 / 32.0, 64.0);
+                    act_f(core, &a("LoopSize"), (size * f) as f32);
                     if v.loop_on {
                         act_i(core, &a(if i == 1 { "LoopHalve" } else { "LoopDouble" }), 1);
                     }

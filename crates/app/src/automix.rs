@@ -10,8 +10,7 @@
 //! The mix runs on the outgoing track's beats: the incoming track starts from its cue on the
 //! first beat, its volume comes up over the first half, the basses swap at the midpoint, the
 //! outgoing volume fades over the second half, then the outgoing deck stops. Every control dj
-//! moves goes on the MIDI pick-up list, so a controller fader takes over only once moved past
-//! the new value.
+//! moves is picked up by MIDI ([`Core::set_picked_up`]).
 
 use super::*;
 
@@ -210,10 +209,8 @@ impl Core {
         }
     }
 
-    /// Set a control for the mix, and make MIDI pick it up before following again.
     fn mix_set(&mut self, addr: &str, v: f32) {
-        self.route(addr, &[OscType::Float(v)]);
-        self.pickup.entry(addr.to_ascii_lowercase()).or_insert(None);
+        self.set_picked_up(addr, v);
     }
 
     /// Advance a running mix (called every tick).
@@ -280,25 +277,6 @@ impl Core {
             } else {
                 self.automix = None;
             }
-        }
-    }
-
-    /// MIDI pick-up: after dj moved `addr` itself, ignore a controller's absolute value until it
-    /// reaches (or crosses) the current one. Returns whether to apply `v`.
-    pub(super) fn pickup_allows(&mut self, addr: &str, v: f32) -> bool {
-        let key = addr.trim_matches('/').to_ascii_lowercase();
-        let Some(last) = self.pickup.get(&key).copied() else { return true };
-        let Some(cur) = self.value_state(addr) else {
-            self.pickup.remove(&key);
-            return true;
-        };
-        let crossed = last.is_some_and(|l| (l - cur) * (v - cur) <= 0.0);
-        if crossed || (v - cur).abs() < 0.03 {
-            self.pickup.remove(&key);
-            true
-        } else {
-            self.pickup.insert(key, Some(v));
-            false
         }
     }
 }

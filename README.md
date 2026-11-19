@@ -171,8 +171,9 @@ One screen, laid out for 1600×1000 points and fitted to the window:
     clash), BPM (`≈` = detected; **MASTER** on the deck that sets the tempo,
     chosen automatically), remaining time; Play/Pause, Sync, and **Mix** when
     the deck is waiting to be mixed in; cue pads: the main cue first, then the
-    hot cues that are set (up to 9 pads; tap a hot cue to loop from it, at the
-    loop size); loop In/Out/Exit, ÷2, loop size, ×2, « ».
+    hot cues that are set (up to 9 pads); loop In/Out/Exit, ÷2, loop size, ×2, « ».
+    A set hot cue pad loops from its cue at the loop size, or jumps to it
+    (Settings → Hot cue pads); controller pads do the same.
   - Compact: Play/Pause, Cue, Sync, Swap (and Mix).
   - Right-click (or long-press) a deck's number for track/sampler mode, tempo range, lock, grid tools,
     *Detect cue points* and eject. Sampler decks show their step grid in the
@@ -182,7 +183,9 @@ One screen, laid out for 1600×1000 points and fitted to the window:
   Low, Filter, Drums, Bass, Vocals, Other or Tempo. Tap the chip for the
   fader popup: pick the function, or turn a whole group back to neutral (EQ,
   Stems, Tempo reset, Volume, Filter; ↺ restores). Moving a mapped MIDI
-  control switches that channel's fader to show it. Muting is volume off: the
+  control switches that channel's fader to show it. Controls dj moves itself
+  (these buttons, Mix) are picked up: a controller fader takes over again once
+  moved to the new value, so nothing jumps. Muting is volume off: the
   fader drops to the bottom. CUE per strip, LIMIT on the master. Tempo fine
   steps: Settings.
 - **Browser**: search, All tracks / History, **Fits**: tracks whose key mixes
@@ -254,7 +257,7 @@ Examples:
 Deck, sampler, mixer and header routes follow the original's §14 tables
 (PlayPause, Playing, Cue, Cue1–8, SetCueLoop, TempoSync, TempoMaster,
 TempoSlider, Loop, LoopIn/Out, SlipLoop/…, Skip…, PitchPreserve, Pitch…,
-Phase…, WaveformSeek, Quantize, EQ/Low|Mid|High, Filter1–3, Mute/Solo/Cue,
+Phase…, WaveformSeek, LoopSize, Quantize, EQ/Low|Mid|High, Filter1–3, Mute/Solo/Cue,
 Output, FX, FX/Macro/n, and more). Feedback (when enabled) sends BPM, Clock
 beats, deck state, TrackInfo, Position/Progress/Time, LoopInfo, Cues,
 CueFire, Transport and mixer values, only when they change.
