@@ -34,8 +34,8 @@ pub struct UiState {
     /// What each channel fader controls (set with the toggle rows for the selected fader, or
     /// by MIDI changing one of its functions).
     pub fader_mode: [mixer::FaderMode; 4],
-    /// The fader the toggle rows apply to (tap a strip to select it).
-    pub fader_sel: usize,
+    /// Group settings a fader popup's "turn off" switch saved, to restore them.
+    pub group_restore: std::collections::HashMap<(usize, mixer::Group), Vec<f32>>,
     /// Value each channel/mode had before its ON/OFF button switched it off.
     pub fader_restore: std::collections::HashMap<(usize, mixer::FaderMode), f32>,
     /// Controller layout this frame (see `Settings::layout`): slim cue pads, four full decks.
@@ -56,6 +56,8 @@ pub struct UiState {
     pub new_vst_path: String,
     pub browser_hist: bool,
     pub browser_harmonic: bool,
+    /// The library entry Fits last focused (its best match), to refocus when that changes.
+    pub fits_focus: Option<usize>,
     pub browser_sort: browser::Col,
     pub browser_asc: bool,
     /// Which deck is shown large on the left (0 or 2) and right (1 or 3).
@@ -69,7 +71,7 @@ impl Default for UiState {
         Self {
             fx_open: [false; 4],
             fader_mode: [mixer::FaderMode::Level; 4],
-            fader_sel: 0,
+            group_restore: Default::default(),
             fader_restore: Default::default(),
             dense: false,
             tempo_drag: None,
@@ -85,6 +87,7 @@ impl Default for UiState {
             new_vst_path: String::new(),
             browser_hist: false,
             browser_harmonic: false,
+            fits_focus: None,
             browser_sort: browser::Col::Artist,
             browser_asc: true,
             focus: [0, 1],

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::key::Key;
 use crate::tags;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Entry {
     pub path: PathBuf,
     pub title: String,

@@ -180,6 +180,29 @@ fn hot_cue_set_and_quantized_jump() {
 }
 
 #[test]
+fn cue_beat_loop_loops_from_the_cue() {
+    let (mut e, mut c) = setup();
+    send(&mut c, Command::GlobalQuantize(None));
+    send(&mut c, Command::Load { deck: 0, track: click_track(1, 120.0, 60.0, 48000), start_at_first_cue: false });
+    // A cue at 10 s, launched while stopped: plays, looping 4 beats (2 s at 120 BPM) from 10 s.
+    deck(&mut c, 0, DeckCmd::SetCue { idx: 0, secs: Some(10.0), end_secs: None });
+    deck(&mut c, 0, DeckCmd::CueBeatLoop { idx: 0, beats: 4.0 });
+    run(&mut e, 2);
+    let s = e.snapshot().decks[0];
+    assert!(s.playing && s.loop_on, "playing in a loop");
+    assert!((s.loop_start_secs - 10.0).abs() < 1e-6 && (s.loop_end_secs - 12.0).abs() < 1e-6, "{} .. {}", s.loop_start_secs, s.loop_end_secs);
+    assert!((s.loop_beats - 4.0).abs() < 1e-6);
+    // 3 s later the playhead is still inside the loop.
+    run(&mut e, (3.0 * SR as f64 / BLOCK as f64) as usize);
+    let pos = e.snapshot().decks[0].position_secs;
+    assert!((10.0..12.0).contains(&pos), "looping: {pos}");
+    // An empty pad does nothing.
+    deck(&mut c, 0, DeckCmd::CueBeatLoop { idx: 5, beats: 4.0 });
+    run(&mut e, 1);
+    assert!((e.snapshot().decks[0].loop_start_secs - 10.0).abs() < 1e-6);
+}
+
+#[test]
 fn master_handoff_when_master_stops() {
     let (mut e, mut c) = setup();
     send(&mut c, Command::GlobalQuantize(None));

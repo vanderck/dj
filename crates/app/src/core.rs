@@ -1140,7 +1140,7 @@ impl Core {
                 let Some(d) = n.parse::<usize>().ok().and_then(|n| n.checked_sub(1)).filter(|d| *d < NUM_DECKS) else {
                     return false;
                 };
-                self.route_deck(d, rest, f, on, trig, &ints)
+                self.route_deck(d, rest, f, on, trig, &ints, args)
             }
             ["mixer", ch, rest @ ..] => {
                 let Some(c) = ch.strip_prefix("ch").and_then(|n| n.parse::<usize>().ok()).and_then(|n| n.checked_sub(1)).filter(|c| *c < NUM_DECKS)
@@ -1273,7 +1273,7 @@ impl Core {
         true
     }
 
-    fn route_deck(&mut self, d: usize, rest: &[&str], f: Option<f32>, on: Option<bool>, trig: bool, ints: &[i32]) -> bool {
+    fn route_deck(&mut self, d: usize, rest: &[&str], f: Option<f32>, on: Option<bool>, trig: bool, ints: &[i32], args: &[OscType]) -> bool {
         let pressed = on.unwrap_or(true);
         let skip = self.settings.skip_beats;
         let dm = self.session.decks[d].clone();
@@ -1307,6 +1307,17 @@ impl Core {
                 _ => None,
             },
             ["setcueloop"] => ints.first().filter(|i| (1..=8).contains(*i)).map(|i| DeckCmd::CueLoop((*i - 1) as u8)),
+            // Cue number, then the loop length in beats (default: the deck's loop size).
+            ["cuebeatloop"] => match ints.first() {
+                Some(i) if (1..=8).contains(i) => {
+                    let beats = args.get(1).and_then(|a| arg_f(std::slice::from_ref(a))).filter(|b| *b > 0.0);
+                    Some(DeckCmd::CueBeatLoop {
+                        idx: (*i - 1) as u8,
+                        beats: beats.map_or(self.settings.default_loop_beats, |b| b as f64),
+                    })
+                }
+                _ => None,
+            },
             ["deletecue"] => ints.first().filter(|i| (1..=8).contains(*i)).map(|i| DeckCmd::DeleteCue((*i - 1) as u8)),
             ["cuemomentary"] => on.map(|o| {
                 self.session.decks[d].momentary_cues = o;

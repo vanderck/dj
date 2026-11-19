@@ -31,13 +31,9 @@ pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect) {
     if core.external_routing() {
         return external_panel(ui, core, st, r);
     }
-    if st.fader_sel >= core.deck_count() {
-        st.fader_sel = 0;
-    }
     midi_popup(ui, core, st);
-    mode_row(ui, st, Rect::from_min_size(r.min, Vec2::new(r.width(), 70.0)));
 
-    let strips = Rect::from_min_max(Pos2::new(r.left(), r.top() + 82.0), r.right_bottom());
+    let strips = r;
     let order: Vec<Option<usize>> = if core.deck_count() >= 4 { vec![Some(2), Some(0), None, Some(1), Some(3)] } else { vec![Some(0), None, Some(1)] };
     let gap = 10.0;
     let sw = (strips.width() - gap * (order.len() as f32 - 1.0)) / order.len() as f32;
@@ -281,16 +277,6 @@ fn strip(ui: &mut Ui, core: &mut Core, st: &mut UiState, ch: usize, rect: Rect) 
         act_i(core, &a("Cue"), !p.cue as i32);
     }
 
-    // Tapping anywhere on the strip selects it: the toggle rows then set its function.
-    // (interact_pos, not press_origin: a quick tap can press and release within one frame.)
-    let pressed_here = ui.input(|i| i.pointer.primary_pressed() && i.pointer.interact_pos().is_some_and(|p| rect.contains(p)));
-    if pressed_here {
-        st.fader_sel = ch;
-    }
-    if st.fader_sel == ch {
-        ui.painter().rect_stroke(rect, CornerRadius::same(10), Stroke::new(2.5, color), egui::StrokeKind::Inside);
-    }
-
     // ON/OFF under the fader: switches what the fader controls fully off and back.
     let mode = st.fader_mode[ch];
     // The channel a MIDI control just moved flashes in its function's colour.
@@ -316,22 +302,32 @@ fn strip(ui: &mut Ui, core: &mut Core, st: &mut UiState, ch: usize, rect: Rect) 
     }
 
     // What this fader controls, clearly: a chip in the function's colour (volume: outline only).
-    let chip = Rect::from_min_size(Pos2::new(r.left() + 2.0, cue_r.bottom() + 8.0), Vec2::new(r.width() - 4.0, 24.0));
+    // Tapping it opens the fader popup.
+    let chip = Rect::from_min_size(Pos2::new(r.left() + 2.0, cue_r.bottom() + 8.0), Vec2::new(r.width() - 4.0, 28.0));
+    let chip_resp = ui.allocate_rect(chip, Sense::click()).on_hover_text("Choose what this fader controls, or turn groups off");
     {
-        let name = mode.name().to_uppercase();
+        // The longest of these that fits: "VOLUME ▾", "VOLUME", "VOL ▾".
         let font = bold(11.5);
-        let fits = ui.painter().layout_no_wrap(name.clone(), font.clone(), TEXT).size().x <= chip.width() - 8.0;
-        let label = if fits { name } else { mode.short().to_string() };
+        let name = mode.name().to_uppercase();
+        let label = [format!("{name} ▾"), name, format!("{} ▾", mode.short())]
+            .into_iter()
+            .find(|l| ui.painter().layout_no_wrap(l.clone(), font.clone(), TEXT).size().x <= chip.width() - 8.0)
+            .unwrap_or_else(|| mode.short().to_string());
         let p = ui.painter();
         let rad = CornerRadius::same(6);
         if mode == FaderMode::Level {
+            p.rect_filled(chip, rad, if chip_resp.hovered() { CTRL_HOVER } else { Color32::TRANSPARENT });
             p.rect_stroke(chip, rad, Stroke::new(1.5, color), egui::StrokeKind::Inside);
             p.text(chip.center(), Align2::CENTER_CENTER, label, font, color);
         } else {
-            p.rect_filled(chip, rad, mode_color);
+            p.rect_filled(chip, rad, if chip_resp.hovered() { lighten(mode_color, 0.08) } else { mode_color });
             p.text(chip.center(), Align2::CENTER_CENTER, label, font, on(mode_color));
         }
     }
+    egui::Popup::from_toggle_button_response(&chip_resp)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .width(FADER_POPUP_W)
+        .show(|ui| fader_popup(ui, core, st, ch));
 
     // The fader: volume, an EQ band, the filter, a stem or the deck's tempo.
     let track = Rect::from_min_max(Pos2::new(r.left() + 4.0, chip.bottom() + 8.0), Pos2::new(r.right() - 4.0, on_r.top() - 10.0));
@@ -390,14 +386,13 @@ fn strip(ui: &mut Ui, core: &mut Core, st: &mut UiState, ch: usize, rect: Rect) 
 const POPUP_SECS: f32 = 2.0;
 
 /// Switch the fader of the channel a MIDI mapping just changed to that function (it stays; the
-/// other faders keep theirs), select it, and flash its outline for `POPUP_SECS`.
+/// other faders keep theirs) and flash its outline for `POPUP_SECS`.
 fn midi_popup(ui: &Ui, core: &Core, st: &mut UiState) {
     if let Some((addr, at)) = &core.midi_touched {
         if st.midi_seen != Some(*at) {
             st.midi_seen = Some(*at);
             if let Some((mode, ch)) = fader_function(addr) {
                 st.fader_mode[ch] = mode;
-                st.fader_sel = ch;
                 st.fader_popup = Some((mode, ch, *at));
             }
         }
@@ -459,28 +454,134 @@ pub fn snap_tempo(v: f32, range: collective_engine::deck::TempoRange, step_pct: 
     ((range.fader_for_speed(1.0 + snapped / 100.0).clamp(-1.0, 1.0) + 1.0) / 2.0) as f32
 }
 
-/// The toggle rows above the channel strips: what the selected fader controls. Mixer functions
-/// on the first row, stems and tempo on the second.
-fn mode_row(ui: &mut Ui, st: &mut UiState, r: Rect) {
+const FADER_POPUP_W: f32 = 330.0;
+
+/// The fader popup of channel `ch`: what its fader controls, and switches that turn whole groups
+/// off (and back on as they were).
+fn fader_popup(ui: &mut Ui, core: &mut Core, st: &mut UiState, ch: usize) {
     let gap = 6.0;
-    let rh = (r.height() - gap) / 2.0;
+    let w = (FADER_POPUP_W - 4.0 * gap) / 5.0;
+    let bh = 40.0;
+    let heading = |ui: &mut Ui, text: &str| {
+        ui.label(egui::RichText::new(text).font(mono(11.0)).color(TEXT_DIM));
+    };
+    heading(ui, &format!("CH {} FADER", ch + 1));
+    let (area, _) = ui.allocate_exact_size(Vec2::new(FADER_POPUP_W, 2.0 * bh + gap), Sense::hover());
     for (row, modes) in FaderMode::ALL.chunks(5).enumerate() {
-        let w = (r.width() - gap * 4.0) / 5.0;
-        let long = modes.iter().all(|m| pill_width(ui, m.name(), 12.0) <= w + 6.0);
         for (i, m) in modes.iter().enumerate() {
-            let br = Rect::from_min_size(Pos2::new(r.left() + i as f32 * (w + gap), r.top() + row as f32 * (rh + gap)), Vec2::new(w, rh));
-            let sel = st.fader_sel;
-            let selected = st.fader_mode[sel] == *m;
-            let col = m.color(0);
+            let br = Rect::from_min_size(Pos2::new(area.left() + i as f32 * (w + gap), area.top() + row as f32 * (bh + gap)), Vec2::new(w, bh));
+            let selected = st.fader_mode[ch] == *m;
+            let col = m.color(ch);
             let style = if selected { Style::Fill(if m.is_stem() { col } else { LIGHT }) } else { Style::Dark };
-            let label = if long { m.name() } else { m.short() };
-            let resp = button(ui, br, label, style, bold(12.0)).on_hover_text(format!("Fader CH {} controls: {} (tap a fader to select it)", sel + 1, m.name()));
+            let resp = button(ui, br, m.name(), style, bold(12.0));
             if m.is_stem() && !selected {
-                let mark = Rect::from_min_size(Pos2::new(br.left() + 8.0, br.bottom() - 4.0), Vec2::new(br.width() - 16.0, 2.0));
+                let mark = Rect::from_min_size(Pos2::new(br.left() + 8.0, br.bottom() - 5.0), Vec2::new(br.width() - 16.0, 2.0));
                 ui.painter().rect_filled(mark, CornerRadius::same(1), col);
             }
             if resp.clicked() {
-                st.fader_mode[sel] = *m;
+                st.fader_mode[ch] = *m;
+                ui.close();
+            }
+        }
+    }
+    ui.add_space(8.0);
+    heading(ui, "TURN OFF GROUPS");
+    let (area, _) = ui.allocate_exact_size(Vec2::new(FADER_POPUP_W, bh), Sense::hover());
+    for (i, g) in Group::ALL.iter().enumerate() {
+        let br = Rect::from_min_size(Pos2::new(area.left() + i as f32 * (w + gap), area.top()), Vec2::new(w, bh));
+        let active = g.active(core, ch);
+        let saved = st.group_restore.contains_key(&(ch, *g));
+        // Lit: the group is doing something (tap: back to neutral). "↺": tap restores what it was.
+        let (label, style) = match (g, active, saved) {
+            (Group::Volume, true, _) => ("Mute".to_string(), Style::Dark),
+            (Group::Volume, false, _) => ("Muted".to_string(), Style::Fill(dim(RED, 0.8))),
+            (_, true, _) => (g.name().to_string(), Style::Light),
+            (_, false, true) => (format!("↺ {}", g.name()), Style::Outline(LIGHT, true)),
+            (_, false, false) => (g.name().to_string(), Style::Dark),
+        };
+        let resp = button(ui, br, &label, style, bold(12.0)).on_hover_text(g.help());
+        if resp.clicked() && !core.learn {
+            g.toggle(core, st, ch, active);
+        }
+    }
+}
+
+/// Groups of channel controls the fader popup can turn off as a whole (and back on).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Group {
+    Eq,
+    Stems,
+    Tempo,
+    Volume,
+    Filter,
+}
+
+impl Group {
+    const ALL: [Group; 5] = [Group::Eq, Group::Stems, Group::Tempo, Group::Volume, Group::Filter];
+
+    fn name(self) -> &'static str {
+        match self {
+            Group::Eq => "EQ",
+            Group::Stems => "Stems",
+            Group::Tempo => "Tempo",
+            Group::Volume => "Volume",
+            Group::Filter => "Filter",
+        }
+    }
+
+    fn help(self) -> &'static str {
+        match self {
+            Group::Eq => "Lit when EQ is in use: tap to set High, Mid and Low to neutral, tap ↺ to restore them",
+            Group::Stems => "Lit when a stem is down: tap for the plain mix, tap ↺ to restore the stem levels",
+            Group::Tempo => "Lit when the tempo is changed: tap for 0 %, tap ↺ to restore it",
+            Group::Volume => "Mute or unmute the channel",
+            Group::Filter => "Lit when the filter is in use: tap to set it to neutral, tap ↺ to restore it",
+        }
+    }
+
+    /// (address, value now) of each control in the group, and its neutral value.
+    fn controls(self, core: &Core, ch: usize) -> (Vec<(String, f32)>, f32) {
+        let n = ch + 1;
+        let p = &core.session.channels[ch].params;
+        let v = &core.snap.decks[ch];
+        match self {
+            Group::Eq => (
+                vec![(format!("Mixer/CH{n}/EQ/High"), p.eq[2]), (format!("Mixer/CH{n}/EQ/Mid"), p.eq[1]), (format!("Mixer/CH{n}/EQ/Low"), p.eq[0])],
+                0.5,
+            ),
+            Group::Stems => (
+                ["Drums", "Bass", "Vocals", "Other"].iter().enumerate().map(|(i, s)| (format!("Deck/{n}/Stem{s}Level"), v.stem_gains[i])).collect(),
+                1.0,
+            ),
+            Group::Tempo => (vec![(format!("Deck/{n}/Tempo"), (v.tempo_fader as f32 + 1.0) / 2.0)], 0.5),
+            Group::Volume => (vec![(format!("Mixer/CH{n}/Mute"), p.mute as i32 as f32)], 0.0),
+            Group::Filter => (vec![(format!("Mixer/CH{n}/Filter1"), p.cutoff)], 0.5),
+        }
+    }
+
+    /// Whether the group currently does anything (not neutral; for Volume: not muted).
+    fn active(self, core: &Core, ch: usize) -> bool {
+        if self == Group::Volume {
+            return !core.session.channels[ch].params.mute;
+        }
+        let (ctl, neutral) = self.controls(core, ch);
+        ctl.iter().any(|(_, v)| (v - neutral).abs() > 0.005)
+    }
+
+    fn toggle(self, core: &mut Core, st: &mut UiState, ch: usize, active: bool) {
+        if self == Group::Volume {
+            act_i(core, &format!("Mixer/CH{}/Mute", ch + 1), active as i32);
+            return;
+        }
+        let (ctl, neutral) = self.controls(core, ch);
+        if active {
+            st.group_restore.insert((ch, self), ctl.iter().map(|(_, v)| *v).collect());
+            for (addr, _) in &ctl {
+                act_f(core, addr, neutral);
+            }
+        } else if let Some(saved) = st.group_restore.remove(&(ch, self)) {
+            for ((addr, _), v) in ctl.iter().zip(saved) {
+                act_f(core, addr, v);
             }
         }
     }
