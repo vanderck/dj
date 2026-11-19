@@ -291,7 +291,7 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
             p.rect_stroke(rr, rad, Stroke::new(1.0, Color32::from_rgb(0x2a, 0x2a, 0x30)), egui::StrokeKind::Inside);
             p.text(rr.center(), Align2::CENTER_CENTER, "+", bold(pad_font + 2.0), if resp.hovered() { TEXT } else { TEXT_FAINT });
         }
-        let tip = if is_set { "Click: launch · Ctrl-click: delete · Alt-click: loop to next cue" } else { "Set a hot cue at the playhead" };
+        let tip = if is_set { "Click: loop from this cue (loop size below) · Ctrl-click: delete · Alt-click: loop to the next cue" } else { "Set a hot cue at the playhead" };
         let resp = resp.on_hover_text(tip);
         let addr = a(&format!("Cue{}", i + 1));
         learnable(core, &resp, &addr);
@@ -311,6 +311,9 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
             if resp.drag_stopped() || resp.clicked() {
                 act(core, &hc, &[rosc::OscType::Int(i as i32 + 1), rosc::OscType::Int(0)]);
             }
+        } else if resp.clicked() && is_set {
+            // A set cue launches as a loop starting at the cue, of the deck's loop size.
+            act(core, &a("CueBeatLoop"), &[rosc::OscType::Int(i as i32 + 1), rosc::OscType::Float(st.loop_size[d] as f32)]);
         } else if resp.clicked() {
             act_i(core, &hc, i as i32 + 1);
         }

@@ -47,6 +47,8 @@ pub enum DeckCmd {
     GridStart,
     HotCue { idx: u8, pressed: bool },
     CueLoop(u8),
+    /// Launch a hot cue with a loop of this many beats starting at it.
+    CueBeatLoop { idx: u8, beats: f64 },
     DeleteCue(u8),
     SetCue { idx: u8, secs: Option<f64>, end_secs: Option<f64> },
     MomentaryCues(bool),
@@ -502,6 +504,7 @@ impl Engine {
             DeckCmd::GridStart => deck.jump_to_grid_start(),
             DeckCmd::HotCue { idx, pressed } => deck.hot_cue(idx, pressed, &ctx),
             DeckCmd::CueLoop(i) => deck.cue_loop(i, &ctx),
+            DeckCmd::CueBeatLoop { idx, beats } => deck.cue_beat_loop(idx, beats, &ctx),
             DeckCmd::DeleteCue(i) => deck.delete_hot_cue(i),
             DeckCmd::SetCue { idx, secs, end_secs } => {
                 let cue = secs.map(|s| crate::track::Cue {

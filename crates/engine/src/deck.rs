@@ -116,6 +116,17 @@ enum PendingAction {
     Play,
     JumpCue(u8),
     CueLoop(u8),
+    CueBeatLoop(u8, f64),
+}
+
+/// What happens at a hot cue besides jumping to it (stored loop cues always loop).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum CueLoopMode {
+    None,
+    /// Loop from the cue to the next cue in time (or the end of the track).
+    ToNextCue,
+    /// Loop this many beats from the cue.
+    Beats(f64),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -741,17 +752,17 @@ impl Deck {
                 if self.playing {
                     let on_clock = self.sync || ctx.is_clock_owner;
                     if !self.schedule(ctx, PendingAction::JumpCue(idx), on_clock) {
-                        self.fire_cue(idx, false, ctx);
+                        self.fire_cue(idx, CueLoopMode::None, ctx);
                     }
                 } else {
-                    self.fire_cue(idx, false, ctx);
+                    self.fire_cue(idx, CueLoopMode::None, ctx);
                     self.play(ctx);
                 }
             }
         }
     }
 
-    fn fire_cue(&mut self, idx: u8, force_loop: bool, ctx: &DeckCtx) {
+    fn fire_cue(&mut self, idx: u8, mode: CueLoopMode, ctx: &DeckCtx) {
         let Some(c) = self.hot_cues[idx as usize] else { return };
         if self.slip && self.playing {
             // Keep the underlying playhead running.
@@ -763,7 +774,7 @@ impl Deck {
         if let Some(end) = c.end {
             self.loop_region = Some(LoopRegion { start: c.start, end });
             self.loop_on = true;
-        } else if force_loop {
+        } else if mode == CueLoopMode::ToNextCue {
             // Loop from this cue to the next cue in time (or end of track).
             let next = self
                 .hot_cues
@@ -773,6 +784,12 @@ impl Deck {
                 .filter(|&s| s > c.start + 1.0)
                 .fold(self.len_frames(), f64::min);
             self.loop_region = Some(LoopRegion { start: c.start, end: next });
+            self.loop_on = true;
+        } else if let CueLoopMode::Beats(beats) = mode {
+            // No grid: assume 120 BPM, as `loop_beats` does.
+            let fpb = self.frames_per_beat().unwrap_or(self.src_rate() * 0.5);
+            let end = (c.start + beats.max(1.0 / 32.0) * fpb).min(self.len_frames());
+            self.loop_region = Some(LoopRegion { start: c.start, end });
             self.loop_on = true;
         }
         let _ = ctx;
@@ -787,10 +804,27 @@ impl Deck {
         if self.playing {
             let on_clock = self.sync || ctx.is_clock_owner;
             if !self.schedule(ctx, PendingAction::CueLoop(idx), on_clock) {
-                self.fire_cue(idx, true, ctx);
+                self.fire_cue(idx, CueLoopMode::ToNextCue, ctx);
             }
         } else {
-            self.fire_cue(idx, true, ctx);
+            self.fire_cue(idx, CueLoopMode::ToNextCue, ctx);
+            self.play(ctx);
+        }
+    }
+
+    /// Launch cue `idx` with a loop of `beats` starting at the cue (quantized like any cue
+    /// launch; starts playback when stopped).
+    pub fn cue_beat_loop(&mut self, idx: u8, beats: f64, ctx: &DeckCtx) {
+        if self.hot_cues.get(idx as usize).copied().flatten().is_none() {
+            return;
+        }
+        if self.playing {
+            let on_clock = self.sync || ctx.is_clock_owner;
+            if !self.schedule(ctx, PendingAction::CueBeatLoop(idx, beats), on_clock) {
+                self.fire_cue(idx, CueLoopMode::Beats(beats), ctx);
+            }
+        } else {
+            self.fire_cue(idx, CueLoopMode::Beats(beats), ctx);
             self.play(ctx);
         }
     }
@@ -1148,8 +1182,9 @@ impl Deck {
                     self.pending = None;
                     match p.action {
                         PendingAction::Play => self.start_now(ctx),
-                        PendingAction::JumpCue(c) => self.fire_cue(c, false, ctx),
-                        PendingAction::CueLoop(c) => self.fire_cue(c, true, ctx),
+                        PendingAction::JumpCue(c) => self.fire_cue(c, CueLoopMode::None, ctx),
+                        PendingAction::CueLoop(c) => self.fire_cue(c, CueLoopMode::ToNextCue, ctx),
+                        PendingAction::CueBeatLoop(c, beats) => self.fire_cue(c, CueLoopMode::Beats(beats), ctx),
                     }
                 }
             }

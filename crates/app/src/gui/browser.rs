@@ -38,6 +38,30 @@ const COLS: [(Option<Col>, &str, f32, bool); 10] = [
     (None, "Load to", 0.065, false),
 ];
 
+/// Fits: tempo window around the reference deck's BPM.
+const FITS_BPM: f64 = 5.0;
+
+/// Key fit, best first; `None` = does not mix.
+fn key_rank(c: Compat) -> Option<u8> {
+    match c {
+        Compat::Same => Some(0),
+        Compat::Relative | Compat::Adjacent => Some(1),
+        Compat::Boost => Some(2),
+        Compat::Diagonal | Compat::Clash => None,
+    }
+}
+
+/// Lower is better: the key fit first, then the tempo distance (each key step outweighs the
+/// whole ±5 BPM window).
+fn fit_score(e: &Entry, reference: collective_library::key::Key, ref_bpm: Option<f64>) -> f64 {
+    let rank = e.key.and_then(|k| key_rank(k.compat(reference))).unwrap_or(9) as f64;
+    let bpm = match (ref_bpm, e.bpm) {
+        (Some(r), Some(b)) => (b - r).abs(),
+        _ => 0.0,
+    };
+    rank * 2.0 * FITS_BPM + bpm
+}
+
 fn mmss(s: Option<f64>) -> String {
     s.map(|s| format!("{}:{:02}", (s / 60.0) as u32, (s % 60.0) as u32)).unwrap_or_default()
 }
@@ -77,13 +101,18 @@ pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect) {
         collective_engine::engine::ClockOwner::Deck(d) => Some(d as usize),
         _ => (0..core.deck_count()).find(|&d| core.snap.decks[d].playing),
     };
+    // The reference tempo: the deck's current BPM (what a new track has to match).
+    let ref_bpm = ref_deck.map(|d| core.snap.decks[d].bpm).filter(|b| *b > 0.0);
     let fits_label = match (ref_deck, reference) {
-        (Some(d), Some(k)) => format!("Fits deck {} ({})", d + 1, core.key_text(Some(k))),
+        (Some(d), Some(k)) => match ref_bpm {
+            Some(b) => format!("Fits deck {} · {} · {:.0} BPM", d + 1, core.key_text(Some(k)), b),
+            None => format!("Fits deck {} · {}", d + 1, core.key_text(Some(k))),
+        },
         _ => "Fits —".into(),
     };
     let w = pill_width(ui, &fits_label, 13.0) + 14.0;
     let fr = Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, bar_h));
-    let resp = ui.allocate_rect(fr, Sense::click()).on_hover_text("Only show keys that mix harmonically with the master deck");
+    let resp = ui.allocate_rect(fr, Sense::click()).on_hover_text(format!("Tracks that mix with the master deck: a compatible key and within ±{FITS_BPM:.0} BPM, best match first"));
     let p = ui.painter();
     let rad = CornerRadius::same((bar_h / 2.0) as u8);
     p.rect_filled(fr, rad, if st.browser_harmonic { LIGHT } else if resp.hovered() { CTRL_HOVER } else { CTRL });
@@ -118,12 +147,31 @@ pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect) {
     } else {
         core.filtered_library()
     };
-    if st.browser_harmonic {
-        if let Some(rk) = reference {
-            rows.retain(|&i| core.library[i].key.map(|k| k.compat(rk) != Compat::Clash && k.compat(rk) != Compat::Diagonal).unwrap_or(false));
-        }
+    // Fits: compatible key and close tempo, best match first; tracks already on a deck are left out.
+    let fits = st.browser_harmonic && reference.is_some();
+    if let (true, Some(rk)) = (fits, reference) {
+        let loaded: Vec<PathBuf> = (0..core.deck_count()).filter_map(|d| core.decks[d].info.as_ref().map(|i| i.path.clone())).collect();
+        let lib = &core.library;
+        rows.retain(|&i| {
+            let e = &lib[i];
+            let key_ok = e.key.is_some_and(|k| key_rank(k.compat(rk)).is_some());
+            let bpm_ok = match (ref_bpm, e.bpm) {
+                (Some(r), Some(b)) => (b - r).abs() <= FITS_BPM,
+                (Some(_), None) => false,
+                (None, _) => true,
+            };
+            key_ok && bpm_ok && !loaded.contains(&e.path)
+        });
+        rows.sort_by(|&a, &b| fit_score(&lib[a], rk, ref_bpm).total_cmp(&fit_score(&lib[b], rk, ref_bpm)));
     }
-    if !st.browser_hist {
+    // Focus the best match whenever it changes (Fits switched on, another reference, ...).
+    let best = if fits { rows.first().copied() } else { None };
+    let refocus = best.is_some() && best != st.fits_focus;
+    st.fits_focus = best;
+    if refocus {
+        core.browser_selected = best;
+    }
+    if !st.browser_hist && !fits {
         let lib = &core.library;
         let (col, asc) = (st.browser_sort, st.browser_asc);
         rows.sort_by(|&a, &b| {
@@ -180,7 +228,11 @@ pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect) {
     let on_deck: Vec<(usize, PathBuf)> = (0..core.deck_count()).filter_map(|d| core.decks[d].info.as_ref().map(|i| (d, i.path.clone()))).collect();
     let mut child = ui.new_child(UiBuilder::new().max_rect(body));
     let ctx = ui.ctx().clone();
-    egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(&mut child, row_h, rows.len(), |ui, range| {
+    let mut scroll = egui::ScrollArea::vertical().auto_shrink([false, false]);
+    if refocus {
+        scroll = scroll.vertical_scroll_offset(0.0);
+    }
+    scroll.show_rows(&mut child, row_h, rows.len(), |ui, range| {
         for ri in range {
             let i = rows[ri];
             let e = core.library[i].clone();
@@ -189,6 +241,9 @@ pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect) {
             let hovered = resp.hovered() || resp.contains_pointer();
             if selected || hovered {
                 ui.painter().rect_filled(rr, CornerRadius::same(8), if selected { Color32::from_rgb(0x2a, 0x2a, 0x31) } else { Color32::from_rgb(0x22, 0x22, 0x28) });
+            }
+            if best == Some(i) {
+                ui.painter().rect_stroke(rr, CornerRadius::same(8), egui::Stroke::new(1.5, GREEN), egui::StrokeKind::Inside);
             }
             let mut x = rr.left();
             let cell = |i: usize, x: f32| Rect::from_min_size(Pos2::new(x, rr.top()), Vec2::new(widths[i] - 10.0, rr.height()));
@@ -286,3 +341,25 @@ pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect) {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use collective_library::key::Key;
+
+    fn entry(key: &str, bpm: f64) -> Entry {
+        Entry { key: Key::parse(key), bpm: Some(bpm), ..Default::default() }
+    }
+
+    #[test]
+    fn fits_ranks_key_first_then_tempo() {
+        let r = Key::parse("8A").unwrap();
+        let same_far = fit_score(&entry("8A", 128.0), r, Some(124.0));
+        let same_near = fit_score(&entry("8A", 124.5), r, Some(124.0));
+        let adjacent_exact = fit_score(&entry("9A", 124.0), r, Some(124.0));
+        let boost = fit_score(&entry("10A", 124.0), r, Some(124.0));
+        assert!(same_near < same_far && same_far < adjacent_exact && adjacent_exact < boost);
+        assert_eq!(key_rank(Key::parse("8B").unwrap().compat(r)), Some(1)); // relative
+        assert_eq!(key_rank(Key::parse("3A").unwrap().compat(r)), None); // clash
+    }
+}
