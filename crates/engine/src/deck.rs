@@ -185,6 +185,8 @@ impl Source for Reader<'_> {
 }
 
 const XFADE_FRAMES: u32 = 192; // ~4 ms blend when switching render modes
+/// Seconds per beat assumed for loops on a track without a beat grid (120 BPM).
+const NO_GRID_SECS_PER_BEAT: f64 = 0.5;
 
 /// Public, copyable view of a deck for snapshots.
 #[derive(Clone, Copy, Debug, Default)]
@@ -500,7 +502,8 @@ impl Deck {
             loop_on: self.loop_on,
             loop_start_secs: lr.start / sr,
             loop_end_secs: lr.end / sr,
-            loop_beats: self.frames_per_beat().map(|f| lr.len() / f).unwrap_or(0.0),
+            // Without a grid, loops assume 120 BPM (see `loop_beats`).
+            loop_beats: lr.len() / self.frames_per_beat().unwrap_or(NO_GRID_SECS_PER_BEAT * self.src_rate()),
             cue_point_secs: self.cue_point / sr,
             hot_cues: hot,
             hot_cue_is_loop: hot_loop,
@@ -861,9 +864,12 @@ impl Deck {
 
     /// Start a loop of `beats` length at the current (quantized) position.
     pub fn loop_beats(&mut self, beats: f64, ctx: &DeckCtx) {
+        if self.track.is_none() {
+            return; // nothing to loop
+        }
         let Some(fpb) = self.frames_per_beat() else {
             // No grid: assume 120 BPM so loops still work.
-            let fpb = self.src_rate() * 0.5;
+            let fpb = NO_GRID_SECS_PER_BEAT * self.src_rate();
             self.loop_region = Some(LoopRegion { start: self.pos, end: self.pos + beats * fpb });
             self.loop_on = true;
             return;
@@ -880,6 +886,9 @@ impl Deck {
     }
 
     pub fn loop_in(&mut self, ctx: &DeckCtx) {
+        if self.track.is_none() {
+            return;
+        }
         if self.loop_on {
             self.loop_scale(0.5);
             return;
@@ -954,6 +963,9 @@ impl Deck {
 
     /// Free-loop knob: `ms` sets a very short loop in milliseconds.
     pub fn free_loop(&mut self, ms: f64) {
+        if self.track.is_none() {
+            return;
+        }
         let len = (ms.clamp(5.0, 2000.0) * 0.001 * self.src_rate()).max(32.0);
         let start = self.loop_region.filter(|_| self.loop_on).map(|l| l.start).unwrap_or(self.pos);
         self.loop_region = Some(LoopRegion { start, end: start + len });
@@ -976,7 +988,7 @@ impl Deck {
 
     /// Hold-to-repeat slip loop ("roll"). `beats` already includes D/T modifiers.
     pub fn slip_loop(&mut self, beats: f64, pressed: bool, _ctx: &DeckCtx) {
-        if pressed {
+        if pressed && self.track.is_some() {
             if self.roll.is_none() {
                 self.roll = Some(Roll { saved_loop: self.loop_region, saved_loop_on: self.loop_on });
                 self.slip_pos = self.pos;
