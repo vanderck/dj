@@ -200,6 +200,10 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
     } else {
         format!("{:.2}", v.bpm)
     }, mono(if dense { 18.0 } else { 22.0 }), TEXT);
+    // The deck that sets the master tempo (chosen automatically) says so above its BPM.
+    if is_master {
+        p.text(Pos2::new(bpm_r.right(), bpm_r.top() + 1.0), Align2::RIGHT_TOP, "MASTER", bold(9.5), RED);
+    }
     let key = core.key_text(core.deck_key(d));
     let chip = Rect::from_min_size(Pos2::new(bpm_r.left() - 56.0, r.top() + (hh - 30.0).max(4.0) / 2.0), Vec2::new(46.0, (hh - 8.0).min(30.0)));
     if !key.is_empty() {
@@ -223,8 +227,8 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
     let k = ((r.bottom() - (r.top() + hh + 12.0)) / base).clamp(if dense { 0.55 } else { 1.0 }, 1.8);
     let y = r.top() + hh + 12.0;
     let bh = 52.0 * k;
-    // (The main cue is the first pad of the cue row.)
-    let big_w = (w - 2.0 * gap) / 3.0;
+    // (The main cue is the first pad of the cue row; dj picks the tempo master itself.)
+    let big_w = (w - gap) / 2.0;
     let mut x = r.left();
     let mut big_btn = |ui: &mut Ui, label: &str, style: Style, wf: f32| -> egui::Response {
         let rr = Rect::from_min_size(Pos2::new(x, y), Vec2::new(big_w * wf, bh));
@@ -241,11 +245,6 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
     learnable(core, &resp, &a("TempoSync"));
     if resp.clicked() {
         act_i(core, &a("TempoSync"), 1);
-    }
-    let resp = big_btn(ui, if is_master { "Master" } else { "Follow" }, if is_master { Style::Fill(RED) } else { Style::Dark }, 1.0);
-    learnable(core, &resp, &a("TempoMaster"));
-    if resp.clicked() {
-        act_i(core, &a("TempoMaster"), 1);
     }
 
     // ---------------------------------------------------------- hot cues
