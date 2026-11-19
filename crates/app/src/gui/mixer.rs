@@ -255,7 +255,7 @@ fn strip(ui: &mut Ui, core: &mut Core, st: &mut UiState, ch: usize, rect: Rect) 
     let r = rect.shrink2(Vec2::new(8.0, 12.0));
     let title_r = Rect::from_min_size(r.min, Vec2::new(r.width(), 16.0));
     let tr = ui.allocate_rect(title_r, Sense::click()).on_hover_text("Right-click: effects, mute, solo, trim, output…");
-    ui.painter().text(title_r.center(), Align2::CENTER_CENTER, if p.mute { format!("CH {n} · MUTE") } else { format!("CH {n}") }, mono(12.0), if p.mute { RED } else { TEXT_DIM });
+    ui.painter().text(title_r.center(), Align2::CENTER_CENTER, format!("CH {n}"), mono(12.0), TEXT_DIM);
     // Status dots: EQ/filter away from neutral, effects running.
     let eq_moved = p.eq.iter().any(|v| (v - 0.5).abs() > 0.01) || (p.cutoff - 0.5).abs() > 0.01;
     let fx_on = cm.fx.slots.iter().any(|s| s.is_some()) && !cm.fx.bypass_all;
@@ -277,29 +277,13 @@ fn strip(ui: &mut Ui, core: &mut Core, st: &mut UiState, ch: usize, rect: Rect) 
         act_i(core, &a("Cue"), !p.cue as i32);
     }
 
-    // ON/OFF under the fader: switches what the fader controls fully off and back.
     let mode = st.fader_mode[ch];
     // The channel a MIDI control just moved flashes in its function's colour.
     if st.fader_popup.is_some_and(|(_, c, _)| c == ch) {
         ui.painter().rect_stroke(rect.expand(1.5), CornerRadius::same(11), Stroke::new(2.0, mode.color(ch)), egui::StrokeKind::Outside);
     }
     let t = mode.target(core, ch);
-    let on_r = Rect::from_min_max(Pos2::new(r.left() + 2.0, r.bottom() - 36.0), Pos2::new(r.right() - 2.0, r.bottom()));
-    let is_on = (t.value - t.off).abs() > 0.005;
     let mode_color = mode.color(ch);
-    let on_style = if is_on { Style::Fill(mode_color) } else { Style::Outline(Color32::from_gray(70), false) };
-    let resp = button(ui, on_r, if is_on { "ON" } else { "OFF" }, on_style, bold(13.0))
-        .on_hover_text(format!("{}: switch fully off, then back to where it was", mode.name()));
-    learnable(core, &resp, &t.addr);
-    if resp.clicked() && !core.learn {
-        if is_on {
-            st.fader_restore.insert((ch, mode), t.value);
-            act_f(core, &t.addr, t.off);
-        } else {
-            let back = st.fader_restore.remove(&(ch, mode)).filter(|v| (v - t.off).abs() > 0.005).unwrap_or(t.full);
-            act_f(core, &t.addr, back);
-        }
-    }
 
     // What this fader controls, clearly: a chip in the function's colour (volume: outline only).
     // Tapping it opens the fader popup.
@@ -330,11 +314,12 @@ fn strip(ui: &mut Ui, core: &mut Core, st: &mut UiState, ch: usize, rect: Rect) 
         .show(|ui| fader_popup(ui, core, st, ch));
 
     // The fader: volume, an EQ band, the filter, a stem or the deck's tempo.
-    let track = Rect::from_min_max(Pos2::new(r.left() + 4.0, chip.bottom() + 8.0), Pos2::new(r.right() - 4.0, on_r.top() - 10.0));
+    let track = Rect::from_min_max(Pos2::new(r.left() + 4.0, chip.bottom() + 8.0), Pos2::new(r.right() - 4.0, r.bottom()));
     let level = mode == FaderMode::Level;
     let meter = if level { view.post_peak[0].max(view.post_peak[1]) } else { 0.0 };
-    let fader_color = if p.mute && level { Color32::from_gray(90) } else { mode_color };
-    let (resp, mut new) = vfader(ui, track, t.value, fader_color, meter, t.centred);
+    // Muted (over MIDI or the channel menu) is volume off: the fader shows it at the bottom.
+    let shown = if level && p.mute { 0.0 } else { t.value };
+    let (resp, mut new) = vfader(ui, track, shown, mode_color, meter, t.centred);
     if mode == FaderMode::Tempo {
         // The deck's tempo change, on the fader; drags snap to the global step setting.
         let dv = core.snap.decks[ch];
@@ -368,6 +353,9 @@ fn strip(ui: &mut Ui, core: &mut Core, st: &mut UiState, ch: usize, rect: Rect) 
     let resp = resp.on_hover_text(hover);
     learnable(core, &resp, &t.addr);
     if !core.learn {
+        if level && p.mute && (new.is_some() || resp.double_clicked()) {
+            act_i(core, &a("Mute"), 0); // moving a muted fader unmutes it
+        }
         if let Some(v) = new {
             if level && ui.input(|i| i.modifiers.command) {
                 let tr = (p.trim_db / 12.0 + 0.5 + (v - p.volume)).clamp(0.0, 1.0);
@@ -493,8 +481,6 @@ fn fader_popup(ui: &mut Ui, core: &mut Core, st: &mut UiState, ch: usize) {
         let saved = st.group_restore.contains_key(&(ch, *g));
         // Lit: the group is doing something (tap: back to neutral). "↺": tap restores what it was.
         let (label, style) = match (g, active, saved) {
-            (Group::Volume, true, _) => ("Mute".to_string(), Style::Dark),
-            (Group::Volume, false, _) => ("Muted".to_string(), Style::Fill(dim(RED, 0.8))),
             (_, true, _) => (g.name().to_string(), Style::Light),
             (_, false, true) => (format!("↺ {}", g.name()), Style::Outline(LIGHT, true)),
             (_, false, false) => (g.name().to_string(), Style::Dark),
@@ -534,7 +520,7 @@ impl Group {
             Group::Eq => "Lit when EQ is in use: tap to set High, Mid and Low to neutral, tap ↺ to restore them",
             Group::Stems => "Lit when a stem is down: tap for the plain mix, tap ↺ to restore the stem levels",
             Group::Tempo => "Lit when the tempo is changed: tap for 0 %, tap ↺ to restore it",
-            Group::Volume => "Mute or unmute the channel",
+            Group::Volume => "Lit when the channel is audible: tap for volume off, tap ↺ to bring it back",
             Group::Filter => "Lit when the filter is in use: tap to set it to neutral, tap ↺ to restore it",
         }
     }
@@ -554,24 +540,20 @@ impl Group {
                 1.0,
             ),
             Group::Tempo => (vec![(format!("Deck/{n}/Tempo"), (v.tempo_fader as f32 + 1.0) / 2.0)], 0.5),
-            Group::Volume => (vec![(format!("Mixer/CH{n}/Mute"), p.mute as i32 as f32)], 0.0),
+            Group::Volume => (vec![(format!("Mixer/CH{n}/Volume"), if p.mute { 0.0 } else { p.volume })], 0.0),
             Group::Filter => (vec![(format!("Mixer/CH{n}/Filter1"), p.cutoff)], 0.5),
         }
     }
 
     /// Whether the group currently does anything (not neutral; for Volume: not muted).
     fn active(self, core: &Core, ch: usize) -> bool {
-        if self == Group::Volume {
-            return !core.session.channels[ch].params.mute;
-        }
         let (ctl, neutral) = self.controls(core, ch);
         ctl.iter().any(|(_, v)| (v - neutral).abs() > 0.005)
     }
 
     fn toggle(self, core: &mut Core, st: &mut UiState, ch: usize, active: bool) {
-        if self == Group::Volume {
-            act_i(core, &format!("Mixer/CH{}/Mute", ch + 1), active as i32);
-            return;
+        if core.session.channels[ch].params.mute {
+            act_i(core, &format!("Mixer/CH{}/Mute", ch + 1), 0); // volume off replaces mute
         }
         let (ctl, neutral) = self.controls(core, ch);
         if active {
@@ -606,10 +588,8 @@ pub enum FaderMode {
 pub struct FaderTarget {
     pub value: f32,
     pub addr: String,
-    /// Double-click / ON value.
+    /// Double-click value.
     pub full: f32,
-    /// OFF value.
-    pub off: f32,
     /// Bipolar control drawn from the centre (EQ, filter, tempo).
     pub centred: bool,
 }
@@ -684,24 +664,24 @@ impl FaderMode {
         let n = ch + 1;
         let mixer = |s: &str| format!("Mixer/CH{n}/{s}");
         let p = &core.session.channels[ch].params;
-        let t = |value, addr, full, off, centred| FaderTarget { value, addr, full, off, centred };
+        let t = |value, addr, full, centred| FaderTarget { value, addr, full, centred };
         match self {
-            FaderMode::Level => t(p.volume, mixer("Volume"), 1.0, 0.0, false),
-            FaderMode::High => t(p.eq[2], mixer("EQ/High"), 0.5, 0.0, true),
-            FaderMode::Mid => t(p.eq[1], mixer("EQ/Mid"), 0.5, 0.0, true),
-            FaderMode::Low => t(p.eq[0], mixer("EQ/Low"), 0.5, 0.0, true),
-            FaderMode::Filter => t(p.cutoff, mixer("Filter1"), 0.5, 0.5, true),
+            FaderMode::Level => t(p.volume, mixer("Volume"), 1.0, false),
+            FaderMode::High => t(p.eq[2], mixer("EQ/High"), 0.5, true),
+            FaderMode::Mid => t(p.eq[1], mixer("EQ/Mid"), 0.5, true),
+            FaderMode::Low => t(p.eq[0], mixer("EQ/Low"), 0.5, true),
+            FaderMode::Filter => t(p.cutoff, mixer("Filter1"), 0.5, true),
             FaderMode::Tempo => {
                 // Synced followers show where their actual speed sits.
                 let v = &core.snap.decks[ch];
                 let follower = v.sync && core.snap.clock.owner != ClockOwner::Deck(ch as u8);
                 let fader = if follower { v.tempo_range.fader_for_speed(v.speed / v.speed_mult.max(0.01)) } else { v.tempo_fader };
-                t((fader.clamp(-1.0, 1.0) as f32 + 1.0) / 2.0, format!("Deck/{n}/Tempo"), 0.5, 0.5, true)
+                t((fader.clamp(-1.0, 1.0) as f32 + 1.0) / 2.0, format!("Deck/{n}/Tempo"), 0.5, true)
             }
             _ => {
                 let i = self.stem().unwrap();
                 let name = ["Drums", "Bass", "Vocals", "Other"][i];
-                t(core.snap.decks[ch].stem_gains[i], format!("Deck/{n}/Stem{name}Level"), 1.0, 0.0, false)
+                t(core.snap.decks[ch].stem_gains[i], format!("Deck/{n}/Stem{name}Level"), 1.0, false)
             }
         }
     }
