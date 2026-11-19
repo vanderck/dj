@@ -51,6 +51,8 @@ pub struct AutoMix {
     in_low: f32,
     in_vocals: Option<f32>,
     out_volume: f32,
+    /// The tracks on (incoming, outgoing) when the mix started.
+    tracks: (u64, u64),
 }
 
 fn smooth(x: f64) -> f32 {
@@ -160,6 +162,13 @@ impl Core {
             self.deck_cmd(o, DeckCmd::ToggleMaster);
         }
         self.deck_cmd(i, DeckCmd::Sync(true));
+        // Muted counts as silent: make it volume-down instead, so the fade-in is heard.
+        if self.session.channels[i].params.mute {
+            self.set_channel(i, |p| {
+                p.volume = 0.0;
+                p.mute = false;
+            });
+        }
         let params = |c: usize| self.session.channels[c].params;
         let in_vocals = (plan.mode == MixWhen::Now && self.snap.decks[i].stems_ready).then(|| self.snap.decks[i].stem_gains[2]);
         let mix = AutoMix {
@@ -170,6 +179,7 @@ impl Core {
             in_low: params(i).eq[0],
             in_vocals,
             out_volume: params(o).volume,
+            tracks: (self.snap.decks[i].track_id, self.snap.decks[o].track_id),
             plan,
         };
         // The incoming bass stays out until the swap; its vocals (Now) until the old track is gone.
@@ -211,6 +221,11 @@ impl Core {
         let Some(m) = self.automix.as_ref() else { return };
         let (i, o, start, len) = (m.plan.incoming, m.plan.outgoing, m.plan.start_beat, m.plan.length_beats);
         let (vi, vo) = (self.snap.decks[i], self.snap.decks[o]);
+        // Another track loaded (on the outgoing deck it only matters until that deck stopped).
+        if vi.track_id != m.tracks.0 || (m.finished.is_none() && vo.track_id != m.tracks.1) {
+            self.cancel_mix();
+            return;
+        }
         if let Some(since) = m.finished {
             // The old track is gone: bring the incoming track's vocals back over one bar.
             let x = (vi.beat - since) / 4.0;

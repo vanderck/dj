@@ -2491,7 +2491,9 @@ mod tests {
             c.deck_cmd(d, DeckCmd::SetGrid(Some(dj_engine::track::BeatGrid { bpm: 120.0, anchor_secs: 0.0 })));
         }
         c.route("Mixer/CH1/Volume", &[OscType::Float(0.9)]);
-        c.route("Mixer/CH2/Volume", &[OscType::Float(0.0)]);
+        // Deck 2 is silent by mute (fader up): the mix must unmute it and fade it in from 0.
+        c.route("Mixer/CH2/Volume", &[OscType::Float(0.6)]);
+        c.route("Mixer/CH2/Mute", &[OscType::Int(1)]);
         c.deck_cmd(0, DeckCmd::Play);
         // Deck 2 waits silently in a 4-beat loop at a cue 8 s in.
         c.deck_cmd(1, DeckCmd::SetCue { idx: 0, secs: Some(8.0), end_secs: None });
@@ -2523,6 +2525,7 @@ mod tests {
         pump(&mut e, &mut c);
         assert_eq!(c.snap.clock.owner, ClockOwner::Deck(0));
         assert!(c.snap.decks[1].sync);
+        assert!(!c.session.channels[1].params.mute && c.session.channels[1].params.volume == 0.0, "unmuted at volume 0");
         assert!(c.mix_target(1).is_none(), "one mix at a time");
 
         let low = |c: &Core, ch: usize| c.session.channels[ch].params.eq[0];
@@ -2556,6 +2559,7 @@ mod tests {
         assert!(c.snap.decks[1].playing);
         assert_eq!(vol(&c, 0), 0.0);
         assert!((vol(&c, 1) - 1.0).abs() < 1e-6);
+        assert!(!c.session.channels[1].params.mute);
         assert!((low(&c, 0) - 0.5).abs() < 1e-6 && (low(&c, 1) - 0.5).abs() < 1e-6);
         // The incoming track played on from its cue (12 s of mix after 8 s).
         assert!(c.snap.decks[1].position_secs > 18.0, "{}", c.snap.decks[1].position_secs);

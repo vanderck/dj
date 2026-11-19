@@ -975,20 +975,17 @@ impl Deck {
     }
 
     /// Hold-to-repeat slip loop ("roll"). `beats` already includes D/T modifiers.
-    pub fn slip_loop(&mut self, beats: f64, pressed: bool, ctx: &DeckCtx) {
+    pub fn slip_loop(&mut self, beats: f64, pressed: bool, _ctx: &DeckCtx) {
         if pressed {
             if self.roll.is_none() {
                 self.roll = Some(Roll { saved_loop: self.loop_region, saved_loop_on: self.loop_on });
                 self.slip_pos = self.pos;
             }
             let Some(fpb) = self.frames_per_beat() else { return };
-            let b = self.beat().unwrap();
-            let start = if self.quantize_beats(ctx).is_some() || true {
-                let unit = beats.min(1.0);
-                self.frame_at_beat((b / unit).floor() * unit).unwrap()
-            } else {
-                self.pos
-            };
+            // A roll always starts on the grid (at most one beat back), quantize or not.
+            let Some(b) = self.beat() else { return };
+            let unit = beats.min(1.0);
+            let Some(start) = self.frame_at_beat((b / unit).floor() * unit) else { return };
             self.loop_region = Some(LoopRegion { start, end: start + beats * fpb });
             self.loop_on = true;
         } else if let Some(r) = self.roll.take() {

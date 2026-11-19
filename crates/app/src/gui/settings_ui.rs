@@ -130,8 +130,13 @@ fn settings(ui: &mut Ui, core: &mut Core, st: &mut UiState) {
         use dj_engine::mixer::MixMode;
         ui.label("Mix mode");
         let m = core.session.mix_mode;
+        // The crossfader and vector pad have no on-screen control (MIDI/OSC only), so they
+        // start centred: switching mode never silences a deck.
         for (lbl, mm) in [("Off", MixMode::Off), ("Crossfader", MixMode::Crossfader { pos: 0.0, sharp: false }), ("Vector (4 decks)", MixMode::Vector { x: 0.5, y: 0.5 })] {
-            if ui.selectable_label(std::mem::discriminant(&m) == std::mem::discriminant(&mm), lbl).clicked() {
+            let selected = std::mem::discriminant(&m) == std::mem::discriminant(&mm);
+            if ui.selectable_label(selected, lbl).on_hover_text("Controlled over MIDI or OSC (Header/Crossfader, Header/VectorX, Header/VectorY)").clicked() && !selected {
+                core.session.crossfader = 0.0;
+                core.session.vector = (0.5, 0.5);
                 core.session.mix_mode = mm;
                 core.apply_mix_mode();
             }

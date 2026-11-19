@@ -2,6 +2,7 @@
 name = "dj-library"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "Track loading: decoding, Mixed In Key / Serato tag reading, waveforms, library scanning"
 
