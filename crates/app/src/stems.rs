@@ -10,14 +10,15 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use collective_engine::engine::NUM_DECKS;
-use collective_engine::track::{StemData, Track};
+use collective_engine::track::{Cue, StemData, Track};
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use stems_core::offline::{self, OfflineError, StemBuffers};
 use stems_core::Stem as CoreStem;
 
 pub enum Update {
     Progress { deck: usize, track_id: u64, fraction: f32 },
-    Done { deck: usize, track_id: u64, stems: Arc<StemData>, wave: Arc<StemWave>, source: String },
+    /// `cues`: cue points detected with the stems, when the request asked for them.
+    Done { deck: usize, track_id: u64, stems: Arc<StemData>, wave: Arc<StemWave>, source: String, cues: Option<Vec<Cue>> },
     Failed { deck: usize, track_id: u64, error: String },
 }
 
@@ -31,6 +32,8 @@ pub struct Request {
     pub cache: Option<(PathBuf, u64)>,
     /// HT-Demucs ONNX model (see [`demucs_files`]); tried first, results kept as prepared stems.
     pub demucs: Option<PathBuf>,
+    /// Detect cue points with the stems once they are ready (see `Update::Done`).
+    pub detect_cues: bool,
     /// Folder of prepared stems (from Demucs, on load or with `--prepare-stems`); checked
     /// first and never evicted.
     pub prepared: Option<PathBuf>,
@@ -142,6 +145,20 @@ pub fn bundled_model() -> Option<PathBuf> {
     [dir.join("../Resources").join(BUNDLED_MODEL), dir.join(BUNDLED_MODEL)].into_iter().find(|p| p.is_file())
 }
 
+/// Report finished stems, with cue points detected from them when asked for.
+fn done(job: &Request, tx: &Sender<Update>, stems: StemData, source: String) {
+    let audio = &job.track.audio;
+    let wave = Arc::new(StemWave::compute(&audio.frames, audio.sample_rate, &stems));
+    let cues = match (job.detect_cues, job.track.grid) {
+        (true, Some(grid)) => {
+            let env = collective_library::analysis::Envelope::compute(audio);
+            Some(collective_library::analysis::detect_cues(audio, &env, &grid, Some(&stems)))
+        }
+        _ => None,
+    };
+    let _ = tx.send(Update::Done { deck: job.deck, track_id: job.track.id, stems: Arc::new(stems), wave, source, cues });
+}
+
 fn run(job: Request, wanted: &[AtomicU64; NUM_DECKS], tx: &Sender<Update>, demucs: &mut DemucsCache) {
     let (deck, id) = (job.deck, job.track.id);
     let still_wanted = || wanted[deck].load(Ordering::Relaxed) == id;
@@ -153,8 +170,7 @@ fn run(job: Request, wanted: &[AtomicU64; NUM_DECKS], tx: &Sender<Update>, demuc
     let prepared_key = cache_key(&job.path, PREPARED, frames);
     if let Some(dir) = &job.prepared {
         if let Some(stems) = cache::read(&dir.join(cache::file_name(prepared_key)), prepared_key, id, frames) {
-            let wave = Arc::new(StemWave::compute(&audio.frames, audio.sample_rate, &stems));
-            let _ = tx.send(Update::Done { deck, track_id: id, stems: Arc::new(stems), wave, source: "prepared stems".into() });
+            done(&job, tx, stems, "prepared stems".into());
             return;
         }
     }
@@ -179,8 +195,7 @@ fn run(job: Request, wanted: &[AtomicU64; NUM_DECKS], tx: &Sender<Update>, demuc
                 eprintln!("prepared stems: {e}");
             }
         }
-        let wave = Arc::new(StemWave::compute(&audio.frames, audio.sample_rate, &stems));
-        let _ = tx.send(Update::Done { deck, track_id: id, stems: Arc::new(stems), wave, source: name });
+        done(&job, tx, stems, name);
     };
     let threads = std::thread::available_parallelism().map(|n| n.get().saturating_sub(2).max(1)).unwrap_or(1);
     if let Some(path) = &job.demucs {
@@ -198,8 +213,7 @@ fn run(job: Request, wanted: &[AtomicU64; NUM_DECKS], tx: &Sender<Update>, demuc
     let key = cache_key(&job.path, &separator, frames);
     if let Some((dir, _)) = &job.cache {
         if let Some(stems) = cache::read(&dir.join(cache::file_name(key)), key, id, audio.frames.len()) {
-            let wave = Arc::new(StemWave::compute(&audio.frames, audio.sample_rate, &stems));
-            let _ = tx.send(Update::Done { deck, track_id: id, stems: Arc::new(stems), wave, source: "cache".into() });
+            done(&job, tx, stems, "cache".into());
             return;
         }
     }
@@ -225,8 +239,7 @@ fn run(job: Request, wanted: &[AtomicU64; NUM_DECKS], tx: &Sender<Update>, demuc
                     eprintln!("stems cache: {e}");
                 }
             }
-            let wave = Arc::new(StemWave::compute(&audio.frames, audio.sample_rate, &stems));
-            let _ = tx.send(Update::Done { deck, track_id: id, stems: Arc::new(stems), wave, source });
+            done(&job, tx, stems, source);
         }
         Err(OfflineError::Cancelled) => {}
         Err(e) => {
@@ -623,7 +636,7 @@ mod tests {
 
         let w = StemsWorker::new();
         let t = track(11, 2.0);
-        w.request(Request { deck: 1, track: t.clone(), path: song.clone(), model: None, cache: cache.clone(), demucs: None, prepared: None });
+        w.request(Request { deck: 1, track: t.clone(), path: song.clone(), model: None, cache: cache.clone(), demucs: None, detect_cues: false, prepared: None });
         let Update::Done { deck, track_id, stems, source, .. } = wait(&w) else { panic!("expected stems") };
         assert_eq!((deck, track_id, source.as_str()), (1, 11, "placeholder separator"));
         assert_eq!(stems.len(), t.audio.frames.len());
@@ -634,7 +647,7 @@ mod tests {
 
         // Same file again (new track id): served from the cache, identical content.
         let t2 = track(12, 2.0);
-        w.request(Request { deck: 0, track: t2, path: song.clone(), model: None, cache: cache.clone(), demucs: None, prepared: None });
+        w.request(Request { deck: 0, track: t2, path: song.clone(), model: None, cache: cache.clone(), demucs: None, detect_cues: false, prepared: None });
         let Update::Done { track_id, stems: cached, source, .. } = wait(&w) else { panic!() };
         assert_eq!((track_id, source.as_str()), (12, "cache"));
         assert_eq!(cached.drums, stems.drums);
@@ -650,10 +663,10 @@ mod tests {
     #[test]
     fn cancelled_jobs_produce_nothing() {
         let w = StemsWorker::new();
-        w.request(Request { deck: 2, track: track(21, 30.0), path: PathBuf::from("/nonexistent"), model: None, cache: None, demucs: None, prepared: None });
+        w.request(Request { deck: 2, track: track(21, 30.0), path: PathBuf::from("/nonexistent"), model: None, cache: None, demucs: None, detect_cues: false, prepared: None });
         w.cancel(2);
         // A later request for another deck still completes, and nothing arrives for the cancelled one.
-        w.request(Request { deck: 3, track: track(22, 1.0), path: PathBuf::from("/nonexistent"), model: None, cache: None, demucs: None, prepared: None });
+        w.request(Request { deck: 3, track: track(22, 1.0), path: PathBuf::from("/nonexistent"), model: None, cache: None, demucs: None, detect_cues: false, prepared: None });
         let Update::Done { deck, track_id, .. } = wait(&w) else { panic!() };
         assert_eq!((deck, track_id), (3, 22));
     }
@@ -663,7 +676,7 @@ mod tests {
         let w = StemsWorker::new();
         let bad = std::env::temp_dir().join("collective-not-a-model.onnx");
         fs::write(&bad, b"nope").unwrap();
-        w.request(Request { deck: 0, track: track(31, 1.0), path: bad.clone(), model: Some(bad), cache: None, demucs: None, prepared: None });
+        w.request(Request { deck: 0, track: track(31, 1.0), path: bad.clone(), model: Some(bad), cache: None, demucs: None, detect_cues: false, prepared: None });
         let Update::Failed { track_id: 31, error, .. } = wait(&w) else { panic!("expected the model error first") };
         assert!(error.contains("placeholder"), "{error}");
         let Update::Done { track_id: 31, source, .. } = wait(&w) else { panic!("expected placeholder stems") };
@@ -696,6 +709,7 @@ mod tests {
             model: None,
             cache: None,
             demucs,
+            detect_cues: false,
             prepared: Some(dir.join("prepared")),
         };
         let w = StemsWorker::new();
@@ -742,5 +756,29 @@ mod tests {
         assert_eq!(prepare(), Ok(Prepared::Done("HT-Demucs".into())));
         assert_eq!(prepare(), Ok(Prepared::AlreadyPrepared));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn detects_cue_points_with_the_stems_when_asked() {
+        let mut t = Arc::try_unwrap(track(81, 40.0)).ok().unwrap();
+        t.grid = Some(collective_engine::track::BeatGrid { bpm: 120.0, anchor_secs: 0.0 });
+        let t = Arc::new(t);
+        let w = StemsWorker::new();
+        let req = |track: Arc<Track>, detect_cues| Request {
+            deck: 0,
+            track,
+            path: PathBuf::from("/nonexistent"),
+            model: None,
+            cache: None,
+            demucs: None,
+            detect_cues,
+            prepared: None,
+        };
+        w.request(req(t.clone(), true));
+        let Update::Done { cues, .. } = wait(&w) else { panic!() };
+        assert!(cues.is_some(), "cue detection ran");
+        w.request(req(t, false));
+        let Update::Done { cues, .. } = wait(&w) else { panic!() };
+        assert!(cues.is_none());
     }
 }

@@ -85,6 +85,10 @@ fn badge_menu(ui: &mut Ui, core: &mut Core, d: usize, rect: Rect, size: f32) {
                 core.set_track_locked(d, !locked);
                 ui.close();
             }
+            if core.settings.stems_enabled && ui.button("Detect cue points").on_hover_text("Find this track's sections (Intro, Drop, Break, Vocal, Outro) from its stems, replacing its cue points").clicked() {
+                core.redetect_cues(d);
+                ui.close();
+            }
             if ui.button("Grid start here").clicked() {
                 core.grid_start_here(d);
                 ui.close();
@@ -189,7 +193,13 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
     let bpm_r = Rect::from_min_size(Pos2::new(time_r.left() - 88.0, r.top()), Vec2::new(80.0, hh));
     let p = ui.painter();
     // (The tempo change in % is shown inside the tempo slider.)
-    p.text(Pos2::new(bpm_r.right(), bpm_r.center().y), Align2::RIGHT_CENTER, if v.has_grid { format!("{:.2}", v.bpm) } else { "—".into() }, mono(if dense { 18.0 } else { 22.0 }), TEXT);
+    p.text(Pos2::new(bpm_r.right(), bpm_r.center().y), Align2::RIGHT_CENTER, if !v.has_grid {
+        "—".into()
+    } else if core.decks[d].info.as_ref().is_some_and(|i| i.grid_source == Some(collective_library::GridSource::Detected)) {
+        format!("≈{:.2}", v.bpm) // detected, not from a tag
+    } else {
+        format!("{:.2}", v.bpm)
+    }, mono(if dense { 18.0 } else { 22.0 }), TEXT);
     let key = core.key_text(core.deck_key(d));
     let chip = Rect::from_min_size(Pos2::new(bpm_r.left() - 56.0, r.top() + (hh - 30.0).max(4.0) / 2.0), Vec2::new(46.0, (hh - 8.0).min(30.0)));
     if !key.is_empty() {

@@ -687,6 +687,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "collective-engine",
+ "realfft",
  "serde",
  "serde_json",
  "symphonia",

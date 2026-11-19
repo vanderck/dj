@@ -42,6 +42,8 @@ pub struct LoadedInfo {
     pub grid_source: Option<GridSource>,
     pub locked: bool,
     pub cues: [Option<Cue>; NUM_HOT_CUES],
+    /// Cue points are to be detected once the stems are ready (cleared by any cue edit).
+    pub cues_pending: bool,
 }
 
 impl LoadedInfo {
@@ -66,12 +68,14 @@ pub struct DeckUi {
     pub loop_in_pending: bool,
     /// Per-stem loudness of the loaded track, for the waveform lanes (once separated).
     pub stem_wave: Option<std::sync::Arc<crate::stems::StemWave>>,
+    /// The loaded track as the engine has it (to request its stems again).
+    pub track: Option<Arc<collective_engine::track::Track>>,
     /// Bar/beat last reported over OSC.
     last_beat: i64,
 }
 
 enum LoadJob {
-    Track { deck: usize, path: PathBuf, overrides: Option<TrackOverrides>, replaygain: bool },
+    Track { deck: usize, path: PathBuf, overrides: Option<TrackOverrides>, replaygain: bool, detect: collective_library::DetectOptions },
     Sample { deck: usize, lane: usize, path: PathBuf },
 }
 
@@ -220,9 +224,9 @@ impl Core {
                 .spawn(move || {
                     while let Ok(job) = job_rx.recv() {
                         let r = match job {
-                            LoadJob::Track { deck, path, overrides, replaygain } => LoadResult::Track {
+                            LoadJob::Track { deck, path, overrides, replaygain, detect } => LoadResult::Track {
                                 deck,
-                                result: collective_library::load(&path, overrides.as_ref(), replaygain).map_err(|e| e.to_string()),
+                                result: collective_library::load(&path, overrides.as_ref(), replaygain, detect).map_err(|e| e.to_string()),
                                 path,
                             },
                             LoadJob::Sample { deck, lane, path } => LoadResult::Sample {
@@ -284,7 +288,9 @@ impl Core {
         // VST3 catalog from cache immediately; refresh in the background.
         let cache: ScanCache = crate::settings::load_json(&ScanCache::path());
         core.apply_scan(cache);
-        core.library = crate::settings::load_json(&crate::settings::config_dir().join("library-cache.json"));
+        let mut library: Vec<collective_library::scan::Entry> = crate::settings::load_json(&crate::settings::config_dir().join("library-cache.json"));
+        core.fill_detected(&mut library);
+        core.library = library;
         core.start_osc();
         core
     }
@@ -458,10 +464,61 @@ impl Core {
             path: path.to_path_buf(),
             overrides,
             replaygain: self.settings.use_replaygain,
+            detect: collective_library::DetectOptions {
+                prefer_detected_cues: self.settings.cue_points == crate::settings::CuePoints::Detected,
+                // With stems on, cue points wait for the stems (better); otherwise from the mix.
+                cues_from_mix: !self.settings.stems_enabled,
+            },
         });
     }
 
+    /// Detect this deck's cue points again (from its stems), replacing the current ones.
+    pub fn redetect_cues(&mut self, d: usize) {
+        let Some(info) = self.decks[d].info.as_mut() else { return };
+        info.cues_pending = true;
+        let path = info.path.clone();
+        self.request_stems(d, &path, true);
+    }
+
+    /// Ask the stems worker for this deck's stems (and cue points from them, if `detect_cues`).
+    fn request_stems(&mut self, d: usize, path: &Path, detect_cues: bool) {
+        let Some(track) = self.loaded_track(d) else { return };
+        self.decks[d].stems_progress = Some(0.0);
+        let cache = (self.settings.stems_cache_mb > 0)
+            .then(|| (crate::settings::config_dir().join("stems-cache"), self.settings.stems_cache_mb * 1024 * 1024));
+        self.stems.request(crate::stems::Request {
+            deck: d,
+            track,
+            path: path.to_path_buf(),
+            model: crate::stems::resolve_model(self.settings.stems_model.as_deref()),
+            cache,
+            demucs: self.settings.stems_demucs.clone(),
+            detect_cues,
+            prepared: Some(self.settings.stems_prepared_dir()),
+        });
+    }
+
+    fn loaded_track(&self, d: usize) -> Option<Arc<collective_engine::track::Track>> {
+        self.decks[d].track.clone()
+    }
+
+    /// Detected cue points arrived: use them unless cues were edited in the meantime.
+    fn apply_detected_cues(&mut self, d: usize, found: Vec<Cue>) {
+        let Some(info) = self.decks[d].info.as_mut() else { return };
+        if !std::mem::take(&mut info.cues_pending) || found.is_empty() {
+            return;
+        }
+        let mut found = found.into_iter();
+        for i in 0..NUM_HOT_CUES {
+            let cue = found.next();
+            self.deck_cmd(d, DeckCmd::SetCue { idx: i as u8, secs: cue.as_ref().map(|c| c.secs), end_secs: None });
+            self.persist_cue(d, i as u8, cue);
+        }
+        self.log(format!("Deck {}: cue points detected", d + 1));
+    }
+
     pub fn eject(&mut self, d: usize) {
+        self.decks[d].track = None;
         self.stems.cancel(d);
         self.decks[d].stems_progress = None;
         self.decks[d].stems_source = None;
@@ -482,21 +539,13 @@ impl Core {
             grid_source: lt.grid_source,
             locked,
             cues: lt.track.cues.clone(),
+            cues_pending: lt.detected.cues_pending && self.settings.stems_enabled,
         };
+        self.save_detected(&lt);
+        self.decks[d].track = Some(lt.track.clone());
         self.send(Command::DeckMode { deck: d as u8, mode: DeckMode::Track });
         if self.settings.stems_enabled {
-            self.decks[d].stems_progress = Some(0.0);
-            let cache = (self.settings.stems_cache_mb > 0)
-                .then(|| (crate::settings::config_dir().join("stems-cache"), self.settings.stems_cache_mb * 1024 * 1024));
-            self.stems.request(crate::stems::Request {
-                deck: d,
-                track: lt.track.clone(),
-                path: lt.path.clone(),
-                model: crate::stems::resolve_model(self.settings.stems_model.as_deref()),
-                cache,
-                demucs: self.settings.stems_demucs.clone(),
-                prepared: Some(self.settings.stems_prepared_dir()),
-            });
+            self.request_stems(d, &lt.path, info.cues_pending);
         }
         self.send(Command::Load { deck: d as u8, track: lt.track, start_at_first_cue: self.settings.load_at_first_cue });
         if self.settings.keylock_on_load {
@@ -521,11 +570,14 @@ impl Core {
             Update::Progress { deck, track_id, fraction } if current(self, deck, track_id) => {
                 self.decks[deck].stems_progress = Some(fraction);
             }
-            Update::Done { deck, track_id, stems, wave, source } if current(self, deck, track_id) => {
+            Update::Done { deck, track_id, stems, wave, source, cues } if current(self, deck, track_id) => {
                 self.decks[deck].stems_progress = None;
                 self.decks[deck].stem_wave = Some(wave);
                 self.decks[deck].stems_source = Some(source);
                 self.send(Command::AttachStems { deck: deck as u8, stems });
+                if let Some(c) = cues {
+                    self.apply_detected_cues(deck, c);
+                }
             }
             Update::Failed { deck, track_id, error } if current(self, deck, track_id) => {
                 self.decks[deck].stems_progress = None;
@@ -543,11 +595,56 @@ impl Core {
         Some(DeckCmd::StemGain { stem: 0, gain: gains[0] })
     }
 
+    /// Save what loading detected (grid, energy, cue points from the mix) so the next load and
+    /// the library have it; untagged library entries show the detected BPM and energy.
+    fn save_detected(&mut self, lt: &LoadedTrack) {
+        let det = &lt.detected;
+        if !det.grid && det.energy.is_none() && !det.cues {
+            return;
+        }
+        let key = TrackDb::key(&lt.path);
+        let o = self.trackdb.tracks.entry(key).or_default();
+        if det.grid {
+            o.grid = lt.track.grid;
+            o.grid_detected = true;
+        }
+        if det.energy.is_some() {
+            o.energy = det.energy;
+        }
+        if det.cues {
+            o.cues = Some(lt.track.cues.to_vec());
+        }
+        if let Some(e) = self.library.iter_mut().find(|e| e.path == lt.path) {
+            if e.bpm.is_none() {
+                e.bpm = lt.track.grid.map(|g| g.bpm);
+            }
+            if e.energy.is_none() {
+                e.energy = det.energy;
+            }
+        }
+        self.mark_dirty();
+    }
+
+    /// Library entries without BPM / energy tags get the values detected earlier.
+    fn fill_detected(&self, library: &mut [collective_library::scan::Entry]) {
+        for e in library.iter_mut().filter(|e| e.bpm.is_none() || e.energy.is_none()) {
+            if let Some(o) = self.trackdb.tracks.get(&TrackDb::key(&e.path)) {
+                if e.bpm.is_none() && o.grid_detected {
+                    e.bpm = o.grid.map(|g| g.bpm);
+                }
+                if e.energy.is_none() {
+                    e.energy = o.energy;
+                }
+            }
+        }
+    }
+
     fn persist_cue(&mut self, d: usize, idx: u8, cue: Option<Cue>) {
         let Some(info) = self.decks[d].info.as_mut() else { return };
         if let Some(slot) = info.cues.get_mut(idx as usize) {
             *slot = cue;
         }
+        info.cues_pending = false; // an edit wins over detection still to come
         if info.locked {
             return; // Locked tracks: cues are for this load only.
         }
@@ -2140,7 +2237,8 @@ impl Core {
         }
 
         if let Some(rx) = &self.library_rx {
-            if let Ok(v) = rx.try_recv() {
+            if let Ok(mut v) = rx.try_recv() {
+                self.fill_detected(&mut v);
                 self.library = v;
                 self.library_scanning = false;
                 self.library_rx = None;
