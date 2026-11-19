@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
-use collective_engine::deck::Quantize;
-use collective_engine::dsp::Frame;
-use collective_engine::engine::{ClockOwner, DeckCmd, NUM_DECKS};
-use collective_engine::fx::{Effect, FxCtx, InsertPos};
-use collective_engine::mixer::ChannelParams;
-use collective_engine::track::{AudioData, BeatGrid, Track};
-use collective_engine::{create, Command, Controller, Engine, EngineConfig, Event, Garbage};
+use dj_engine::deck::Quantize;
+use dj_engine::dsp::Frame;
+use dj_engine::engine::{ClockOwner, DeckCmd, NUM_DECKS};
+use dj_engine::fx::{Effect, FxCtx, InsertPos};
+use dj_engine::mixer::ChannelParams;
+use dj_engine::track::{AudioData, BeatGrid, Track};
+use dj_engine::{create, Command, Controller, Engine, EngineConfig, Event, Garbage};
 
 const SR: f32 = 48000.0;
 const BLOCK: usize = 256;
@@ -147,7 +147,7 @@ fn loops_and_slip_roll() {
 trait SnapExt {
     fn position_in_loop(&self, d: usize) -> bool;
 }
-impl SnapExt for collective_engine::Snapshot {
+impl SnapExt for dj_engine::Snapshot {
     fn position_in_loop(&self, d: usize) -> bool {
         let v = self.decks[d];
         v.position_secs >= v.loop_start_secs - 0.01 && v.position_secs <= v.loop_end_secs + 0.01
@@ -167,7 +167,7 @@ fn hot_cue_set_and_quantized_jump() {
     run(&mut e, 1);
     let evs = drain(&mut c);
     let set = evs.iter().find_map(|e| match e {
-        Event::Deck { event: collective_engine::deck::DeckEvent::CueSet { idx: 2, secs, .. }, .. } => Some(*secs),
+        Event::Deck { event: dj_engine::deck::DeckEvent::CueSet { idx: 2, secs, .. }, .. } => Some(*secs),
         _ => None,
     });
     let secs = set.expect("cue set event");
@@ -311,7 +311,7 @@ fn removed_effects_are_returned_for_disposal() {
         Command::FxInsert {
             ch: 3,
             slot: 1,
-            effect: collective_engine::fx::native::NativeFx::Echo.create(SR),
+            effect: dj_engine::fx::native::NativeFx::Echo.create(SR),
             pos: InsertPos::Post,
             on: true,
             mix: 1.0,
@@ -326,7 +326,7 @@ fn removed_effects_are_returned_for_disposal() {
 
 // ------------------------------------------------------------------ stems
 
-use collective_engine::track::{Stem, StemData};
+use dj_engine::track::{Stem, StemData};
 
 /// Window that holds whole periods of both test tones (12 x 60 Hz, 200 x 1 kHz at 48 kHz).
 const TONE_WIN: usize = 9600;
@@ -479,7 +479,7 @@ fn key_lock_does_not_delay_audio_against_the_playhead() {
 
 #[test]
 fn decks_routed_to_direct_pairs_reach_only_their_own_outputs() {
-    use collective_engine::mixer::{ExtStages, Output};
+    use dj_engine::mixer::{ExtStages, Output};
     let (mut e, mut c) = setup();
     let (tones, _) = stem_track(61); // deck 1: 60 Hz + 1 kHz
     send(&mut c, Command::Load { deck: 0, track: tones, start_at_first_cue: false });

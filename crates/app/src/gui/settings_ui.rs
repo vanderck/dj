@@ -2,8 +2,8 @@
 
 use eframe::egui::{self, RichText, Ui};
 
-use collective_engine::deck::TempoRange;
-use collective_engine::mixer::FaderCurve;
+use dj_engine::deck::TempoRange;
+use dj_engine::mixer::FaderCurve;
 
 use super::widgets::*;
 use super::UiState;
@@ -127,7 +127,7 @@ fn settings(ui: &mut Ui, core: &mut Core, st: &mut UiState) {
         }
     });
     ui.horizontal(|ui| {
-        use collective_engine::mixer::MixMode;
+        use dj_engine::mixer::MixMode;
         ui.label("Mix mode");
         let m = core.session.mix_mode;
         for (lbl, mm) in [("Off", MixMode::Off), ("Crossfader", MixMode::Crossfader { pos: 0.0, sharp: false }), ("Vector (4 decks)", MixMode::Vector { x: 0.5, y: 0.5 })] {
@@ -372,7 +372,7 @@ fn settings(ui: &mut Ui, core: &mut Core, st: &mut UiState) {
     if ui.checkbox(&mut core.settings.vst3_enabled, "Enable VST3 effects").changed() && core.settings.vst3_enabled {
         core.rescan_vst3();
     }
-    for p in collective_vst3::default_search_paths() {
+    for p in dj_vst3::default_search_paths() {
         ui.label(RichText::new(p.display().to_string()).small().weak());
     }
     let mut remove = None;
@@ -401,15 +401,15 @@ fn settings(ui: &mut Ui, core: &mut Core, st: &mut UiState) {
 
     if changed_engine {
         let s = core.settings.clone();
-        core.send(collective_engine::Command::FaderCurve(s.fader_curve));
-        core.send(collective_engine::Command::Crossovers { low_hz: s.crossover_low_hz, high_hz: s.crossover_high_hz });
-        core.send(collective_engine::Command::ExtStages(s.ext_stages));
-        core.send(collective_engine::Command::SplitCue(s.audio.split_cue));
+        core.send(dj_engine::Command::FaderCurve(s.fader_curve));
+        core.send(dj_engine::Command::Crossovers { low_hz: s.crossover_low_hz, high_hz: s.crossover_high_hz });
+        core.send(dj_engine::Command::ExtStages(s.ext_stages));
+        core.send(dj_engine::Command::SplitCue(s.audio.split_cue));
         for d in 0..4u8 {
-            core.send(collective_engine::Command::Deck { deck: d, cmd: collective_engine::engine::DeckCmd::TapeStopMs(s.tape_stop_ms) });
-            core.send(collective_engine::Command::Deck {
+            core.send(dj_engine::Command::Deck { deck: d, cmd: dj_engine::engine::DeckCmd::TapeStopMs(s.tape_stop_ms) });
+            core.send(dj_engine::Command::Deck {
                 deck: d,
-                cmd: collective_engine::engine::DeckCmd::DefaultLoopBeats(s.default_loop_beats),
+                cmd: dj_engine::engine::DeckCmd::DefaultLoopBeats(s.default_loop_beats),
             });
         }
     }

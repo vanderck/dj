@@ -1,12 +1,12 @@
 [package]
-name = "collective-library"
+name = "dj-library"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Track loading: decoding, Mixed In Key / Serato tag reading, waveforms, library scanning"
 
 [dependencies]
-collective-engine.workspace = true
+dj-engine.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true

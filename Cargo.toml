@@ -12,9 +12,9 @@ rust-version = "1.80"
 stems-core = { path = "crates/stems-core" }
 realfft = "3"
 ort = { version = "=2.0.0-rc.15", default-features = false }
-collective-engine = { path = "crates/engine" }
-collective-library = { path = "crates/library" }
-collective-vst3 = { path = "crates/vst3host" }
+dj-engine = { path = "crates/engine" }
+dj-library = { path = "crates/library" }
+dj-vst3 = { path = "crates/vst3host" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 anyhow = "1.0.104"

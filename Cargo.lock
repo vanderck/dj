@@ -674,42 +674,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "collective-engine"
-version = "0.1.0"
-dependencies = [
- "rtrb",
- "serde",
-]
-
-[[package]]
-name = "collective-library"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "collective-engine",
- "realfft",
- "serde",
- "serde_json",
- "symphonia",
-]
-
-[[package]]
-name = "collective-vst3"
-version = "0.1.0"
-dependencies = [
- "collective-engine",
- "libloading 0.9.1",
- "vst3",
-]
-
-[[package]]
-name = "collective-vst3-testplugin"
-version = "0.1.0"
-dependencies = [
- "vst3",
-]
-
-[[package]]
 name = "color"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -969,12 +933,12 @@ name = "dj"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "collective-engine",
- "collective-library",
- "collective-vst3",
  "cpal",
  "crossbeam-channel",
  "dirs",
+ "dj-engine",
+ "dj-library",
+ "dj-vst3",
  "eframe",
  "hound",
  "midir",
@@ -984,6 +948,42 @@ dependencies = [
  "serde_json",
  "stems-core",
  "ureq",
+]
+
+[[package]]
+name = "dj-engine"
+version = "0.1.0"
+dependencies = [
+ "rtrb",
+ "serde",
+]
+
+[[package]]
+name = "dj-library"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dj-engine",
+ "realfft",
+ "serde",
+ "serde_json",
+ "symphonia",
+]
+
+[[package]]
+name = "dj-vst3"
+version = "0.1.0"
+dependencies = [
+ "dj-engine",
+ "libloading 0.9.1",
+ "vst3",
+]
+
+[[package]]
+name = "dj-vst3-testplugin"
+version = "0.1.0"
+dependencies = [
+ "vst3",
 ]
 
 [[package]]

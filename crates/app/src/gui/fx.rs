@@ -2,7 +2,7 @@
 
 use eframe::egui::{self, Color32, RichText, Ui, Vec2};
 
-use collective_engine::fx::{InsertPos, SlotHealth, MAX_SLOTS, NUM_MACROS};
+use dj_engine::fx::{InsertPos, SlotHealth, MAX_SLOTS, NUM_MACROS};
 
 use super::widgets::*;
 use super::{act_f, learnable, InsertBrowser, UiState};

@@ -1,4 +1,4 @@
-//! Collective engine: a realtime-safe DJ / live-performance audio engine.
+//! dj engine: a realtime-safe DJ / live-performance audio engine.
 //!
 //! The engine is host-agnostic: it renders blocks of stereo frames for the
 //! master, cue and direct-output buses and is driven entirely by commands.

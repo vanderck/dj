@@ -13,7 +13,7 @@
 use std::io::Read;
 use std::path::Path;
 
-use collective_engine::track::{BeatGrid, Cue, CueKind};
+use dj_engine::track::{BeatGrid, Cue, CueKind};
 use serde::{Deserialize, Serialize};
 
 use crate::key::Key;

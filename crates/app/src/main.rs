@@ -1,4 +1,4 @@
-//! Collective — live performance DJ software.
+//! dj — live performance DJ software.
 
 mod audio;
 mod core;
@@ -83,7 +83,7 @@ fn main() {
                 eprintln!("{USAGE}");
                 std::process::exit(2);
             };
-            match collective_library::tags::read(&PathBuf::from(p)) {
+            match dj_library::tags::read(&PathBuf::from(p)) {
                 Ok(t) => println!("{}", serde_json::to_string_pretty(&t).unwrap_or_default()),
                 Err(e) => {
                     eprintln!("{e}");
@@ -161,7 +161,7 @@ fn prepare_stems(paths: &[String]) -> i32 {
                     collect(&e, out);
                 }
             }
-        } else if collective_library::is_audio_file(p) {
+        } else if dj_library::is_audio_file(p) {
             out.push(p.to_path_buf());
         }
     }

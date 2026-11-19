@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use eframe::egui::{self, Align2, Color32, CornerRadius, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 
-use collective_engine::engine::DeckMode;
+use dj_engine::engine::DeckMode;
 
 use super::skin::*;
 use super::{act_f, UiState};

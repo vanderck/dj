@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
-use collective_engine::engine::MAX_PAIRS;
-use collective_engine::{create, Controller, Engine, EngineConfig};
+use dj_engine::engine::MAX_PAIRS;
+use dj_engine::{create, Controller, Engine, EngineConfig};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SizedSample};
 

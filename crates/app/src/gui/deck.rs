@@ -4,10 +4,10 @@ use std::path::PathBuf;
 
 use eframe::egui::{self, Align2, Color32, CornerRadius, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 
-use collective_engine::engine::{ClockOwner, DeckCmd, DeckMode};
-use collective_engine::sampler::{Direction, Rhythm, Step, LANES, STEPS};
-use collective_engine::Command;
-use collective_library::key::Compat;
+use dj_engine::engine::{ClockOwner, DeckCmd, DeckMode};
+use dj_engine::sampler::{Direction, Rhythm, Step, LANES, STEPS};
+use dj_engine::Command;
+use dj_library::key::Compat;
 
 use super::skin::*;
 use super::{act, act_f, act_i, learnable, UiState};
@@ -69,7 +69,7 @@ fn badge_menu(ui: &mut Ui, core: &mut Core, d: usize, rect: Rect, size: f32) {
         }
         ui.separator();
         ui.horizontal(|ui| {
-            use collective_engine::deck::TempoRange as T;
+            use dj_engine::deck::TempoRange as T;
             ui.label("Tempo range");
             let cur = core.snap.decks[d].tempo_range;
             for (i, rg) in [T::Pct6, T::Pct10, T::Pct16, T::Pct50, T::Semitones12].iter().enumerate() {
@@ -195,7 +195,7 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
     // (The tempo change in % is shown inside the tempo slider.)
     p.text(Pos2::new(bpm_r.right(), bpm_r.center().y), Align2::RIGHT_CENTER, if !v.has_grid {
         "—".into()
-    } else if core.decks[d].info.as_ref().is_some_and(|i| i.grid_source == Some(collective_library::GridSource::Detected)) {
+    } else if core.decks[d].info.as_ref().is_some_and(|i| i.grid_source == Some(dj_library::GridSource::Detected)) {
         format!("≈{:.2}", v.bpm) // detected, not from a tag
     } else {
         format!("{:.2}", v.bpm)
@@ -385,7 +385,7 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
         }
     }
     resp.context_menu(|ui| {
-        use collective_engine::deck::TempoRange as T;
+        use dj_engine::deck::TempoRange as T;
         for (i, rg) in [T::Pct6, T::Pct10, T::Pct16, T::Pct50, T::Semitones12].iter().enumerate() {
             if ui.selectable_label(v.tempo_range == *rg, rg.label()).clicked() {
                 act_i(core, &a("TempoRange"), i as i32);

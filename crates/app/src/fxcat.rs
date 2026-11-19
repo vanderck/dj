@@ -4,9 +4,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{anyhow, Result};
-use collective_engine::fx::native::{NativeFx, ParamSpec};
-use collective_engine::fx::Effect;
-use collective_vst3::{PluginInfo, Vst3Handle};
+use dj_engine::fx::native::{NativeFx, ParamSpec};
+use dj_engine::fx::Effect;
+use dj_vst3::{PluginInfo, Vst3Handle};
 use serde::{Deserialize, Serialize};
 
 use crate::settings::{config_dir, load_json, save_json};
@@ -72,9 +72,9 @@ fn mtime(p: &Path) -> u64 {
         .unwrap_or(0)
 }
 
-/// Child-process entry point: `collective --vst3-scan <bundle>` prints JSON.
+/// Child-process entry point: `dj --vst3-scan <bundle>` prints JSON.
 pub fn scan_child_main(bundle: &Path) -> i32 {
-    match collective_vst3::scan_bundle(bundle) {
+    match dj_vst3::scan_bundle(bundle) {
         Ok(v) => {
             let recs: Vec<PluginRecord> = v.iter().map(PluginRecord::from_info).collect();
             println!("{}", serde_json::to_string(&recs).unwrap_or_default());
@@ -91,11 +91,11 @@ pub fn scan_child_main(bundle: &Path) -> i32 {
 /// reported as failed. Unchanged bundles come from the cache.
 pub fn scan_vst3(extra: &[PathBuf]) -> ScanCache {
     let old: ScanCache = load_json(&ScanCache::path());
-    let mut roots = collective_vst3::default_search_paths();
+    let mut roots = dj_vst3::default_search_paths();
     roots.extend(extra.iter().cloned());
     let exe = std::env::current_exe().ok();
     let mut out = ScanCache::default();
-    for b in collective_vst3::find_bundles(&roots) {
+    for b in dj_vst3::find_bundles(&roots) {
         let m = mtime(&b);
         if let Some(c) = old.bundles.iter().find(|(p, t, _)| *p == b && *t == m) {
             out.bundles.push(c.clone());
@@ -229,7 +229,7 @@ pub fn instantiate(
         .find_map(|e| e.vst3.as_ref().filter(|r| r.cid == id))
         .ok_or_else(|| anyhow!("plugin {id} is not installed"))?;
     let info = rec.to_info().ok_or_else(|| anyhow!("bad plugin id"))?;
-    let (h, fx) = collective_vst3::instantiate(&info, sample_rate as f64, max_block).map_err(|e| anyhow!("{e}"))?;
+    let (h, fx) = dj_vst3::instantiate(&info, sample_rate as f64, max_block).map_err(|e| anyhow!("{e}"))?;
     Ok((FxLive::Vst3(h), Box::new(fx), rec.name.clone(), rec.vendor.clone()))
 }
 
@@ -252,7 +252,7 @@ pub fn b64(data: &[u8]) -> String {
 }
 
 pub fn unb64(s: &str) -> Vec<u8> {
-    collective_library::tags::base64_decode(s.as_bytes())
+    dj_library::tags::base64_decode(s.as_bytes())
 }
 
 #[cfg(test)]

@@ -4,7 +4,8 @@ Live-performance DJ software written entirely in Rust. It's modelled on the
 feature set of Untitled Audio Syndicate's *Syndicate*: four decks, a full mixer
 with **VST3 channel inserts** (User Guide §7.4), sampler decks, a shared master
 clock, and MIDI/OSC control. It has its own name and code. (It was called Collective; the
-config folder and the `/Collective/` OSC prefix keep that name so existing setups work.)
+first start moves the old `collective` settings folder to `dj`, and the old `/Collective/` OSC
+prefix becomes `/dj/`.)
 
 It's built for a **Mixed In Key** workflow. dj doesn't detect BPM, key
 or cue points; it reads what Mixed In Key wrote into your files.
@@ -32,12 +33,12 @@ cargo xtask package-macos --universal
 
 Linux needs the ALSA development headers to build (`libasound2-dev` on
 Debian/Ubuntu). The GUI uses wgpu and falls back to OpenGL automatically; set
-`COLLECTIVE_RENDERER=glow` to force OpenGL.
+`DJ_RENDERER=glow` to force OpenGL.
 
 Settings, session, mappings, FX presets and per-track edits are stored as
-readable JSON in your config directory (`~/.config/collective` on Linux,
-`~/Library/Application Support/collective` on macOS,
-`%APPDATA%\collective` on Windows). Set `COLLECTIVE_CONFIG_DIR` to use another
+readable JSON in your config directory (`~/.config/dj` on Linux,
+`~/Library/Application Support/dj` on macOS,
+`%APPDATA%\dj` on Windows). Set `DJ_CONFIG_DIR` to use another
 folder.
 
 ## Workspace
@@ -222,24 +223,24 @@ Fonts: Inter and JetBrains Mono, bundled under the SIL Open Font License (see
 
 ## OSC API
 
-UDP port 9090 by default. The address root defaults to `/Collective/`; set it
+UDP port 9090 by default. The address root defaults to `/dj/`; set it
 to `/Syndicate/` in Settings to keep existing controller layouts. Addresses are
 case-insensitive and bundles are accepted.
 
 Examples:
 
 ```
-/Collective/Header/BPM f 126.0
-/Collective/Header/Quantize i 4            (0 off, 1 = 2 bars … 7 = 1/32)
-/Collective/Deck/1/PlayPause i 1
-/Collective/Deck/2/BeatSkip i -8
-/Collective/Deck/1/HotCue i 3 i 1 … i 3 i 0 (hold cue 3)
-/Collective/Deck/1/SlipLoop/Quarter i 1 … i 0
-/Collective/Deck/1/Sampler/LaneSet i 3 s Volume f 0.8
-/Collective/Mixer/CH3/Volume f 0.75
-/Collective/Mixer/CH1/FX/Macro/2 f 0.4
-/Collective/Mixer/CH1/FX/Insert s native:echo s post
-/Collective/Feedback/Resend i 1
+/dj/Header/BPM f 126.0
+/dj/Header/Quantize i 4            (0 off, 1 = 2 bars … 7 = 1/32)
+/dj/Deck/1/PlayPause i 1
+/dj/Deck/2/BeatSkip i -8
+/dj/Deck/1/HotCue i 3 i 1 … i 3 i 0 (hold cue 3)
+/dj/Deck/1/SlipLoop/Quarter i 1 … i 0
+/dj/Deck/1/Sampler/LaneSet i 3 s Volume f 0.8
+/dj/Mixer/CH3/Volume f 0.75
+/dj/Mixer/CH1/FX/Macro/2 f 0.4
+/dj/Mixer/CH1/FX/Insert s native:echo s post
+/dj/Feedback/Resend i 1
 ```
 
 Deck, sampler, mixer and header routes follow the original's §14 tables
