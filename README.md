@@ -194,6 +194,19 @@ Fonts: Inter and JetBrains Mono, bundled under the SIL Open Font License (see
   (momentary, cue-to-next-cue loops), loops (in/out, halve/double, move,
   free-loop), slip mode, slip loops (with dotted/triplet), beat/bar skip,
   reverse, backspin, tape stop, half/double speed, phase nudge.
+- **Mix**: tap a cue on a silent deck (volume down) while another deck plays:
+  it loops from the cue, and a **Mix** button appears next to Sync. Mix syncs
+  it and asks *Now* or *Best*. **Now** starts on the next bar and mixes over the
+  whole bars that fit in about 10 s, with the new track's vocals (stems) out
+  until the old track is gone. **Best** waits for an 8-bar phrase start and
+  mixes over 16 bars, picking the moment where the two tracks' vocals clash
+  least (from the stems), preferring the playing track's outro or break. With
+  less than a minute of the playing track left, Mix mixes now without asking.
+  Either way the new track comes up over the first half with its bass out, the
+  basses swap at the midpoint, the old track fades over the second half and
+  stops, and the new one becomes the tempo master. Tap the button during a mix
+  to cancel it. Controller faders that dj moved are picked up: they take
+  effect again once moved to (or past) dj's value.
 - **Sampler decks**: 8 lanes, 16 steps, 8 patterns, per-step velocity, per-lane
   length (polyrhythms), direction (→ ← ↔ random), rate (normal/dotted/triplet),
   AHR envelope with curve, pitch, mono/poly, swing, global pitch, ½×/2×.

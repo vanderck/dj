@@ -203,6 +203,26 @@ fn cue_beat_loop_loops_from_the_cue() {
 }
 
 #[test]
+fn release_loop_jumps_to_the_loop_start_on_the_beat() {
+    let (mut e, mut c) = setup();
+    send(&mut c, Command::GlobalQuantize(None)); // released on the beat anyway
+    send(&mut c, Command::Load { deck: 0, track: click_track(1, 120.0, 60.0, 48000), start_at_first_cue: false });
+    deck(&mut c, 0, DeckCmd::SetCue { idx: 0, secs: Some(10.0), end_secs: None });
+    deck(&mut c, 0, DeckCmd::CueBeatLoop { idx: 0, beats: 4.0 });
+    run(&mut e, (1.3 * SR as f64 / BLOCK as f64) as usize); // inside the loop, mid-beat
+    deck(&mut c, 0, DeckCmd::ReleaseLoop);
+    run(&mut e, 2);
+    assert!(e.snapshot().decks[0].loop_on, "waits for the beat");
+    run(&mut e, (0.6 * SR as f64 / BLOCK as f64) as usize);
+    let s = e.snapshot().decks[0];
+    assert!(!s.loop_on, "loop released");
+    // Released on the beat at 1.5 s into the loop: back to 10 s, then ~0.4 s further.
+    assert!((10.0..10.6).contains(&s.position_secs), "{}", s.position_secs);
+    run(&mut e, (3.0 * SR as f64 / BLOCK as f64) as usize);
+    assert!(e.snapshot().decks[0].position_secs > 12.5, "plays on past the old loop end");
+}
+
+#[test]
 fn master_handoff_when_master_stops() {
     let (mut e, mut c) = setup();
     send(&mut c, Command::GlobalQuantize(None));

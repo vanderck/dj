@@ -19,6 +19,10 @@ use collective_library::{GridSource, Key, LoadedTrack, Tags, TrackOverrides, Wav
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use rosc::OscType;
 
+#[path = "automix.rs"]
+pub mod automix;
+pub use automix::MixPlan;
+
 use crate::fxcat::{self, CatalogEntry, FxLive, ScanCache};
 use crate::model::{FxChainModel, FxSlotModel, MacroModel, Session, QUANTIZE_VALUES};
 use crate::settings::{KeyNotation, MapMode, MappingProfile, MidiKind, MidiMapping, MidiSource, Settings, TrackDb};
@@ -210,6 +214,10 @@ pub struct Core {
     /// Output channels of the open audio device (set at startup).
     pub audio_channels: usize,
     dirty_since: Option<Instant>,
+    /// The auto-mix in progress, if any.
+    pub automix: Option<automix::AutoMix>,
+    /// MIDI pick-up: controls dj moved itself (lowercase address -> last MIDI value seen).
+    pickup: HashMap<String, Option<f32>>,
 }
 
 impl Core {
@@ -284,6 +292,8 @@ impl Core {
             midi_led: HashMap::new(),
             audio_channels: 2,
             dirty_since: None,
+            automix: None,
+            pickup: HashMap::new(),
         };
         // VST3 catalog from cache immediately; refresh in the background.
         let cache: ScanCache = crate::settings::load_json(&ScanCache::path());
@@ -1938,7 +1948,9 @@ impl Core {
                     } else {
                         v
                     };
-                    self.route(&m.address, &[OscType::Float(scaled)]);
+                    if self.pickup_allows(&m.address, scaled) {
+                        self.route(&m.address, &[OscType::Float(scaled)]);
+                    }
                 }
             }
         }
@@ -1959,6 +1971,7 @@ impl Core {
             ["mixer", c, "filter2"] => self.session.channels[idx(c)?].params.res,
             ["mixer", c, "filter3"] => self.session.channels[idx(c)?].params.width,
             ["mixer", c, "fx", "macro", n] => self.session.channels[idx(c)?].fx.macros[n.parse::<usize>().ok()?.checked_sub(1)?].value,
+            ["deck", n, s] if stem_level(s).is_some() => self.snap.decks.get(n.parse::<usize>().ok()?.checked_sub(1)?)?.stem_gains[stem_level(s)?],
             ["header", "mastervolume"] => self.session.master.volume,
             ["header", "cuevolume"] => self.session.master.cue_volume,
             ["header", "cuemix"] => self.session.master.cue_mix,
@@ -2292,6 +2305,7 @@ impl Core {
             }
         }
 
+        self.automix_tick();
         self.feedback_state();
         self.midi_feedback();
 
@@ -2440,6 +2454,124 @@ mod tests {
         assert!(c.route("Deck/2/StemVocalsLevel", &[OscType::Float(0.25)]));
         pump(&mut e, &mut c);
         assert_eq!(c.snap.decks[1].stem_gains, [1.0, 1.0, 0.25, 1.0]);
+    }
+
+    /// A kick on every beat at 120 BPM.
+    fn kick_wav(name: &str, secs: usize) -> PathBuf {
+        let dir = crate::settings::config_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        let spec = hound::WavSpec { channels: 2, sample_rate: 44100, bits_per_sample: 16, sample_format: hound::SampleFormat::Int };
+        let mut w = hound::WavWriter::create(&path, spec).unwrap();
+        for i in 0..44100 * secs {
+            let t = (i % 22050) as f32 / 44100.0;
+            let v = 0.6 * (std::f32::consts::TAU * 55.0 * t).sin() * (-t * 18.0).exp();
+            let s = (v * 30000.0) as i16;
+            w.write_sample(s).unwrap();
+            w.write_sample(s).unwrap();
+        }
+        w.finalize().unwrap();
+        path
+    }
+
+    #[test]
+    fn mix_now_brings_the_looping_deck_in_and_stops_the_other() {
+        let (mut e, mut c, _config) = core();
+        // Deck 2 first, so it becomes the tempo master (the mix must hand that over).
+        for (d, name, secs) in [(1, "automix-b.wav", 60), (0, "automix-a.wav", 90)] {
+            c.load_track(d, &kick_wav(name, secs));
+            let deadline = Instant::now() + std::time::Duration::from_secs(60);
+            while !(c.snap.decks[d].loaded && c.decks[d].info.is_some()) {
+                assert!(Instant::now() < deadline, "track never loaded");
+                pump(&mut e, &mut c);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+        for d in 0..2 {
+            c.deck_cmd(d, DeckCmd::SetGrid(Some(collective_engine::track::BeatGrid { bpm: 120.0, anchor_secs: 0.0 })));
+        }
+        c.route("Mixer/CH1/Volume", &[OscType::Float(0.9)]);
+        c.route("Mixer/CH2/Volume", &[OscType::Float(0.0)]);
+        c.deck_cmd(0, DeckCmd::Play);
+        // Deck 2 waits silently in a 4-beat loop at a cue 8 s in.
+        c.deck_cmd(1, DeckCmd::SetCue { idx: 0, secs: Some(8.0), end_secs: None });
+        c.deck_cmd(1, DeckCmd::CueBeatLoop { idx: 0, beats: 4.0 });
+        // (Both start on the next beat.)
+        for _ in 0..100 {
+            pump(&mut e, &mut c);
+        }
+        assert_eq!(c.snap.clock.owner, ClockOwner::Deck(1));
+        assert_eq!(c.mix_target(1), Some(0));
+        assert_eq!(c.mix_target(0), None, "the playing deck is not a candidate");
+        assert!(!c.mix_is_urgent(0));
+
+        // Best: 16 bars on an 8-bar phrase start, ahead, ending before the track does.
+        let best = c.plan_best(1, 0);
+        let beat = c.snap.decks[0].beat;
+        assert_eq!(best.mode, automix::MixWhen::Best);
+        assert_eq!(best.length_beats, 64.0);
+        assert_eq!(best.start_beat % 32.0, 0.0);
+        assert!(best.start_beat > beat && best.start_beat + 64.0 <= 180.0, "{best:?}");
+
+        let plan = c.plan_now(1, 0);
+        // 120 BPM: 2 s bars, 5 of them fit in 10 s; it starts on the next bar line.
+        assert_eq!(plan.length_beats, 20.0);
+        assert_eq!(plan.start_beat % 4.0, 0.0);
+        assert!(plan.start_beat > c.snap.decks[0].beat);
+        let start = plan.start_beat;
+        c.start_mix(plan);
+        pump(&mut e, &mut c);
+        assert_eq!(c.snap.clock.owner, ClockOwner::Deck(0));
+        assert!(c.snap.decks[1].sync);
+        assert!(c.mix_target(1).is_none(), "one mix at a time");
+
+        let low = |c: &Core, ch: usize| c.session.channels[ch].params.eq[0];
+        let vol = |c: &Core, ch: usize| c.session.channels[ch].params.volume;
+        let (mut saw_in_bass_out, mut saw_swap) = (false, false);
+        let mut blocks = 0;
+        while c.automix.is_some() {
+            pump(&mut e, &mut c);
+            blocks += 4;
+            assert!(blocks < 48000 / 512 * 40, "mix never finished");
+            let b = c.snap.decks[0].beat;
+            if c.snap.decks[0].playing && b > start + 1.0 && b < start + 9.0 {
+                // First half: incoming coming up without bass, outgoing at full volume.
+                assert!(c.snap.decks[1].playing && !c.snap.decks[1].loop_on, "incoming left its loop");
+                assert!(c.snap.decks[1].sync);
+                assert_eq!(low(&c, 1), 0.0);
+                assert!((vol(&c, 0) - 0.9).abs() < 1e-6);
+                saw_in_bass_out = vol(&c, 1) > 0.2;
+            }
+            if c.snap.decks[0].playing && b > start + 11.0 && b < start + 19.0 {
+                assert_eq!(low(&c, 0), 0.0, "basses swapped at the midpoint");
+                assert!((low(&c, 1) - 0.5).abs() < 1e-6);
+                assert!(vol(&c, 0) < 0.9);
+                saw_swap = true;
+            }
+        }
+        assert!(saw_in_bass_out && saw_swap);
+        pump(&mut e, &mut c);
+        assert!(!c.snap.decks[0].playing, "outgoing stopped");
+        assert_eq!(c.snap.clock.owner, ClockOwner::Deck(1), "the new track leads");
+        assert!(c.snap.decks[1].playing);
+        assert_eq!(vol(&c, 0), 0.0);
+        assert!((vol(&c, 1) - 1.0).abs() < 1e-6);
+        assert!((low(&c, 0) - 0.5).abs() < 1e-6 && (low(&c, 1) - 0.5).abs() < 1e-6);
+        // The incoming track played on from its cue (12 s of mix after 8 s).
+        assert!(c.snap.decks[1].position_secs > 18.0, "{}", c.snap.decks[1].position_secs);
+        assert_eq!(c.snap.decks[1].stem_gains[2], 1.0, "vocals back");
+
+        // MIDI pick-up: the controller's CH1 fader (still up) is ignored until it comes down to
+        // dj's 0, then follows again.
+        assert!(!c.pickup_allows("/Mixer/CH1/Volume", 0.9));
+        assert!(!c.pickup_allows("/Mixer/CH1/Volume", 0.5));
+        assert!(c.pickup_allows("/Mixer/CH1/Volume", 0.01));
+        assert!(c.pickup_allows("/Mixer/CH1/Volume", 0.7));
+        // Crossing the current value counts too (a fast move skips past it).
+        c.route("Mixer/CH2/Volume", &[OscType::Float(0.5)]);
+        c.pickup.insert("mixer/ch2/volume".into(), None);
+        assert!(!c.pickup_allows("Mixer/CH2/Volume", 0.2));
+        assert!(c.pickup_allows("Mixer/CH2/Volume", 0.8), "jumped across 0.5");
     }
 
     #[test]

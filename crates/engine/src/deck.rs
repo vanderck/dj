@@ -117,6 +117,7 @@ enum PendingAction {
     JumpCue(u8),
     CueLoop(u8),
     CueBeatLoop(u8, f64),
+    ReleaseLoop,
 }
 
 /// What happens at a hot cue besides jumping to it (stored loop cues always loop).
@@ -918,6 +919,35 @@ impl Deck {
         }
     }
 
+    /// On the next beat (of the master clock when synced, whatever the quantize setting): jump
+    /// back to the loop's start and leave the loop, so the track plays on from there (e.g. from
+    /// the cue it was looping at, on a bar line of the track it is mixed into).
+    pub fn release_loop(&mut self, ctx: &DeckCtx) {
+        if !self.loop_on {
+            return;
+        }
+        let on_clock = self.sync || ctx.is_clock_owner;
+        let now = if on_clock { Some(ctx.clock_beat) } else { self.beat() };
+        match now {
+            Some(b) if self.playing => {
+                let at = (b - 0.002).ceil().max(b);
+                if at - b > 0.002 {
+                    self.pending = Some(Pending { action: PendingAction::ReleaseLoop, at_beat: at, on_clock });
+                } else {
+                    self.fire_release_loop();
+                }
+            }
+            _ => self.fire_release_loop(),
+        }
+    }
+
+    fn fire_release_loop(&mut self) {
+        if let Some(l) = self.loop_region {
+            self.jump_to(l.start);
+        }
+        self.loop_on = false;
+    }
+
     pub fn loop_exit(&mut self) {
         self.loop_on = false;
     }
@@ -1185,6 +1215,7 @@ impl Deck {
                         PendingAction::JumpCue(c) => self.fire_cue(c, CueLoopMode::None, ctx),
                         PendingAction::CueLoop(c) => self.fire_cue(c, CueLoopMode::ToNextCue, ctx),
                         PendingAction::CueBeatLoop(c, beats) => self.fire_cue(c, CueLoopMode::Beats(beats), ctx),
+                        PendingAction::ReleaseLoop => self.fire_release_loop(),
                     }
                 }
             }
