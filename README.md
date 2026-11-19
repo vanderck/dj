@@ -102,6 +102,25 @@ dj reads, from MP3, WAV, AIFF, FLAC, Ogg/Opus and M4A files:
   anchored on the first cue. Only when there's no cue does dj look for
   where the kicks fall, still using the tagged BPM.
 
+**Tracks without tags** (fresh downloads, promos) are analysed when they load
+(`crates/library/src/analysis.rs`; keys are never guessed):
+
+- **BPM and beat grid**: tempo from an onset envelope (kick-weighted spectral
+  flux), folded into 78–178 BPM, rounded to a whole BPM when within measuring
+  accuracy; for live drummers (tempo drifting between 30 s sections) the
+  average, as Mixed In Key does. Bar starts from where the sound changes most.
+  Shown as `≈124.00` on the deck.
+- **Energy**: a rough 1–10 estimate from loudness, brightness and tempo.
+- **Cue points**: section changes on phrase boundaries, named Intro, Drop,
+  Break, Vocal, Outro or Phrase. With stems (Demucs), drums, bass and vocals are
+  measured directly, so a drop is where drums and bass come in and a vocal cue
+  where the singing starts; bars follow the actual beats (live tempo drift).
+  Settings → Library → *Cue points*: Mixed In Key's (detect only for tracks
+  without cues) or dj's detection for every track; the deck menu has *Detect
+  cue points* for one track. Cues you set yourself are always kept.
+
+Detected values are saved per track and shown in the library.
+
 Grid nudges (`⊢`, `‹`, `›` on the deck) and cues you set while performing are
 saved per track. Lock a track (🔒) to keep your prepared cues untouched.
 

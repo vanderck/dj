@@ -175,6 +175,19 @@ fn settings(ui: &mut Ui, core: &mut Core, st: &mut UiState) {
     });
     ui.checkbox(&mut core.settings.keylock_on_load, "Key lock (pitch preserve) on load");
     ui.checkbox(&mut core.settings.load_at_first_cue, "Load tracks at their first cue");
+    ui.horizontal(|ui| {
+        use crate::settings::CuePoints;
+        ui.label("Cue points");
+        ui.selectable_value(&mut core.settings.cue_points, CuePoints::Tags, "Mixed In Key")
+            .on_hover_text("The tags' cue points; dj detects them only for tracks without any");
+        ui.selectable_value(&mut core.settings.cue_points, CuePoints::Detected, "dj's detection")
+            .on_hover_text("dj finds cue points in every track from its stems (Intro, Drop, Break, Vocal, Outro). Cues you set yourself are kept.");
+    });
+    ui.label(
+        RichText::new("Tracks without a BPM tag get a detected tempo and beat grid (shown with ≈), and an estimated energy. Keys are never guessed.")
+            .small()
+            .weak(),
+    );
     ui.checkbox(&mut core.settings.use_replaygain, "Apply ReplayGain from tags");
     ui.horizontal(|ui| {
         ui.label("Tape stop");

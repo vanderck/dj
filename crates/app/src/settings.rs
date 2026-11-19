@@ -103,11 +103,23 @@ pub struct Settings {
     /// Mixing happens on an external (hardware) mixer: every deck goes to its own output pair,
     /// Collective's volume / trim / EQ / filter and the mixer section are bypassed and hidden.
     pub external_mixer: bool,
+    /// Whose cue points a track gets: Mixed In Key's tags (detection only for tracks without
+    /// cues) or dj's detection for every track. Cues you set yourself are always kept.
+    pub cue_points: CuePoints,
     /// Screen layout: big touch controls, or (with a MIDI controller) four full decks with
     /// slim cue pads. `Auto` picks Controller when a hardware MIDI input is connected.
     pub layout: LayoutMode,
     /// Tempo faders move in steps of this many percent (0 = continuous).
     pub tempo_step_pct: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum CuePoints {
+    /// The tags' cue points (Mixed In Key); dj detects them only for tracks without any.
+    #[default]
+    Tags,
+    /// dj detects the cue points of every track (from its stems).
+    Detected,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -154,6 +166,7 @@ impl Default for Settings {
             stems_prepared_dir: None,
             external_mixer: false,
             layout: LayoutMode::Auto,
+            cue_points: CuePoints::Tags,
             tempo_step_pct: 0.0,
         }
     }

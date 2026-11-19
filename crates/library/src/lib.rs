@@ -1,10 +1,10 @@
-//! Track loading for Collective.
+//! Track loading for dj.
 //!
-//! BPM, key and cue points come from your tags (Mixed In Key / Serato
-//! markers) — nothing is "detected". The only signal processing here is
-//! decoding, the 3-band waveform, and (when a track has a BPM tag but neither
-//! a beat grid nor a cue to anchor it) finding where the beats fall.
+//! BPM, key, energy and cue points come from your tags (Mixed In Key / Serato markers) when
+//! they are there. For tracks without them, [`analysis`] detects the tempo and beat grid, a rough
+//! energy level and cue points (key is never detected).
 
+pub mod analysis;
 pub mod key;
 pub mod scan;
 pub mod tags;
@@ -123,6 +123,8 @@ pub enum GridSource {
     Aligned,
     /// User-adjusted and saved.
     User,
+    /// Detected from the audio (no BPM tag).
+    Detected,
 }
 
 /// Choose a beat grid from tags, never estimating the tempo itself.
@@ -144,6 +146,7 @@ pub struct LoadedTrack {
     pub tags: Tags,
     pub grid_source: Option<GridSource>,
     pub waveform: Arc<Waveform>,
+    pub detected: Detected,
 }
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -152,18 +155,46 @@ pub fn next_track_id() -> u64 {
     NEXT_ID.fetch_add(1, Ordering::Relaxed)
 }
 
-/// Overrides persisted by the app (grid edits, cues set in Perform).
+/// Overrides persisted by the app (grid edits, cues set in Perform, detected values).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct TrackOverrides {
     pub grid: Option<BeatGrid>,
+    /// `grid` was detected, not set by hand.
+    pub grid_detected: bool,
     pub cues: Option<Vec<Option<Cue>>>,
     pub locked: bool,
+    /// Estimated energy (tracks without an energy tag).
+    pub energy: Option<u8>,
+}
+
+/// What `load` should detect.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DetectOptions {
+    /// Detect cue points even when the tags have some (the user prefers dj's).
+    pub prefer_detected_cues: bool,
+    /// Detect cue points now, from the mix (when no stems will come to do it better).
+    pub cues_from_mix: bool,
+}
+
+/// What `load` detected (to be saved), and what is still to do.
+#[derive(Clone, Debug, Default)]
+pub struct Detected {
+    /// The grid was detected now.
+    pub grid: bool,
+    /// Energy was estimated now.
+    pub energy: Option<u8>,
+    /// Cue points were detected now (from the mix).
+    pub cues: bool,
+    /// Cue points are wanted but were not detected yet (do it once stems are ready).
+    pub cues_pending: bool,
 }
 
 /// Decode + read tags + build waveform. Runs on a worker thread.
-pub fn load(path: &Path, overrides: Option<&TrackOverrides>, use_replaygain: bool) -> Result<LoadedTrack> {
+pub fn load(path: &Path, overrides: Option<&TrackOverrides>, use_replaygain: bool, detect: DetectOptions) -> Result<LoadedTrack> {
     let audio = decode(path)?;
-    let tags = tags::read(path).unwrap_or_default();
+    let mut tags = tags::read(path).unwrap_or_default();
+    let mut detected = Detected::default();
     let (mut grid, mut source) = match grid_for(&tags, &audio) {
         Some((g, s)) => (Some(g), Some(s)),
         None => (None, None),
@@ -186,18 +217,55 @@ pub fn load(path: &Path, overrides: Option<&TrackOverrides>, use_replaygain: boo
     if let Some(o) = overrides {
         if let Some(g) = o.grid {
             grid = Some(g);
-            source = Some(GridSource::User);
+            source = Some(if o.grid_detected { GridSource::Detected } else { GridSource::User });
         }
         if let Some(c) = &o.cues {
             for (i, v) in c.iter().enumerate().take(NUM_HOT_CUES) {
                 cues[i] = v.clone();
             }
         }
+        if tags.energy.is_none() {
+            tags.energy = o.energy;
+        }
+    }
+
+    // Detection for what the tags (and saved values) do not give.
+    let user_cues = overrides.is_some_and(|o| o.cues.is_some());
+    let want_cues = !user_cues && (detect.prefer_detected_cues || cues.iter().all(|c| c.is_none()));
+    let need = grid.is_none() || tags.energy.is_none() || (want_cues && detect.cues_from_mix);
+    let env = need.then(|| analysis::Envelope::compute(&audio));
+    if let (None, Some(env)) = (grid, &env) {
+        if let Some(t) = analysis::detect_grid(env) {
+            grid = Some(t.grid);
+            source = Some(GridSource::Detected);
+            detected.grid = true;
+        }
+    }
+    if let (None, Some(env)) = (tags.energy, &env) {
+        let e = analysis::estimate_energy(&audio, env, grid.map(|g| g.bpm));
+        tags.energy = Some(e);
+        detected.energy = Some(e);
+    }
+    if want_cues {
+        match (grid, &env) {
+            (Some(g), Some(env)) if detect.cues_from_mix => {
+                let found = analysis::detect_cues(&audio, env, &g, None);
+                if !found.is_empty() {
+                    cues = Default::default();
+                    for (slot, c) in cues.iter_mut().zip(found) {
+                        *slot = Some(c);
+                    }
+                    detected.cues = true;
+                }
+            }
+            (Some(_), _) => detected.cues_pending = true,
+            _ => {}
+        }
     }
     let waveform = Arc::new(Waveform::build(&audio));
     let gain = if use_replaygain { tags.replaygain_db.map(db_to_gain).unwrap_or(1.0) } else { 1.0 };
     let track = Arc::new(Track { id: next_track_id(), audio, grid, gain, cues });
-    Ok(LoadedTrack { path: path.to_path_buf(), track, tags, grid_source: source, waveform })
+    Ok(LoadedTrack { path: path.to_path_buf(), track, tags, grid_source: source, waveform, detected })
 }
 
 /// Decode a short sample for a sampler lane (max 15 s, like the original).
@@ -248,7 +316,7 @@ mod tests {
         let p = dir.join("t.wav");
         std::fs::write(&p, &wav).unwrap();
 
-        let t = load(&p, None, false).unwrap();
+        let t = load(&p, None, false, DetectOptions::default()).unwrap();
         assert_eq!(t.track.audio.sample_rate, 48000);
         assert_eq!(t.track.audio.frames.len(), 48000);
         assert_eq!(t.tags.key.unwrap().camelot(), "8A");
@@ -259,6 +327,48 @@ mod tests {
         // Loop fills the first free pad.
         assert_eq!(t.track.cues[1].as_ref().unwrap().kind, CueKind::Loop);
         assert!(t.waveform.len() > 90);
+        assert!(!t.detected.grid && !t.detected.cues_pending, "tags win: nothing detected but energy");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn untagged_tracks_get_a_detected_grid_energy_and_cues() {
+        // Intro (hats + pad) 16 bars, then the full groove 32 bars, at 126 BPM, no tags.
+        let bars: Vec<_> = [vec![(false, true, false, true); 16], vec![(true, true, true, true); 32]].concat();
+        let audio = analysis::tests::track(126.0, 0.25, &bars);
+        let pcm: Vec<u8> = audio.frames.iter().flat_map(|f| f.iter().flat_map(|v| ((v.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes())).collect();
+        let sr = audio.sample_rate;
+        let mut fmt = Vec::new();
+        fmt.extend_from_slice(&1u16.to_le_bytes());
+        fmt.extend_from_slice(&2u16.to_le_bytes());
+        fmt.extend_from_slice(&sr.to_le_bytes());
+        fmt.extend_from_slice(&(sr * 4).to_le_bytes());
+        fmt.extend_from_slice(&4u16.to_le_bytes());
+        fmt.extend_from_slice(&16u16.to_le_bytes());
+        let chunk = |id: &[u8], b: &[u8]| [id.to_vec(), (b.len() as u32).to_le_bytes().to_vec(), b.to_vec()].concat();
+        let body = [b"WAVE".to_vec(), chunk(b"fmt ", &fmt), chunk(b"data", &pcm)].concat();
+        let wav = [b"RIFF".to_vec(), (body.len() as u32).to_le_bytes().to_vec(), body].concat();
+        let dir = std::env::temp_dir().join(format!("collective-detect-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("untagged.wav");
+        std::fs::write(&p, &wav).unwrap();
+
+        let t = load(&p, None, false, DetectOptions { cues_from_mix: true, ..Default::default() }).unwrap();
+        assert_eq!(t.grid_source, Some(GridSource::Detected));
+        assert!((t.track.grid.unwrap().bpm - 126.0).abs() < 0.02);
+        assert!(t.detected.grid && t.detected.energy.is_some() && t.detected.cues);
+        let names: Vec<&str> = t.track.cues.iter().flatten().map(|c| c.name.as_str()).collect();
+        assert_eq!(names.first(), Some(&"Intro"), "{names:?}");
+        assert!(names.contains(&"Drop"), "{names:?}");
+
+        // With stems coming, cue detection waits for them.
+        let later = load(&p, None, false, DetectOptions::default()).unwrap();
+        assert!(later.detected.cues_pending && later.track.cues.iter().all(|c| c.is_none()));
+        // Saved values come back without detecting again.
+        let saved = TrackOverrides { grid: t.track.grid, grid_detected: true, energy: t.detected.energy, cues: Some(t.track.cues.to_vec()), ..Default::default() };
+        let again = load(&p, Some(&saved), false, DetectOptions::default()).unwrap();
+        assert_eq!(again.grid_source, Some(GridSource::Detected));
+        assert!(!again.detected.grid && again.detected.energy.is_none() && !again.detected.cues_pending);
         let _ = std::fs::remove_dir_all(dir);
     }
 }
