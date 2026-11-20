@@ -3208,6 +3208,24 @@ mod tests {
     }
 
     #[test]
+    fn mix_finishes_while_the_playing_deck_loops() {
+        let (mut e, mut c, _config) = core();
+        mix_setup(&mut e, &mut c);
+        // The playing deck sits in a 1-bar loop: its own beat keeps jumping back.
+        c.deck_cmd(0, DeckCmd::LoopBeats(4.0));
+        for _ in 0..10 {
+            pump(&mut e, &mut c);
+        }
+        assert!(c.snap.decks[0].loop_on);
+        assert_eq!(c.mix_target(1), Some(0));
+        let plan = c.plan_now(1, 0, crate::settings::MixStyle::Eq);
+        c.start_mix(plan);
+        run_mix(&mut e, &mut c, |_, _| {});
+        assert!(!c.snap.decks[0].playing && c.snap.decks[1].playing, "mixed out of the loop");
+        assert_eq!(c.session.channels[1].params.volume, 1.0);
+    }
+
+    #[test]
     fn loaded_tracks_get_stems_in_the_background() {
         let (mut e, mut c, _config) = core();
         let dir = crate::settings::config_dir();
