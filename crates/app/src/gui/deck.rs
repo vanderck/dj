@@ -122,6 +122,7 @@ fn title_block(ui: &Ui, core: &Core, d: usize, rect: Rect, big: bool) {
         },
     };
     let (ts, as_) = if big { (17.0, 13.0) } else { (14.0, 12.0) };
+    let title = fit_text(ui, &title, bold(ts), rect.width());
     p.text(Pos2::new(rect.left(), rect.center().y - 1.0), Align2::LEFT_BOTTOM, title, bold(ts), TEXT);
     // Stems status after the artist (the stems themselves are on the channel faders).
     let status = if big { stems_status(core, d) } else { None };
@@ -207,7 +208,10 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
     let tag_font = bold(if dense { 8.5 } else { 9.5 });
     // The deck that sets the master tempo (chosen automatically) says so above its BPM: the pair
     // is centred together, so the label never sits on the digits.
-    let bpm_h = p.layout_no_wrap(bpm_text.clone(), bpm_font.clone(), TEXT).size().y;
+    let bpm_size = p.layout_no_wrap(bpm_text.clone(), bpm_font.clone(), TEXT).size();
+    let bpm_h = bpm_size.y;
+    // The key chip goes left of the BPM as it is drawn ("≈120.00" is wider than "120.00").
+    let bpm_left = bpm_r.right() - bpm_size.x.max(bpm_r.width());
     let tag_h = if is_master { p.layout_no_wrap("MASTER".into(), tag_font.clone(), RED).size().y } else { 0.0 };
     let top = bpm_r.center().y - (bpm_h + tag_h) / 2.0;
     if is_master {
@@ -215,7 +219,7 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
     }
     p.text(Pos2::new(bpm_r.right(), top + tag_h), Align2::RIGHT_TOP, bpm_text, bpm_font, TEXT);
     let key = core.key_text(core.deck_key(d));
-    let chip = Rect::from_min_size(Pos2::new(bpm_r.left() - 56.0, r.top() + (hh - 30.0).max(4.0) / 2.0), Vec2::new(46.0, (hh - 8.0).min(30.0)));
+    let chip = Rect::from_min_size(Pos2::new(bpm_left - 56.0, r.top() + (hh - 30.0).max(4.0) / 2.0), Vec2::new(46.0, (hh - 8.0).min(30.0)));
     if !key.is_empty() {
         key_chip(ui, chip, &key, key_border(core, d), 15.0);
     }
@@ -577,26 +581,33 @@ pub fn compact(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: R
     badge_menu(ui, core, d, badge, 16.0);
     let sampler = core.session.decks[d].mode == DeckMode::Sampler;
 
-    // Buttons from the right.
-    let bw = 72.0;
+    // Buttons from the right, narrower when needed so the title (at least ~130 points) and the key
+    // chip keep their room.
+    let mix = !sampler && mix_shown(core, d);
+    let widths = [72.0, 76.0, 66.0, 80.0, if mix { 80.0 } else { 0.0 }];
     let gap = 8.0;
+    let need: f32 = widths.iter().sum::<f32>() + gap * (if mix { 4.0 } else { 3.0 });
+    let room = r.width() - (32.0 + 12.0) - 130.0 - 56.0;
+    let k = (room / need).clamp(0.6, 1.0);
+    let bw = 72.0 * k;
     let mut x = r.right();
     let mut next = |w: f32| {
         x -= w;
         let rr = Rect::from_min_size(Pos2::new(x, r.top()), Vec2::new(w, row_h));
-        x -= gap;
+        x -= gap * k;
         rr
     };
     let playing = if sampler { core.snap.samplers[d].playing } else { v.playing };
     let sync_r = next(bw);
-    let play_r = next(bw + 4.0);
-    let cue_r = next(bw - 6.0);
-    let swap_r = next(bw + 8.0);
-    let mix_r = (!sampler && mix_shown(core, d)).then(|| next(bw + 34.0));
+    let play_r = next(76.0 * k);
+    let cue_r = next(66.0 * k);
+    let swap_r = next(80.0 * k);
+    let mix_r = mix.then(|| next(80.0 * k));
     if let Some(mix_r) = mix_r {
         mix_button(ui, core, d, mix_r, bold(14.0));
     }
-    let resp = button(ui, swap_r, "⇄ Swap", Style::Outline(Color32::from_gray(110), false), bold(14.0)).on_hover_text("Show this deck in the large view");
+    let resp = button(ui, swap_r, if k < 0.85 { "⇄" } else { "⇄ Swap" }, Style::Outline(Color32::from_gray(110), false), bold(14.0))
+        .on_hover_text("Show this deck in the large view");
     if resp.clicked() {
         st.focus[d % 2] = d;
     }
@@ -867,11 +878,11 @@ fn mix_button(ui: &mut Ui, core: &mut Core, d: usize, rect: Rect, font: egui::Fo
                     crate::settings::MixStyle::Drop => "Drop",
                 };
                 let tip = match st {
-                    crate::settings::MixStyle::Auto => "dj looks at both tracks and picks: Drop when the keys clash, the tempos are far apart or (Best) the new track has a drop; else Stems when both have stems; else EQ",
-                    crate::settings::MixStyle::Stems => "Bass swap at the midpoint with the stems, then the old drums, then its vocals and other",
-                    crate::settings::MixStyle::Eq if external => "dj only drops the decks in and out of loops on the beat; you fade on your mixer",
-                    crate::settings::MixStyle::Eq => "Bass cut on the EQ and swapped at the midpoint, volume fades",
-                    crate::settings::MixStyle::Drop => "No blend: the new track cuts in on the beat, from its drop cue if it has one",
+                    crate::settings::MixStyle::Auto => "dj looks at both tracks and picks Stems, EQ or Drop for this mix: Drop when the keys clash, the tempos are far apart or (Best) the new track has a drop; else Stems when both have stems; else EQ",
+                    crate::settings::MixStyle::Stems => "In: volume opens on the new melody, then its drums. Midpoint: the basses swap. Out: the old drums, then its vocals and other (volume only closes the end)",
+                    crate::settings::MixStyle::Eq if external => "dj drops the decks in and out of loops on the beat; you fade on your mixer",
+                    crate::settings::MixStyle::Eq => "In: volume opens with the EQ closed, then the highs, then the mids. Midpoint: the basses swap. Out: the old mids, then its highs (volume only closes the end)",
+                    crate::settings::MixStyle::Drop => "In: the new track cuts in on the beat, from its drop cue if it has one. Out: the old track is gone within a beat",
                 };
                 let r = Rect::from_min_size(Pos2::new(row.left() + k as f32 * (pw + gap), row.top()), Vec2::new(pw, row.height()));
                 let sel = style == st;

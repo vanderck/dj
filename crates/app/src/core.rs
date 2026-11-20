@@ -1628,6 +1628,13 @@ impl Core {
                 self.eject(d);
                 None
             }
+            // Load a file: `Deck/N/Load s /path/to/track.mp3`.
+            ["load"] => {
+                if let Some(OscType::String(path)) = args.first() {
+                    self.load_track(d, Path::new(path));
+                }
+                None
+            }
             ["loadselected"] if trig => {
                 if let Some(e) = self.browser_selected.and_then(|i| self.library.get(i)).map(|e| e.path.clone()) {
                     self.load_track(d, &e);
@@ -3184,6 +3191,20 @@ mod tests {
         }
         assert!(c.snap.decks[1].sync, "comes in synced");
         assert!(c.snap.decks[1].playing);
+    }
+
+    #[test]
+    fn osc_loads_a_file_onto_a_deck() {
+        let (mut e, mut c, _config) = core();
+        let path = kick_wav("osc-load.wav", 5);
+        assert!(c.route("/dj/Deck/3/Load".trim_start_matches("/dj/"), &[OscType::String(path.display().to_string())]));
+        let deadline = Instant::now() + std::time::Duration::from_secs(60);
+        while !c.snap.decks[2].loaded {
+            assert!(Instant::now() < deadline, "never loaded");
+            pump(&mut e, &mut c);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(c.decks[2].info.as_ref().unwrap().path, path);
     }
 
     #[test]

@@ -276,6 +276,7 @@ Examples:
 /dj/Header/BPM f 126.0
 /dj/Header/Quantize i 4            (0 off, 1 = 2 bars … 7 = 1/32)
 /dj/Deck/1/PlayPause i 1
+/dj/Deck/2/Load s /Volumes/SSD/Music/track.mp3
 /dj/Deck/2/BeatSkip i -8
 /dj/Deck/1/HotCue i 3 i 1 … i 3 i 0 (hold cue 3)
 /dj/Deck/1/SlipLoop/Quarter i 1 … i 0
