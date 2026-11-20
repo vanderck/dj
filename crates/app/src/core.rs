@@ -66,8 +66,10 @@ pub struct DeckUi {
     pub error: Option<String>,
     /// Stem separation progress (0..1) while it runs for the loaded track.
     pub stems_progress: Option<f32>,
-    /// What produced the attached stems (model name, "placeholder separator", "cache").
+    /// What produced the attached stems ("HT-Demucs", "prepared stems").
     pub stems_source: Option<String>,
+    /// Why this track has no stems (no HT-Demucs model, or it failed).
+    pub stems_missing: Option<&'static str>,
     /// `LoopInOut` set a loop start and is waiting for the end.
     pub loop_in_pending: bool,
     /// Per-stem loudness of the loaded track, for the waveform lanes (once separated).
@@ -249,6 +251,8 @@ pub struct Core {
 impl Core {
     pub fn new(ctl: Controller, sample_rate: f32, max_block: usize, settings: Settings, session: Session) -> Self {
         let loop_size = [settings.default_loop_beats; NUM_DECKS];
+        // The cache of the small-model/placeholder stems is gone with them: free its disk space.
+        let _ = std::fs::remove_dir_all(crate::settings::config_dir().join("stems-cache"));
         let (job_tx, job_rx) = unbounded::<LoadJob>();
         let (res_tx, res_rx) = unbounded::<LoadResult>();
         for _ in 0..2 {
@@ -496,6 +500,7 @@ impl Core {
         self.stems.cancel(d);
         self.decks[d].stems_progress = None;
         self.decks[d].stems_source = None;
+        self.decks[d].stems_missing = None;
         self.decks[d].stem_wave = None;
         self.decks[d].loop_in_pending = false;
         self.decks[d].loading = Some(path.to_path_buf());
@@ -525,15 +530,12 @@ impl Core {
     fn request_stems(&mut self, d: usize, path: &Path, detect_cues: bool) {
         let Some(track) = self.loaded_track(d) else { return };
         self.decks[d].stems_progress = Some(0.0);
-        let cache = (self.settings.stems_cache_mb > 0)
-            .then(|| (crate::settings::config_dir().join("stems-cache"), self.settings.stems_cache_mb * 1024 * 1024));
+        self.decks[d].stems_missing = None;
         self.stems.request(crate::stems::Request {
             deck: d,
             track,
             path: path.to_path_buf(),
-            model: crate::stems::resolve_model(self.settings.stems_model.as_deref()),
-            cache,
-            demucs: self.settings.stems_demucs.clone(),
+            demucs: self.settings.stems_demucs.clone().filter(|p| p.exists()),
             detect_cues,
             prepared: Some(self.settings.stems_prepared_dir()),
         });
@@ -563,6 +565,7 @@ impl Core {
         self.stems.cancel(d);
         self.decks[d].stems_progress = None;
         self.decks[d].stems_source = None;
+        self.decks[d].stems_missing = None;
         self.decks[d].stem_wave = None;
         self.send(Command::Eject { deck: d as u8 });
         self.decks[d].info = None;
@@ -624,9 +627,15 @@ impl Core {
                     self.apply_detected_cues(deck, c);
                 }
             }
-            Update::Failed { deck, track_id, error } if current(self, deck, track_id) => {
+            Update::NoStems { deck, track_id, error, cues } if current(self, deck, track_id) => {
                 self.decks[deck].stems_progress = None;
-                self.log(format!("Deck {} stems: {error}", deck + 1));
+                self.decks[deck].stems_missing = Some(if error.is_some() { "stems failed" } else { "no stems: get HT-Demucs" });
+                if let Some(e) = error {
+                    self.log(format!("Deck {} stems: {e}", deck + 1));
+                }
+                if let Some(c) = cues {
+                    self.apply_detected_cues(deck, c);
+                }
             }
             _ => {} // for a track that is no longer loaded
         }
@@ -2493,7 +2502,9 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("dj-core-test-{}-{:?}", std::process::id(), std::thread::current().id()));
         std::env::set_var("DJ_CONFIG_DIR", &dir);
         let (engine, ctl) = create(EngineConfig { sample_rate: 48000.0, max_block: 512, max_latency: 4096 });
-        let settings = Settings { osc_enabled: false, vst3_enabled: false, library_folders: vec![], ..Default::default() };
+        // Stems from the tiny stand-in HT-Demucs model (stems-core's test data).
+        let demucs = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../stems-core/tests/data/demucs_test.onnx"));
+        let settings = Settings { osc_enabled: false, vst3_enabled: false, library_folders: vec![], stems_demucs: Some(demucs), ..Default::default() };
         let mut c = Core::new(ctl, 48000.0, 512, settings, Session::default());
         c.sync_engine();
         (engine, c, guard)
@@ -3074,9 +3085,9 @@ mod tests {
         }
         assert!(c.decks[0].info.is_some());
         assert_eq!(c.decks[0].stems_progress, None);
-        assert_eq!(c.decks[0].stems_source.as_deref(), Some("placeholder separator"));
-        // Cached for next time.
-        assert!(std::fs::read_dir(dir.join("stems-cache")).unwrap().count() >= 1);
+        assert_eq!(c.decks[0].stems_source.as_deref(), Some("HT-Demucs"));
+        // Kept as prepared stems for next time.
+        assert!(std::fs::read_dir(c.settings.stems_prepared_dir()).unwrap().count() >= 1);
     }
 
     #[test]

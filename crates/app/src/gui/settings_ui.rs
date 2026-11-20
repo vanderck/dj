@@ -322,23 +322,6 @@ fn settings(ui: &mut Ui, core: &mut Core, st: &mut UiState) {
     section(ui, "STEMS");
     ui.checkbox(&mut core.settings.stems_enabled, "Separate loaded tracks into stems (drums, bass, vocals, other)");
     if core.settings.stems_enabled {
-        let mut model = core.settings.stems_model.as_ref().map(|p| p.display().to_string()).unwrap_or_default();
-        ui.horizontal(|ui| {
-            ui.label("Model");
-            let edit = egui::TextEdit::singleline(&mut model).hint_text("/path/to/model.onnx").desired_width(300.0);
-            if ui.add(edit).changed() {
-                let m = model.trim();
-                core.settings.stems_model = (!m.is_empty()).then(|| m.into());
-            }
-        });
-        let active = crate::stems::resolve_model(core.settings.stems_model.as_deref());
-        let note = match (&core.settings.stems_model, &active) {
-            (Some(_), _) => "Applies to tracks loaded from now on.".to_string(),
-            (None, Some(p)) if Some(p) == crate::stems::bundled_model().as_ref() => "Using the model bundled with the app.".to_string(),
-            (None, Some(p)) => format!("Using STEMS_MODEL: {}", p.display()),
-            (None, None) => "No model: a low-quality placeholder separator is used.".to_string(),
-        };
-        ui.label(RichText::new(note).small().weak());
         // HT-Demucs: best quality, offline, downloaded on request.
         let mut demucs = core.settings.stems_demucs.as_ref().map(|p| p.display().to_string()).unwrap_or_default();
         ui.horizontal(|ui| {
@@ -391,15 +374,8 @@ fn settings(ui: &mut Ui, core: &mut Core, st: &mut UiState) {
                 core.settings.stems_prepared_dir = (!p.is_empty()).then(|| p.into());
             }
         });
-        ui.horizontal(|ui| {
-            ui.label("Cache");
-            ui.add(egui::DragValue::new(&mut core.settings.stems_cache_mb).range(0..=200_000).suffix(" MB"));
-            if ui.button("Clear cache").clicked() {
-                let _ = std::fs::remove_dir_all(crate::settings::config_dir().join("stems-cache"));
-            }
-        });
         ui.label(
-            RichText::new("Separation runs in the background after a track loads; the deck plays the full mix until the stems are ready. About 50 MB of cache per minute of audio.")
+            RichText::new("Separation runs in the background after a track loads; the deck plays the full mix until the stems are ready. Prepared stems take about 32 MB per minute of audio. Without HT-Demucs (or prepared stems) tracks have no stems.")
                 .small()
                 .weak(),
         );

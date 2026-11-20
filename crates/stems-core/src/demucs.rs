@@ -22,8 +22,7 @@ use std::path::Path;
 use ort::session::Session;
 use ort::value::TensorRef;
 
-use crate::model::ModelError;
-use crate::offline::{Frame, OfflineError, Progress, StemBuffers};
+use crate::offline::{Frame, ModelError, OfflineError, Progress, StemBuffers};
 use crate::onnx::{builder, err, OnnxOptions};
 use crate::resample::resample;
 use crate::Stem;

@@ -1,6 +1,7 @@
 //! Demucs runner against a tiny stand-in model (tests/data/demucs_test*.onnx): each
 //! source is a fixed fraction of the input at the same sample, so chunking, padding, trimming,
-//! blending and normalisation errors all show up. Run as tests/onnx.rs says.
+//! blending and normalisation errors all show up. Run with
+//! `cargo test -p stems-core --features onnx` (or `onnx-dynamic` and `ORT_DYLIB_PATH`).
 #![cfg(any(feature = "onnx", feature = "onnx-dynamic"))]
 
 use stems_core::demucs::DemucsModel;
