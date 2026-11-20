@@ -65,7 +65,7 @@ cargo test --workspace
 
 Every track is separated into **drums, bass, vocals and other** with HT-Demucs, in the background
 after it loads (`crates/stems-core`). The deck plays the full mix until the stems are ready; its
-header shows the progress, then where the stems came from.
+header shows the progress until they're there.
 
 **Where stems come from**, in this order:
 
@@ -222,14 +222,16 @@ Fonts: Inter and JetBrains Mono, bundled under the SIL Open Font License (see
     when their keys clash or their tempos are far apart (no long overlap), or
     for a Best mix when the new track has a drop cue; else *Stems* when both
     decks have stems; else *EQ*. The popup says what it chose and why.
-    **Stems**: the new track comes in with drums and other only, the basses
-    swap at the midpoint (the kick stays whole), then the old drums go, then
-    its vocals and other (its volume stays up: the stems do the fading). With
+    **Stems**: the new track's volume opens quickly on its melody (other)
+    alone, then its drums come in, the basses swap at the midpoint (the kick
+    stays whole), then the old drums go, then its vocals and other. Volume
+    only opens and closes the edges. With
     dj's own mixer the EQ smooths it: the new
     track's highs rise over the first half and the old track's highs roll off
-    while its drums leave. **EQ**: the new track comes up with its bass cut on
-    the EQ, the basses swap at the midpoint, then the old track leaves on the
-    EQ (mids, then highs) and its volume closes only the last part. **Drop**: no
+    while its drums leave. **EQ**: the new track's volume opens quickly with its
+    EQ closed, then its highs come in, then its mids; the basses swap at the
+    midpoint; then the old track leaves on the EQ (mids, then highs) and its
+    volume closes only the last part. **Drop**: no
     blend, the new track cuts in on the beat from its drop cue (if it has one)
     and the old one is gone within a beat.
   - **When**: **Now** starts on the next bar (a drop on the next phrase when

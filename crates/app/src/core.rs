@@ -2694,6 +2694,13 @@ mod tests {
                 assert_eq!(low(&c, 1), 0.0);
                 assert!((vol(&c, 0) - 0.9).abs() < 1e-6);
                 saw_in_bass_out = vol(&c, 1) > 0.2;
+                // Volume opens quickly (20 beats: open by beat 3); the parts follow on the EQ.
+                if b > start + 3.5 {
+                    assert!(vol(&c, 1) > 0.99, "volume open early");
+                }
+                if b < start + 4.5 {
+                    assert!(c.session.channels[1].params.eq[1] < 0.1, "mids not in yet");
+                }
             }
             if c.snap.decks[0].playing && b > start + 11.0 && b < start + 19.0 {
                 assert_eq!(low(&c, 0), 0.0, "basses swapped at the midpoint");
@@ -2969,7 +2976,12 @@ mod tests {
             let (gi, go) = (c.snap.decks[1].stem_gains, c.snap.decks[0].stem_gains);
             if (0.05..0.45).contains(&p) {
                 assert_eq!((gi[1], gi[2], go[1]), (0.0, 0.0, 1.0), "first half: new bass and vocals out, old bass in");
-                assert!(c.session.channels[1].params.eq[2] < 0.5, "new highs still rising");
+                if p < 0.3 {
+                    assert!(c.session.channels[1].params.eq[2] < 0.5, "new highs still rising");
+                }
+                if p < 0.12 {
+                    assert_eq!(gi[0], 0.0, "new drums not in yet: its melody first");
+                }
                 before = true;
             }
             if (0.55..0.7).contains(&p) {
