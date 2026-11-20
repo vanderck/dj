@@ -3060,6 +3060,48 @@ mod tests {
     }
 
     #[test]
+    fn mix_brings_in_a_paused_deck() {
+        let (mut e, mut c, _config) = core();
+        for (d, name, secs) in [(0, "paused-a.wav", 90), (1, "paused-b.wav", 60)] {
+            c.load_track(d, &kick_wav(name, secs));
+            let deadline = Instant::now() + std::time::Duration::from_secs(60);
+            while !(c.snap.decks[d].loaded && c.decks[d].info.as_ref().is_some_and(|i| !i.cues_pending)) {
+                assert!(Instant::now() < deadline, "track never loaded");
+                pump(&mut e, &mut c);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+        for d in 0..2 {
+            c.deck_cmd(d, DeckCmd::SetGrid(Some(dj_engine::track::BeatGrid { bpm: 120.0, anchor_secs: 0.0 })));
+        }
+        c.route("Mixer/CH1/Volume", &[OscType::Float(0.9)]);
+        // Deck 2 is paused with its fader up: Mix still offers it, and takes the volume down first.
+        c.route("Mixer/CH2/Volume", &[OscType::Float(0.7)]);
+        c.deck_cmd(0, DeckCmd::Play);
+        for _ in 0..60 {
+            pump(&mut e, &mut c);
+        }
+        assert!(c.snap.decks[0].playing && !c.snap.decks[1].playing);
+        assert_eq!(c.mix_target(1), Some(0));
+        let plan = c.plan_now(1, 0, crate::settings::MixStyle::Eq);
+        c.start_mix(plan);
+        assert_eq!(c.session.channels[1].params.volume, 0.0, "silent until the mix brings it in");
+        let mut heard = false;
+        run_mix(&mut e, &mut c, |c, p| {
+            if (0.1..0.4).contains(&p) {
+                let b = c.snap.decks[1];
+                assert!(b.playing && b.sync && !b.loop_on, "started in sync and left its loop");
+                heard = c.session.channels[1].params.volume > 0.05;
+            }
+        });
+        assert!(heard);
+        assert!(!c.snap.decks[0].playing && c.snap.decks[1].playing);
+        assert_eq!(c.session.channels[1].params.volume, 1.0);
+        // In time: deck 2's beat lines up with the clock's.
+        assert!(c.snap.decks[1].phase_error.abs() < 0.05, "{}", c.snap.decks[1].phase_error);
+    }
+
+    #[test]
     fn loaded_tracks_get_stems_in_the_background() {
         let (mut e, mut c, _config) = core();
         let dir = crate::settings::config_dir();
