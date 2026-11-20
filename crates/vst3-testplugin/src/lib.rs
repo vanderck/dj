@@ -121,7 +121,7 @@ impl IComponentTrait for GainProcessor {
                         bus.channelCount = 2;
                         copy_wstring("Input", &mut bus.name);
                         bus.busType = BusTypes_::kMain as BusType;
-                        bus.flags = BusInfo_::BusFlags_::kDefaultActive;
+                        bus.flags = BusInfo_::BusFlags_::kDefaultActive as _; // i32 with MSVC
 
                         kResultOk
                     }

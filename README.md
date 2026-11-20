@@ -26,11 +26,14 @@ cargo build --release
 ./target/release/dj --list-devices
 ```
 
-macOS app bundle and disk image (see [packaging/macos](packaging/macos/README.md)):
+macOS app bundle and disk image, Apple Silicon only (see [packaging/macos](packaging/macos/README.md)):
 
 ```bash
-cargo xtask package-macos --universal
+cargo xtask package-macos
 ```
+
+Windows: `cargo build --release` gives `target/release/dj.exe` (Visual Studio Build Tools needed).
+CI builds it on every push (`dj-windows` artifact: a zip with `dj.exe`).
 
 Linux needs the ALSA development headers to build (`libasound2-dev` on
 Debian/Ubuntu). The GUI uses wgpu and falls back to OpenGL automatically; set
@@ -281,5 +284,5 @@ the value a button sends, e.g. `Deck/1/BeatSkip:-8`.
   by a few milliseconds and aren't shifted for plugin latency.
 - Changing the audio device needs a restart.
 
-Used on macOS (Apple silicon) with a Xone:K2; the test suite runs on Linux and macOS (CI).
-Windows builds from the same sources but hasn't been run.
+Used on macOS (Apple silicon) with a Xone:K2; the test suite runs on macOS and Windows (CI) and
+Linux. The Windows build hasn't been tried on a Windows machine with audio hardware yet.

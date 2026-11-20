@@ -1,5 +1,9 @@
 //! dj — live performance DJ software.
 
+// Windows: a GUI app, so no console window opens behind it (command-line use attaches to the
+// terminal it was started from, see `attach_console`).
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod audio;
 mod core;
 mod fxcat;
@@ -36,8 +40,26 @@ USAGE:
     dj --vst3-scan B   (internal) scan one VST3 bundle and print JSON
 ";
 
+/// Windows: show command-line output (`--help`, `--info`, …) in the terminal dj was started from.
+#[cfg(windows)]
+fn attach_console() {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn AttachConsole(process_id: u32) -> i32;
+    }
+    const ATTACH_PARENT_PROCESS: u32 = u32::MAX;
+    // SAFETY: plain Win32 call; failing (no parent console) is harmless.
+    unsafe {
+        AttachConsole(ATTACH_PARENT_PROCESS);
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    #[cfg(windows)]
+    if args.len() > 1 && args[1] != "--vst3-scan" {
+        attach_console(); // (the plugin scanner talks to dj over a pipe, not a terminal)
+    }
     match args.get(1).map(|s| s.as_str()) {
         Some("--vst3-scan") => {
             let code = args.get(2).map(|b| fxcat::scan_child_main(&PathBuf::from(b))).unwrap_or(2);
