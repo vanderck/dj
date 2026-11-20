@@ -36,6 +36,9 @@ pub struct UiState {
     pub fader_mode: [mixer::FaderMode; 4],
     /// Group settings a fader popup's "turn off" switch saved, to restore them.
     pub group_restore: std::collections::HashMap<(usize, mixer::Group), Vec<f32>>,
+    /// The track each channel's saved Stems levels belong to (a new track starts with all stems on,
+    /// so the old track's levels aren't restored onto it).
+    pub group_track: [u64; 4],
     /// Controller layout this frame (see `Settings::layout`): slim cue pads, four full decks.
     pub dense: bool,
     /// Unsnapped tempo fader position during a drag (snapping would swallow small moves).
@@ -69,6 +72,7 @@ impl Default for UiState {
             fx_open: [false; 4],
             fader_mode: [mixer::FaderMode::Level; 4],
             group_restore: Default::default(),
+            group_track: [0; 4],
             dense: false,
             tempo_drag: None,
             fader_popup: None,
