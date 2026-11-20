@@ -71,7 +71,8 @@ header shows the progress, then where the stems came from.
 
 1. **Prepared stems**: made earlier by Demucs (on load, or with `dj --prepare-stems FOLDER` before
    a set) and kept in the *Prepared stems* folder (Settings → Stems; about 32 MB per minute, never
-   cleaned up automatically).
+   cleaned up automatically). They're found by the track's audio, so retagging (Mixed In Key
+   writing cues), renaming or moving a file keeps them.
 2. **HT-Demucs**, the best quality: Settings → Stems → *Download HT-Demucs* (or
    `dj --download-demucs`) fetches the ONNX conversion made by the
    [Mixxx project](https://github.com/mixxxdj/demucs) (300 MB). About 1–3 minutes per track. Its
@@ -175,7 +176,8 @@ One screen, laid out for 1600×1000 points and fitted to the window:
     hot cues that are set, showing their names (up to 9 pads); loop In/Out/Exit,
     ÷2, loop size, ×2, « ».
     A set hot cue pad loops from its cue at the loop size, or jumps to it
-    (Settings → Hot cue pads); controller pads do the same.
+    (Settings → Hot cue pads); controller pads do the same. While another deck
+    plays, a tapped cue turns Sync on, so it comes in in time.
   - Compact: Play/Pause, Cue, Sync, Swap (and Mix).
   - Right-click (or long-press) a deck's number for track/sampler mode, tempo range, lock, grid tools,
     *Detect cue points* and eject. Sampler decks show their step grid in the
@@ -222,10 +224,12 @@ Fonts: Inter and JetBrains Mono, bundled under the SIL Open Font License (see
     decks have stems; else *EQ*. The popup says what it chose and why.
     **Stems**: the new track comes in with drums and other only, the basses
     swap at the midpoint (the kick stays whole), then the old drums go, then
-    its vocals and other. With dj's own mixer the EQ smooths it: the new
+    its vocals and other (its volume stays up: the stems do the fading). With
+    dj's own mixer the EQ smooths it: the new
     track's highs rise over the first half and the old track's highs roll off
     while its drums leave. **EQ**: the new track comes up with its bass cut on
-    the EQ, the basses swap at the midpoint, the old track fades. **Drop**: no
+    the EQ, the basses swap at the midpoint, then the old track leaves on the
+    EQ (mids, then highs) and its volume closes only the last part. **Drop**: no
     blend, the new track cuts in on the beat from its drop cue (if it has one)
     and the old one is gone within a beat.
   - **When**: **Now** starts on the next bar (a drop on the next phrase when

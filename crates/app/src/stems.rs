@@ -146,10 +146,9 @@ fn run(job: Request, wanted: &[AtomicU64; NUM_DECKS], tx: &Sender<Update>, demuc
         return;
     }
     let audio = &job.track.audio;
-    let frames = audio.frames.len();
-    let prepared_key = cache_key(&job.path, PREPARED, frames);
+    let prepared_key = content_key(&audio.frames, audio.sample_rate);
     if let Some(dir) = &job.prepared {
-        if let Some(stems) = cache::read(&dir.join(cache::file_name(prepared_key)), prepared_key, id, frames) {
+        if let Some(stems) = find_prepared(dir, &job.path, &audio.frames, audio.sample_rate, id) {
             done(&job, tx, stems, "prepared stems".into());
             return;
         }
@@ -209,7 +208,46 @@ fn mtime_secs(meta: Option<&fs::Metadata>) -> u64 {
         .unwrap_or(0)
 }
 
-/// Stable 64-bit FNV-1a over the track file identity and the separator.
+/// Key of a track's prepared stems: its decoded audio (length, rate and a sample every few
+/// thousand frames), so tag edits (Mixed In Key writing cues), renames and moves keep them.
+fn content_key(frames: &[[f32; 2]], rate: u32) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut eat = |bytes: &[u8]| {
+        for b in bytes {
+            h ^= *b as u64;
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    };
+    eat(b"audio-1");
+    eat(&(frames.len() as u64).to_le_bytes());
+    eat(&rate.to_le_bytes());
+    let step = (frames.len() / 4096).max(1);
+    for f in frames.iter().step_by(step) {
+        eat(&f[0].to_bits().to_le_bytes());
+        eat(&f[1].to_bits().to_le_bytes());
+    }
+    h
+}
+
+/// A track's prepared stems: by its audio, else (stems made by older versions) by the file's
+/// identity, which then move to the audio key.
+fn find_prepared(dir: &Path, path: &Path, frames: &[[f32; 2]], rate: u32, track_id: u64) -> Option<StemData> {
+    let n = frames.len();
+    let key = content_key(frames, rate);
+    if let Some(s) = cache::read(&dir.join(cache::file_name(key)), key, track_id, n) {
+        return Some(s);
+    }
+    let old = cache_key(path, PREPARED, n);
+    let old_file = dir.join(cache::file_name(old));
+    let stems = cache::read(&old_file, old, track_id, n)?;
+    if cache::write(dir, key, &stems).is_ok() {
+        let _ = fs::remove_file(&old_file);
+    }
+    Some(stems)
+}
+
+/// Stable 64-bit FNV-1a over the track file identity and the separator (how prepared stems were
+/// keyed before [`content_key`]).
 fn cache_key(path: &Path, separator: &str, frames: usize) -> u64 {
     let meta = fs::metadata(path).ok();
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -386,9 +424,8 @@ pub fn prepare_file(
     progress: &mut dyn FnMut(f32),
 ) -> Result<Prepared, String> {
     let audio = dj_library::decode(path).map_err(|e| format!("decoding: {e}"))?;
-    let frames = audio.frames.len();
-    let key = cache_key(path, PREPARED, frames);
-    if cache::read(&dir.join(cache::file_name(key)), key, 0, frames).is_some() {
+    let key = content_key(&audio.frames, audio.sample_rate);
+    if find_prepared(dir, path, &audio.frames, audio.sample_rate, 0).is_some() {
         return Ok(Prepared::AlreadyPrepared);
     }
     let (buffers, name) = cache

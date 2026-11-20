@@ -529,7 +529,8 @@ impl Core {
     /// Ask the stems worker for this deck's stems (and cue points from them, if `detect_cues`).
     fn request_stems(&mut self, d: usize, path: &Path, detect_cues: bool) {
         let Some(track) = self.loaded_track(d) else { return };
-        self.decks[d].stems_progress = Some(0.0);
+        // (Progress shows once separation starts; prepared stems just arrive.)
+        self.decks[d].stems_progress = None;
         self.decks[d].stems_missing = None;
         self.stems.request(crate::stems::Request {
             deck: d,
@@ -2041,6 +2042,12 @@ impl Core {
     /// size or jumps to it (Settings → Hot cue pads), the same on screen and on a controller.
     fn pad_press(&mut self, d: usize, idx: u8) -> Option<DeckCmd> {
         let set = self.snap.decks[d].hot_cues.get(idx as usize).is_some_and(|c| c.is_some());
+        // Another deck is playing: a cue comes in in time with it (tempo and beat).
+        let v = self.snap.decks[d];
+        let other_playing = (0..self.deck_count()).any(|o| o != d && self.snap.decks[o].playing);
+        if set && other_playing && v.has_grid && !v.sync && self.snap.clock.owner != ClockOwner::Deck(d as u8) {
+            self.deck_cmd(d, DeckCmd::Sync(true));
+        }
         if set && self.settings.cue_pads == crate::settings::CuePadMode::Loop {
             return Some(DeckCmd::CueBeatLoop { idx, beats: self.loop_size[d] });
         }
@@ -2691,7 +2698,12 @@ mod tests {
             if c.snap.decks[0].playing && b > start + 11.0 && b < start + 19.0 {
                 assert_eq!(low(&c, 0), 0.0, "basses swapped at the midpoint");
                 assert!((low(&c, 1) - 0.5).abs() < 1e-6);
-                assert!(vol(&c, 0) < 0.9);
+                if b < start + 16.0 {
+                    assert!((vol(&c, 0) - 0.9).abs() < 1e-6, "the old track leaves on the EQ first, not the volume");
+                }
+                if b > start + 15.0 {
+                    assert!(c.session.channels[0].params.eq[1] < 0.3, "old mids rolled off");
+                }
                 saw_swap = true;
             }
         }
@@ -2704,6 +2716,7 @@ mod tests {
         assert!((vol(&c, 1) - 1.0).abs() < 1e-6);
         assert!(!c.session.channels[1].params.mute);
         assert!((low(&c, 0) - 0.5).abs() < 1e-6 && (low(&c, 1) - 0.5).abs() < 1e-6);
+        assert_eq!((c.session.channels[0].params.eq[1], c.session.channels[0].params.eq[2]), (0.5, 0.5), "old mids and highs back");
         // The incoming track played on from its cue (12 s of mix after 8 s).
         assert!(c.snap.decks[1].position_secs > 18.0, "{}", c.snap.decks[1].position_secs);
         assert_eq!(c.snap.decks[1].stem_gains[2], 0.0, "the new track's vocals stay out");
@@ -2962,6 +2975,7 @@ mod tests {
             if (0.55..0.7).contains(&p) {
                 assert_eq!((gi[1], go[1]), (1.0, 0.0), "the basses swapped");
                 assert!(go[0] < 1.0 && go[2] == 1.0, "old drums going, its vocals still there");
+                assert_eq!(c.session.channels[0].params.volume, 0.9, "the stems do the fading, not the volume");
                 assert_eq!(c.session.channels[1].params.eq[2], 0.5, "new highs in");
                 assert!(c.session.channels[0].params.eq[2] < 0.5, "old highs rolling off");
                 after = true;
@@ -3099,6 +3113,65 @@ mod tests {
         assert_eq!(c.session.channels[1].params.volume, 1.0);
         // In time: deck 2's beat lines up with the clock's.
         assert!(c.snap.decks[1].phase_error.abs() < 0.05, "{}", c.snap.decks[1].phase_error);
+    }
+
+    #[test]
+    fn stems_are_made_once_then_reused() {
+        let (mut e, mut c, _config) = core();
+        let path = kick_wav("reuse.wav", 20);
+        for (d, want) in [(0, "HT-Demucs"), (1, "prepared stems"), (0, "prepared stems")] {
+            c.load_track(d, &path);
+            let deadline = Instant::now() + std::time::Duration::from_secs(60);
+            while !(c.snap.decks[d].stems_ready && c.decks[d].stems_source.is_some()) {
+                assert!(Instant::now() < deadline, "stems never came");
+                pump(&mut e, &mut c);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            assert_eq!(c.decks[d].stems_source.as_deref(), Some(want), "deck {}", d + 1);
+            c.route(&format!("Deck/{}/Eject", d + 1), &[OscType::Int(1)]);
+            pump(&mut e, &mut c);
+        }
+        // The same audio under another name (moved, renamed, retagged): still prepared.
+        let moved = path.with_file_name("reuse-renamed.wav");
+        std::fs::copy(&path, &moved).unwrap();
+        c.load_track(1, &moved);
+        let deadline = Instant::now() + std::time::Duration::from_secs(60);
+        while !(c.snap.decks[1].stems_ready && c.decks[1].stems_source.is_some()) {
+            assert!(Instant::now() < deadline, "stems never came");
+            pump(&mut e, &mut c);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(c.decks[1].stems_source.as_deref(), Some("prepared stems"));
+    }
+
+    #[test]
+    fn a_cue_tapped_while_another_deck_plays_syncs_in() {
+        let (mut e, mut c, _config) = core();
+        for (d, name) in [(0, "sync-a.wav"), (1, "sync-b.wav")] {
+            c.load_track(d, &kick_wav(name, 20));
+            let deadline = Instant::now() + std::time::Duration::from_secs(60);
+            while !c.snap.decks[d].loaded {
+                assert!(Instant::now() < deadline, "track never loaded");
+                pump(&mut e, &mut c);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+        for d in 0..2 {
+            c.deck_cmd(d, DeckCmd::SetGrid(Some(dj_engine::track::BeatGrid { bpm: 120.0, anchor_secs: 0.0 })));
+        }
+        c.deck_cmd(0, DeckCmd::Play);
+        c.deck_cmd(1, DeckCmd::Sync(false));
+        c.deck_cmd(1, DeckCmd::SetCue { idx: 2, secs: Some(4.0), end_secs: None });
+        for _ in 0..30 {
+            pump(&mut e, &mut c);
+        }
+        assert!(c.snap.decks[0].playing && !c.snap.decks[1].sync);
+        c.route("Deck/2/Cue3", &[OscType::Int(1)]);
+        for _ in 0..30 {
+            pump(&mut e, &mut c);
+        }
+        assert!(c.snap.decks[1].sync, "comes in synced");
+        assert!(c.snap.decks[1].playing);
     }
 
     #[test]

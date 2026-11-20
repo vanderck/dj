@@ -150,7 +150,7 @@ pub fn stems_status(core: &Core, d: usize) -> Option<(String, Color32)> {
         (Some(f), _) => Some((format!("stems {:.0}%", f * 100.0), DECK[d])),
         (None, Some(src)) if v.stems_ready => Some((format!("stems: {src}"), TEXT_FAINT)),
         _ if v.stems_ready => Some(("stems".into(), TEXT_FAINT)),
-        _ => Some((core.decks[d].stems_missing.unwrap_or("no stems yet").into(), TEXT_FAINT)),
+        _ => Some((core.decks[d].stems_missing.unwrap_or("stems…").into(), TEXT_FAINT)),
     }
 }
 
