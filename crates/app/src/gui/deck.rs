@@ -148,10 +148,9 @@ pub fn stems_status(core: &Core, d: usize) -> Option<(String, Color32)> {
     let source = core.decks[d].stems_source.as_deref();
     match (core.decks[d].stems_progress, source) {
         (Some(f), _) => Some((format!("stems {:.0}%", f * 100.0), DECK[d])),
-        (None, Some(src)) if v.stems_ready && src.contains("placeholder") => Some(("placeholder stems".into(), RED)),
         (None, Some(src)) if v.stems_ready => Some((format!("stems: {src}"), TEXT_FAINT)),
         _ if v.stems_ready => Some(("stems".into(), TEXT_FAINT)),
-        _ => Some(("no stems yet".into(), TEXT_FAINT)),
+        _ => Some((core.decks[d].stems_missing.unwrap_or("no stems yet").into(), TEXT_FAINT)),
     }
 }
 
@@ -513,23 +512,20 @@ fn stems_row(ui: &mut Ui, core: &mut Core, d: usize, r: Rect) {
     let rad = CornerRadius::same(6);
     let p = ui.painter_at(sr);
     p.rect_filled(sr, rad, WELL);
-    let placeholder = core.decks[d].stems_source.as_deref().is_some_and(|s| s.contains("placeholder"));
     let (text, col) = match (core.decks[d].stems_progress, &core.decks[d].stems_source, v.loaded) {
         (Some(f), _, true) => {
             let fill = Rect::from_min_size(sr.min, Vec2::new(sr.width() * f.clamp(0.0, 1.0), sr.height()));
             p.rect_filled(fill, rad, alpha(color, 0.35));
             (format!("Separating {:.0}%", f * 100.0), TEXT)
         }
-        (None, Some(src), true) if ready => (src.clone(), if placeholder { RED } else { TEXT_DIM }),
-        (None, _, true) => ("No stems".into(), TEXT_FAINT),
+        (None, Some(src), true) if ready => (src.clone(), TEXT_DIM),
+        (None, _, true) => (core.decks[d].stems_missing.unwrap_or("No stems").into(), TEXT_FAINT),
         _ => ("Stems".into(), TEXT_FAINT),
     };
     let fitted = fit_text(ui, &text, bold(11.0), sr.width() - 12.0);
     p.text(sr.center(), Align2::CENTER_CENTER, &fitted, bold(11.0), col);
     let hover = ui.allocate_rect(sr, Sense::hover());
-    if placeholder {
-        hover.on_hover_text("No separation model is configured, so a low-quality placeholder is used. Set one in Settings → Stems.");
-    } else if fitted != text {
+    if fitted != text {
         hover.on_hover_text(text);
     }
 }

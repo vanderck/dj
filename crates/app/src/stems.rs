@@ -1,6 +1,6 @@
-//! Stem separation in the background: tracks are separated after they load (the deck plays the
-//! plain mix meanwhile), results are cached on disk, and the engine receives them through
-//! `Command::AttachStems`. Separation itself is `stems_core::offline`.
+//! Stem separation in the background, with HT-Demucs: tracks are separated after they load (the
+//! deck plays the plain mix meanwhile) and kept as prepared stems; the engine receives them through
+//! `Command::AttachStems`. Without prepared stems or a Demucs model a track has no stems.
 
 use std::fs;
 use std::io::{Read, Write};
@@ -19,18 +19,16 @@ pub enum Update {
     Progress { deck: usize, track_id: u64, fraction: f32 },
     /// `cues`: cue points detected with the stems, when the request asked for them.
     Done { deck: usize, track_id: u64, stems: Arc<StemData>, wave: Arc<StemWave>, source: String, cues: Option<Vec<Cue>> },
-    Failed { deck: usize, track_id: u64, error: String },
+    /// No stems for this track: none prepared and no HT-Demucs model, or it failed (`error`, to
+    /// report). `cues`: cue points detected from the mix instead, when the request asked for them.
+    NoStems { deck: usize, track_id: u64, error: Option<String>, cues: Option<Vec<Cue>> },
 }
 
 pub struct Request {
     pub deck: usize,
     pub track: Arc<Track>,
     pub path: PathBuf,
-    /// ONNX model; `None` uses the placeholder separator.
-    pub model: Option<PathBuf>,
-    /// Cache folder and its size limit in bytes; `None` disables the cache.
-    pub cache: Option<(PathBuf, u64)>,
-    /// HT-Demucs ONNX model (see [`demucs_files`]); tried first, results kept as prepared stems.
+    /// HT-Demucs ONNX model (see [`demucs_files`]); results are kept as prepared stems.
     pub demucs: Option<PathBuf>,
     /// Detect cue points with the stems once they are ready (see `Update::Done`).
     pub detect_cues: bool,
@@ -127,24 +125,6 @@ impl StemWave {
     }
 }
 
-/// Model from the settings, else `STEMS_MODEL`, else one bundled with the app.
-pub fn resolve_model(setting: Option<&Path>) -> Option<PathBuf> {
-    setting
-        .map(Path::to_path_buf)
-        .or_else(|| std::env::var_os("STEMS_MODEL").filter(|v| !v.is_empty()).map(PathBuf::from))
-        .or_else(bundled_model)
-}
-
-/// File name of a model shipped with the app (see `cargo xtask package-macos --model`).
-pub const BUNDLED_MODEL: &str = "stems-model.onnx";
-
-/// `dj.app/Contents/Resources/stems-model.onnx` on macOS, or next to the executable.
-pub fn bundled_model() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let dir = exe.parent()?;
-    [dir.join("../Resources").join(BUNDLED_MODEL), dir.join(BUNDLED_MODEL)].into_iter().find(|p| p.is_file())
-}
-
 /// Report finished stems, with cue points detected from them when asked for.
 fn done(job: &Request, tx: &Sender<Update>, stems: StemData, source: String) {
     let audio = &job.track.audio;
@@ -191,114 +171,35 @@ fn run(job: Request, wanted: &[AtomicU64; NUM_DECKS], tx: &Sender<Update>, demuc
             &buffers[CoreStem::Vocals as usize],
         );
         if let Some(dir) = &job.prepared {
-            if let Err(e) = cache::write(dir, prepared_key, &stems, u64::MAX) {
+            if let Err(e) = cache::write(dir, prepared_key, &stems) {
                 eprintln!("prepared stems: {e}");
             }
         }
         done(&job, tx, stems, name);
     };
     let threads = std::thread::available_parallelism().map(|n| n.get().saturating_sub(2).max(1)).unwrap_or(1);
-    if let Some(path) = &job.demucs {
-        match demucs.separate(path, threads, &audio.frames, audio.sample_rate, &mut progress) {
+    let error = match &job.demucs {
+        Some(path) => match demucs.separate(path, threads, &audio.frames, audio.sample_rate, &mut progress) {
             Ok((buffers, name)) => return deliver_prepared(buffers, name),
             Err(OfflineError::Cancelled) => return,
-            Err(e) => {
-                let error = format!("Demucs: {e}; using the model instead");
-                let _ = tx.send(Update::Failed { deck, track_id: id, error });
-            }
-        }
-    }
-
-    let separator = separator_id(job.model.as_deref());
-    let key = cache_key(&job.path, &separator, frames);
-    if let Some((dir, _)) = &job.cache {
-        if let Some(stems) = cache::read(&dir.join(cache::file_name(key)), key, id, audio.frames.len()) {
-            done(&job, tx, stems, "cache".into());
-            return;
-        }
-    }
-    let mut result = separate(&audio.frames, audio.sample_rate, job.model.as_deref(), &mut progress);
-    if let (Err(OfflineError::Model(e)), Some(model)) = (&result, &job.model) {
-        // Better rough stems than none: report the problem, then use the placeholder.
-        let error = format!("{}: {e}; using the placeholder separator", model.display());
-        let _ = tx.send(Update::Failed { deck, track_id: id, error });
-        result = separate(&audio.frames, audio.sample_rate, None, &mut progress);
-    }
-    match result {
-        Ok((buffers, source)) => {
-            // "Other" is not stored: the engine derives it as mix − drums − bass − vocals.
-            let stems = StemData::from_f32(
-                id,
-                &buffers[CoreStem::Drums as usize],
-                &buffers[CoreStem::Bass as usize],
-                &buffers[CoreStem::Vocals as usize],
-            );
-            drop(buffers);
-            if let Some((dir, limit)) = &job.cache {
-                if let Err(e) = cache::write(dir, key, &stems, *limit) {
-                    eprintln!("stems cache: {e}");
-                }
-            }
-            done(&job, tx, stems, source);
-        }
-        Err(OfflineError::Cancelled) => {}
-        Err(e) => {
-            let _ = tx.send(Update::Failed { deck, track_id: id, error: e.to_string() });
-        }
-    }
+            Err(e) => Some(format!("Demucs: {e}")),
+        },
+        None => None,
+    };
+    no_stems(&job, tx, error);
 }
 
-fn separate(
-    frames: &[[f32; 2]],
-    rate: u32,
-    model: Option<&Path>,
-    progress: offline::Progress,
-) -> Result<(StemBuffers, String), OfflineError> {
-    match model {
-        None => Ok((offline::separate_with_heuristic(frames, rate, progress)?, "placeholder separator".into())),
-        Some(path) => separate_with_onnx(frames, rate, path, progress),
-    }
-}
-
-#[cfg(any(feature = "stems-onnx", feature = "stems-onnx-dynamic"))]
-fn separate_with_onnx(
-    frames: &[[f32; 2]],
-    rate: u32,
-    path: &Path,
-    progress: offline::Progress,
-) -> Result<(StemBuffers, String), OfflineError> {
-    use stems_core::{MaskModel, OnnxModel, OnnxOptions};
-    // Separation runs in the background: leave cores for the audio thread and the UI.
-    let threads = std::thread::available_parallelism().map(|n| n.get().saturating_sub(2).max(1)).unwrap_or(1);
-    let model = OnnxModel::from_file(path, &OnnxOptions { intra_threads: threads })
-        .map_err(|e| OfflineError::Model(e.to_string()))?;
-    let name = model.name().to_string();
-    Ok((offline::separate_with_model(frames, rate, model, progress)?, name))
-}
-
-#[cfg(not(any(feature = "stems-onnx", feature = "stems-onnx-dynamic")))]
-fn separate_with_onnx(
-    _: &[[f32; 2]],
-    _: u32,
-    path: &Path,
-    _: offline::Progress,
-) -> Result<(StemBuffers, String), OfflineError> {
-    Err(OfflineError::Model(format!(
-        "cannot use {}: built without ONNX support (enable the `stems-onnx` feature)",
-        path.display()
-    )))
-}
-
-/// Identifies the separator, so cached stems are recomputed when the model file changes.
-fn separator_id(model: Option<&Path>) -> String {
-    match model {
-        None => "heuristic-1".into(),
-        Some(p) => {
-            let meta = fs::metadata(p).ok();
-            let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
-            format!("{}:{size}:{}", p.display(), mtime_secs(meta.as_ref()))
+/// No stems for this track: say so, with cue points from the mix when they were asked for.
+fn no_stems(job: &Request, tx: &Sender<Update>, error: Option<String>) {
+    let audio = &job.track.audio;
+    let cues = match (job.detect_cues, job.track.grid) {
+        (true, Some(grid)) => {
+            let env = dj_library::analysis::Envelope::compute(audio);
+            Some(dj_library::analysis::detect_cues(audio, &env, &grid, None))
         }
-    }
+        _ => None,
+    };
+    let _ = tx.send(Update::NoStems { deck: job.deck, track_id: job.track.id, error, cues });
 }
 
 fn mtime_secs(meta: Option<&fs::Metadata>) -> u64 {
@@ -502,7 +403,7 @@ pub fn prepare_file(
         &buffers[CoreStem::Bass as usize],
         &buffers[CoreStem::Vocals as usize],
     );
-    cache::write(dir, key, &stems, u64::MAX).map_err(|e| format!("writing {}: {e}", dir.display()))?;
+    cache::write(dir, key, &stems).map_err(|e| format!("writing {}: {e}", dir.display()))?;
     Ok(Prepared::Done(name))
 }
 
@@ -537,12 +438,10 @@ mod cache {
                 .map(|c| [i16::from_le_bytes([c[0], c[1]]), i16::from_le_bytes([c[2], c[3]])])
                 .collect()
         };
-        // Touch so eviction treats it as recently used.
-        let _ = fs::File::options().append(true).open(path).and_then(|f| f.set_modified(SystemTime::now()));
         Some(StemData { track_id, scale, drums: stem(0), bass: stem(1), vocals: stem(2) })
     }
 
-    pub fn write(dir: &Path, key: u64, stems: &StemData, limit: u64) -> std::io::Result<()> {
+    pub fn write(dir: &Path, key: u64, stems: &StemData) -> std::io::Result<()> {
         fs::create_dir_all(dir)?;
         let path = dir.join(file_name(key));
         let tmp = path.with_extension("tmp");
@@ -560,32 +459,7 @@ mod cache {
             }
             f.flush()?;
         }
-        fs::rename(&tmp, &path)?;
-        evict(dir, limit);
-        Ok(())
-    }
-
-    /// Delete least recently used files until the folder fits in `limit` bytes.
-    pub fn evict(dir: &Path, limit: u64) {
-        let Ok(rd) = fs::read_dir(dir) else { return };
-        let mut files: Vec<(SystemTime, u64, PathBuf)> = rd
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().is_some_and(|x| x == "stems"))
-            .filter_map(|e| {
-                let m = e.metadata().ok()?;
-                Some((m.modified().ok()?, m.len(), e.path()))
-            })
-            .collect();
-        let mut total: u64 = files.iter().map(|f| f.1).sum();
-        files.sort_by_key(|f| f.0); // oldest first
-        for (_, len, path) in files {
-            if total <= limit {
-                break;
-            }
-            if fs::remove_file(&path).is_ok() {
-                total -= len;
-            }
-        }
+        fs::rename(&tmp, &path)
     }
 }
 
@@ -625,62 +499,38 @@ mod tests {
         }
     }
 
-    #[test]
-    fn separates_caches_and_reloads_from_cache() {
-        let dir = std::env::temp_dir().join(format!("dj-stems-test-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        let song = dir.join("song.wav");
-        fs::write(&song, b"pretend audio file").unwrap();
-        let cache = Some((dir.join("cache"), 1 << 30));
-
-        let w = StemsWorker::new();
-        let t = track(11, 2.0);
-        w.request(Request { deck: 1, track: t.clone(), path: song.clone(), model: None, cache: cache.clone(), demucs: None, detect_cues: false, prepared: None });
-        let Update::Done { deck, track_id, stems, source, .. } = wait(&w) else { panic!("expected stems") };
-        assert_eq!((deck, track_id, source.as_str()), (1, 11, "placeholder separator"));
-        assert_eq!(stems.len(), t.audio.frames.len());
-        // Unity gains reproduce the mix; all three stored stems plus "other" sum back to it.
-        let i = 30_000;
-        let mix = stems.mix(i, t.audio.frames[i], &[1.0; 4]);
-        assert!((mix[0] - t.audio.frames[i][0]).abs() < 1e-6);
-
-        // Same file again (new track id): served from the cache, identical content.
-        let t2 = track(12, 2.0);
-        w.request(Request { deck: 0, track: t2, path: song.clone(), model: None, cache: cache.clone(), demucs: None, detect_cues: false, prepared: None });
-        let Update::Done { track_id, stems: cached, source, .. } = wait(&w) else { panic!() };
-        assert_eq!((track_id, source.as_str()), (12, "cache"));
-        assert_eq!(cached.drums, stems.drums);
-        assert_eq!(cached.vocals, stems.vocals);
-        assert_eq!(cached.scale, stems.scale);
-
-        // A tiny limit evicts everything but what fits.
-        cache::evict(&dir.join("cache"), 0);
-        assert_eq!(fs::read_dir(dir.join("cache")).unwrap().count(), 0);
-        let _ = fs::remove_dir_all(&dir);
+    /// The tiny stand-in HT-Demucs model from stems-core's tests.
+    #[cfg(any(feature = "stems-onnx", feature = "stems-onnx-dynamic"))]
+    fn test_model() -> PathBuf {
+        PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../stems-core/tests/data/demucs_test.onnx"))
     }
 
+    fn req(track: Arc<Track>, demucs: Option<PathBuf>, detect_cues: bool, prepared: Option<PathBuf>) -> Request {
+        Request { deck: 0, track, path: PathBuf::from("/nonexistent/song.wav"), demucs, detect_cues, prepared }
+    }
+
+    #[test]
+    fn without_demucs_there_are_no_stems_but_cues_still_come() {
+        let mut t = Arc::try_unwrap(track(21, 40.0)).ok().unwrap();
+        t.grid = Some(dj_engine::track::BeatGrid { bpm: 120.0, anchor_secs: 0.0 });
+        let t = Arc::new(t);
+        let w = StemsWorker::new();
+        w.request(req(t.clone(), None, true, None));
+        let Update::NoStems { track_id: 21, error: None, cues: Some(_), .. } = wait(&w) else { panic!("expected no stems, with cues from the mix") };
+        w.request(req(t, None, false, None));
+        let Update::NoStems { cues: None, .. } = wait(&w) else { panic!() };
+    }
+
+    #[cfg(any(feature = "stems-onnx", feature = "stems-onnx-dynamic"))]
     #[test]
     fn cancelled_jobs_produce_nothing() {
         let w = StemsWorker::new();
-        w.request(Request { deck: 2, track: track(21, 30.0), path: PathBuf::from("/nonexistent"), model: None, cache: None, demucs: None, detect_cues: false, prepared: None });
-        w.cancel(2);
-        // A later request for another deck still completes, and nothing arrives for the cancelled one.
-        w.request(Request { deck: 3, track: track(22, 1.0), path: PathBuf::from("/nonexistent"), model: None, cache: None, demucs: None, detect_cues: false, prepared: None });
-        let Update::Done { deck, track_id, .. } = wait(&w) else { panic!() };
-        assert_eq!((deck, track_id), (3, 22));
-    }
-
-    #[test]
-    fn model_errors_are_reported_then_fall_back_to_the_placeholder() {
-        let w = StemsWorker::new();
-        let bad = std::env::temp_dir().join("dj-not-a-model.onnx");
-        fs::write(&bad, b"nope").unwrap();
-        w.request(Request { deck: 0, track: track(31, 1.0), path: bad.clone(), model: Some(bad), cache: None, demucs: None, detect_cues: false, prepared: None });
-        let Update::Failed { track_id: 31, error, .. } = wait(&w) else { panic!("expected the model error first") };
-        assert!(error.contains("placeholder"), "{error}");
-        let Update::Done { track_id: 31, source, .. } = wait(&w) else { panic!("expected placeholder stems") };
-        assert_eq!(source, "placeholder separator");
+        w.request(req(track(31, 30.0), Some(test_model()), false, None));
+        w.cancel(0);
+        std::thread::sleep(Duration::from_millis(300));
+        while let Some(u) = w.try_recv() {
+            assert!(matches!(u, Update::Progress { .. }), "a cancelled job delivers nothing");
+        }
     }
 
     #[test]
@@ -706,8 +556,6 @@ mod tests {
             deck: 2,
             track,
             path: dir.join("song.wav"),
-            model: None,
-            cache: None,
             demucs,
             detect_cues: false,
             prepared: Some(dir.join("prepared")),
@@ -725,13 +573,11 @@ mod tests {
         let Update::Done { track_id: 62, source, .. } = wait(&w) else { panic!() };
         assert_eq!(source, "prepared stems");
 
-        // A missing model is reported and the next separator takes over.
+        // A missing model is reported: no stems.
         let _ = fs::remove_dir_all(dir.join("prepared"));
         w.request(req(track(63, 1.0), Some(dir.join("missing.onnx"))));
-        let Update::Failed { track_id: 63, error, .. } = wait(&w) else { panic!("expected the Demucs error") };
+        let Update::NoStems { track_id: 63, error: Some(error), .. } = wait(&w) else { panic!("expected the Demucs error") };
         assert!(error.contains("Demucs"), "{error}");
-        let Update::Done { track_id: 63, source, .. } = wait(&w) else { panic!() };
-        assert_eq!(source, "placeholder separator");
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -758,26 +604,17 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    #[cfg(any(feature = "stems-onnx", feature = "stems-onnx-dynamic"))]
     #[test]
     fn detects_cue_points_with_the_stems_when_asked() {
         let mut t = Arc::try_unwrap(track(81, 40.0)).ok().unwrap();
         t.grid = Some(dj_engine::track::BeatGrid { bpm: 120.0, anchor_secs: 0.0 });
         let t = Arc::new(t);
         let w = StemsWorker::new();
-        let req = |track: Arc<Track>, detect_cues| Request {
-            deck: 0,
-            track,
-            path: PathBuf::from("/nonexistent"),
-            model: None,
-            cache: None,
-            demucs: None,
-            detect_cues,
-            prepared: None,
-        };
-        w.request(req(t.clone(), true));
+        w.request(req(t.clone(), Some(test_model()), true, None));
         let Update::Done { cues, .. } = wait(&w) else { panic!() };
         assert!(cues.is_some(), "cue detection ran");
-        w.request(req(t, false));
+        w.request(req(t, Some(test_model()), false, None));
         let Update::Done { cues, .. } = wait(&w) else { panic!() };
         assert!(cues.is_none());
     }

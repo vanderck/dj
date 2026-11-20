@@ -16,7 +16,6 @@ const CARGO_BIN: &str = "dj";
 const DEFAULT_BUNDLE_ID: &str = "com.github.vanderck.dj";
 /// The statically linked ONNX Runtime (stem separation) is built for macOS 13.4.
 const DEFAULT_MIN_MACOS: &str = "13.4";
-const BUNDLED_MODEL_NAME: &str = "stems-model.onnx";
 /// App icon used when --icon is not given.
 const DEFAULT_ICON: &str = "packaging/macos/AppIcon.icns";
 
@@ -26,7 +25,6 @@ cargo xtask package-macos [options]
 Builds dj (release, Apple Silicon) and packages target/package/dj.app and a .dmg.
 
 Options:
-  --model <file.onnx>    Bundle a stem-separation model (the fallback when none is configured)
   --icon <file>          App icon: .icns, or a 1024x1024 .png (converted with sips/iconutil).
                          Default: packaging/macos/AppIcon.icns
   --sign <identity>      Code-signing identity, e.g. \"Developer ID Application: Name (TEAMID)\".
@@ -65,7 +63,6 @@ fn main() -> ExitCode {
 
 #[derive(Debug, Default)]
 struct Options {
-    model: Option<PathBuf>,
     icon: Option<PathBuf>,
     sign: Option<String>,
     no_sign: bool,
@@ -100,7 +97,6 @@ impl Options {
             };
             match a.as_str() {
                 "--universal" => return Err("Intel Macs aren't supported any more: dj is built for Apple Silicon only".into()),
-                "--model" => o.model = Some(value(a)?.into()),
                 "--icon" => o.icon = Some(value(a)?.into()),
                 "--sign" => o.sign = Some(value(a)?),
                 "--no-sign" => o.no_sign = true,
@@ -132,7 +128,6 @@ impl Options {
             );
         }
         for (what, p) in [
-            ("model", &o.model),
             ("icon", &o.icon),
             ("binary", &o.binary),
         ] {
@@ -273,9 +268,6 @@ fn assemble(app: &Path, binary: &Path, o: &Options) -> Result<(), String> {
         }
         None => false,
     };
-    if let Some(model) = &o.model {
-        fs::copy(model, resources.join(BUNDLED_MODEL_NAME)).map_err(|e| io("copy model", e))?;
-    }
 
     let plist = info_plist(&o.bundle_id, version(), &o.min_macos, has_icon);
     fs::write(contents.join("Info.plist"), plist).map_err(|e| io("write Info.plist", e))?;
@@ -576,7 +568,7 @@ mod tests {
         assert_eq!(o.features, vec!["a", "b"]);
         assert_eq!(o.min_macos, "14.0");
         assert!(Options::parse(&args(&["--bogus"])).is_err());
-        assert!(Options::parse(&args(&["--model", "/nonexistent.onnx"])).is_err());
+        assert!(Options::parse(&args(&["--icon", "/nonexistent.icns"])).is_err());
         assert!(Options::parse(&args(&["--notarize", "--no-sign"])).is_err());
     }
 
@@ -587,16 +579,12 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let bin = dir.join("bin");
         fs::write(&bin, b"\x7fELF pretend").unwrap();
-        let model = dir.join("m.onnx");
-        fs::write(&model, b"model").unwrap();
         let icon = dir.join("i.icns");
         fs::write(&icon, b"icns").unwrap();
 
         let o = Options::parse(&args(&[
             "--binary",
             bin.to_str().unwrap(),
-            "--model",
-            model.to_str().unwrap(),
             "--icon",
             icon.to_str().unwrap(),
             "--out",
@@ -611,10 +599,6 @@ mod tests {
         assert_eq!(
             fs::read(c.join("MacOS/dj")).unwrap(),
             b"\x7fELF pretend"
-        );
-        assert_eq!(
-            fs::read(c.join("Resources").join(BUNDLED_MODEL_NAME)).unwrap(),
-            b"model"
         );
         assert!(c.join("Resources/AppIcon.icns").is_file());
         assert_eq!(fs::read_to_string(c.join("PkgInfo")).unwrap(), "APPL????");

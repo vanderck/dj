@@ -106,10 +106,6 @@ pub struct Settings {
     pub key_notation: KeyNotation,
     /// Separate every loaded track into stems in the background.
     pub stems_enabled: bool,
-    /// ONNX separation model. `None` uses `STEMS_MODEL`, else the low-quality placeholder.
-    pub stems_model: Option<PathBuf>,
-    /// Disk cache for separated stems (MB); 0 disables it.
-    pub stems_cache_mb: u64,
     /// HT-Demucs ONNX model (best quality, about 1-3 min per track; results become prepared stems).
     /// `None` = off. See `stems::demucs_files` for HT-Demucs FT.
     pub stems_demucs: Option<PathBuf>,
@@ -209,8 +205,6 @@ impl Default for Settings {
             library_folders: dirs::audio_dir().into_iter().collect(),
             key_notation: KeyNotation::Camelot,
             stems_enabled: true,
-            stems_model: None,
-            stems_cache_mb: 4096,
             stems_demucs: None,
             stems_prepared_dir: None,
             external_mixer: false,
@@ -245,7 +239,7 @@ impl Settings {
             self.osc_root = "/dj/".into();
         }
         let (Some(old), new) = (legacy_config_dir(), config_dir()) else { return };
-        for p in [&mut self.stems_model, &mut self.stems_demucs, &mut self.stems_prepared_dir].into_iter().flatten() {
+        for p in [&mut self.stems_demucs, &mut self.stems_prepared_dir].into_iter().flatten() {
             if let Ok(rest) = p.strip_prefix(&old) {
                 *p = new.join(rest);
             }
@@ -393,7 +387,7 @@ mod tests {
         let mut s = Settings {
             osc_root: "/Collective/".into(),
             stems_demucs: Some(old.join("models").join("htdemucs.onnx")),
-            stems_model: Some(PathBuf::from("/elsewhere/model.onnx")),
+            stems_prepared_dir: Some(PathBuf::from("/elsewhere/stems")),
             ..Default::default()
         };
         s.migrate_from_collective();
@@ -401,7 +395,7 @@ mod tests {
         // (Other tests point DJ_CONFIG_DIR elsewhere meanwhile, so only check the move.)
         let moved = s.stems_demucs.unwrap();
         assert!(!moved.starts_with(&old) && moved.ends_with("models/htdemucs.onnx"), "{moved:?}");
-        assert_eq!(s.stems_model, Some(PathBuf::from("/elsewhere/model.onnx")), "other paths stay");
+        assert_eq!(s.stems_prepared_dir, Some(PathBuf::from("/elsewhere/stems")), "other paths stay");
         // A root the user chose stays.
         let mut s = Settings { osc_root: "/Syndicate/".into(), ..Default::default() };
         s.migrate_from_collective();

@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Stem separation for dj: HT-Demucs (ONNX), STFT mask models and a heuristic placeholder"
+description = "Stem separation for dj: HT-Demucs (ONNX)"
 publish = false
 
 [features]
@@ -14,5 +14,4 @@ onnx = ["dep:ort", "ort/std", "ort/ndarray", "ort/download-binaries", "ort/copy-
 onnx-dynamic = ["dep:ort", "ort/std", "ort/ndarray", "ort/load-dynamic"]
 
 [dependencies]
-realfft.workspace = true
 ort = { workspace = true, optional = true }

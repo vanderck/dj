@@ -35,8 +35,6 @@ jobs:
       APPLE_ID: ${{ secrets.APPLE_ID }}
       APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
       APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
-      # Optional repository variable: URL of an ONNX stem-separation model to bundle.
-      STEMS_MODEL_URL: ${{ vars.STEMS_MODEL_URL }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -63,14 +61,9 @@ jobs:
           security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
           rm "$RUNNER_TEMP/cert.p12"
 
-      - name: Download stem-separation model
-        if: env.STEMS_MODEL_URL != ''
-        run: curl -fsSL "$STEMS_MODEL_URL" -o "$RUNNER_TEMP/stems-model.onnx"
-
       - name: Build and package
         run: |
           ARGS=()
-          [ -f "$RUNNER_TEMP/stems-model.onnx" ] && ARGS+=(--model "$RUNNER_TEMP/stems-model.onnx")
           [ -n "$MACOS_SIGN_IDENTITY" ] && [ -n "$APPLE_ID" ] && ARGS+=(--notarize)
           cargo xtask package-macos "${ARGS[@]}"
 
@@ -79,7 +72,6 @@ jobs:
           APP=target/package/dj.app
           plutil -lint "$APP/Contents/Info.plist"
           test -s "$APP/Contents/Resources/AppIcon.icns" && /usr/libexec/PlistBuddy -c "Print :CFBundleIconFile" "$APP/Contents/Info.plist"
-          test -s "$APP/Contents/Resources/stems-model.onnx" && echo "bundled model: $(du -h "$APP/Contents/Resources/stems-model.onnx" | cut -f1)"
           codesign --verify --strict --verbose=2 "$APP"
           lipo -archs "$APP/Contents/MacOS/dj" | tee /dev/stderr | grep -qx "arm64"
           "$APP/Contents/MacOS/dj" --help > /dev/null

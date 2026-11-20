@@ -63,11 +63,11 @@ cargo test --workspace
 
 ## Stems
 
-Every track is separated into **drums, bass, vocals and other** in the background after it loads
-(`crates/stems-core`). The deck plays the full mix until the stems are ready; its header shows the
-progress and, afterwards, which separator made them.
+Every track is separated into **drums, bass, vocals and other** with HT-Demucs, in the background
+after it loads (`crates/stems-core`). The deck plays the full mix until the stems are ready; its
+header shows the progress, then where the stems came from.
 
-**Separators**, tried in this order:
+**Where stems come from**, in this order:
 
 1. **Prepared stems**: made earlier by Demucs (on load, or with `dj --prepare-stems FOLDER` before
    a set) and kept in the *Prepared stems* folder (Settings → Stems; about 32 MB per minute, never
@@ -78,11 +78,9 @@ progress and, afterwards, which separator made them.
    weights are trained partly on non-commercial data, so dj downloads them on request and never
    ships them. HT-Demucs FT (four models, slightly better, 4× slower) works too: select any one of
    its four `name.<stem>.onnx` files.
-3. **A small model** (Settings → Stems → Model, or `STEMS_MODEL`): seconds per track, more bleed.
-   See [docs/stems/MODEL_CONTRACT.md](docs/stems/MODEL_CONTRACT.md).
-4. Without any of these, a low-quality placeholder, and the deck says so in red.
 
-Results of 3 and 4 are cached (size limit and *Clear cache* in Settings → Stems).
+Without either, a track has no stems (the deck says so); Mix's Auto then uses EQ, and cue points
+are detected from the full mix.
 
 **Playing with stems**: each stem's level can be put on its channel fader (Drums / Bass / Vocals /
 Other, in the fader popup), and the popup's *Stems* group turns them all back to the plain mix. Stems are mixed where the deck reads audio, before key lock, loops, slip and hot

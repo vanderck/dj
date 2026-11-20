@@ -1,27 +1,19 @@
-//! Stem separation for dj: split whole tracks into drums, bass, vocals and other.
+//! Stem separation for dj: split whole tracks into drums, bass, vocals and other with HT-Demucs
+//! ([`demucs`], ONNX, features `onnx` / `onnx-dynamic`).
 //!
-//! - [`demucs`]: HT-Demucs (ONNX), the high-quality separator (features `onnx` / `onnx-dynamic`).
-//! - [`offline`]: STFT mask separation with a small model ([`OnnxModel`], see
-//!   `docs/stems/MODEL_CONTRACT.md`) or the [`HeuristicSeparator`] placeholder.
-//!
-//! Every function returns each stem as its own buffer, sample-aligned with the input.
+//! Every stem comes back as its own buffer, sample-aligned with the input.
 
 #[cfg(any(feature = "onnx", feature = "onnx-dynamic"))]
 pub mod demucs;
-mod model;
 pub mod offline;
 #[cfg(any(feature = "onnx", feature = "onnx-dynamic"))]
 mod onnx;
 mod resample;
-mod separator;
 
-pub use model::{MaskModel, ModelError, ModelSpec, INPUT_PLANES};
+pub use offline::ModelError;
 #[cfg(any(feature = "onnx", feature = "onnx-dynamic"))]
-pub use onnx::{OnnxModel, OnnxOptions};
+pub use onnx::OnnxOptions;
 pub use resample::resample;
-pub use separator::{HeuristicSeparator, Separator, StemMasks};
-
-pub use realfft::num_complex::Complex32;
 
 /// Number of stems.
 pub const NUM_STEMS: usize = 4;
