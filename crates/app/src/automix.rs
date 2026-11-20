@@ -9,9 +9,11 @@
 //! And **how** ([`MixStyle`], remembered in the settings):
 //!
 //! - **EQ**: the incoming track comes up over the first half with its bass cut, the basses swap
-//!   on the EQ at the midpoint, the outgoing track fades over the second half and stops.
+//!   on the EQ at the midpoint, then the outgoing track leaves on the EQ (mids, then highs) and
+//!   its volume closes the last part.
 //! - **Stems**: the incoming track comes in with drums and other only; at the midpoint the basses
-//!   swap (stems, so the kick stays whole), then the outgoing drums go, then its vocals and other.
+//!   swap (stems, so the kick stays whole), then the outgoing drums go, then its vocals and other
+//!   (its volume stays up: the stems do the fading).
 //!   With dj's own mixer the EQ smooths it: the new track's highs rise over the first half and the
 //!   old track's highs roll off while its drums leave.
 //! - **Drop**: no blend. The incoming track waits at its drop cue (if it has one) and cuts in on
@@ -93,6 +95,7 @@ pub struct AutoMix {
     out_low: f32,
     in_low: f32,
     out_high: f32,
+    out_mid: f32,
     in_high: f32,
     out_volume: f32,
     in_stems: [f32; 4],
@@ -346,6 +349,7 @@ impl Core {
             out_low: params(o).eq[0],
             in_low: params(i).eq[0],
             out_high: params(o).eq[2],
+            out_mid: params(o).eq[1],
             in_high: params(i).eq[2],
             out_volume: params(o).volume,
             in_stems: self.snap.decks[i].stem_gains,
@@ -395,6 +399,8 @@ impl Core {
                     self.mix_set(&format!("Mixer/CH{}/EQ/Low", i + 1), m.in_low);
                 }
                 self.mix_set(&format!("Mixer/CH{}/EQ/Low", o + 1), m.out_low);
+                self.mix_set(&format!("Mixer/CH{}/EQ/Mid", o + 1), m.out_mid);
+                self.mix_set(&format!("Mixer/CH{}/EQ/High", o + 1), m.out_high);
             }
             if !m.external && m.plan.how == MixHow::Stems {
                 self.mix_set(&format!("Mixer/CH{}/EQ/High", i + 1), m.in_high);
@@ -444,15 +450,17 @@ impl Core {
         }
         let p = (beat - start) / len;
         let (how, external, swapped) = (m.plan.how, m.external, m.swapped);
-        let (out_volume, in_low, out_low, in_high, out_high) = (m.out_volume, m.in_low, m.out_low, m.in_high, m.out_high);
+        let (out_volume, in_low, out_low, in_high, out_high, out_mid) = (m.out_volume, m.in_low, m.out_low, m.in_high, m.out_high, m.out_mid);
         let (in_stems, out_stems, vocals_out, best) = (m.in_stems, m.out_stems, m.vocals_out, m.plan.mode == MixWhen::Best);
         let vol = |c: usize| format!("Mixer/CH{}/Volume", c + 1);
         let low = |c: usize| format!("Mixer/CH{}/EQ/Low", c + 1);
         let high = |c: usize| format!("Mixer/CH{}/EQ/High", c + 1);
+        let mid = |c: usize| format!("Mixer/CH{}/EQ/Mid", c + 1);
         match how {
             MixHow::Eq if external => {} // you fade on the mixer
             MixHow::Eq => {
-                // First half: incoming up. Midpoint: swap the basses. Second half: outgoing down.
+                // First half: incoming up. Midpoint: swap the basses. Then the outgoing track leaves
+                // on the EQ (mids, then highs); its volume only closes the last part.
                 self.mix_set(&vol(i), smooth(p / 0.5));
                 if p >= 0.5 && !swapped {
                     self.automix.as_mut().unwrap().swapped = true;
@@ -460,7 +468,9 @@ impl Core {
                     self.mix_set(&low(o), 0.0);
                 }
                 if p >= 0.5 {
-                    self.mix_set(&vol(o), out_volume * (1.0 - smooth((p - 0.5) / 0.5)));
+                    self.mix_set(&mid(o), out_mid * (1.0 - smooth((p - 0.5) / 0.3)));
+                    self.mix_set(&high(o), out_high * (1.0 - smooth((p - 0.6) / 0.3)));
+                    self.mix_set(&vol(o), out_volume * (1.0 - smooth((p - 0.85) / 0.15)));
                 }
             }
             MixHow::Stems => {
@@ -468,8 +478,8 @@ impl Core {
                 self.set_stem_levels(i, si, in_stems);
                 self.set_stem_levels(o, so, out_stems);
                 if !external {
+                    // The outgoing track leaves on its stems; its volume stays up (it's at 0 at the end).
                     self.mix_set(&vol(i), smooth(p / 0.5));
-                    self.mix_set(&vol(o), out_volume * (1.0 - smooth((p - 0.75) / 0.25)));
                     // The EQ smooths the stem swaps: the new highs rise over the first half; the
                     // old highs roll off while its drums leave.
                     self.mix_set(&high(i), in_high * smooth(p / 0.5));
@@ -500,6 +510,8 @@ impl Core {
                 self.mix_set(&vol(o), 0.0);
                 if how == MixHow::Eq {
                     self.mix_set(&low(o), out_low);
+                    self.mix_set(&mid(o), out_mid);
+                    self.mix_set(&high(o), out_high);
                 }
                 if how == MixHow::Stems {
                     self.mix_set(&high(o), out_high);
