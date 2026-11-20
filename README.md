@@ -220,10 +220,11 @@ Fonts: Inter and JetBrains Mono, bundled under the SIL Open Font License (see
   to cancel it. Controller faders that dj moved are picked up: they take
   effect again once moved to (or past) dj's value.
   **With an external mixer** dj can't see or move your faders: any deck
-  looping at a cue while another plays gets Mix; it syncs the new deck and
-  drops it out of its loop on the chosen beat (Now: vocals out as above), and
-  when the mix time is up drops the old deck into a loop, so both stay in time
-  while you fade on the mixer. dj's volume, EQ and bass swap aren't touched.
+  looping at a cue while another plays gets Mix (Now or Best as above). It
+  syncs the new deck and drops it out of its loop on the chosen beat; when the
+  mix time is up the old deck drops into a loop, so both stay in time while you
+  fade on the mixer. With Now the new track's vocals stay out (bring them back
+  on the deck when you want). dj's volume, EQ and bass swap aren't touched.
 - **Sampler decks**: 8 lanes, 16 steps, 8 patterns, per-step velocity, per-lane
   length (polyrhythms), direction (→ ← ↔ random), rate (normal/dotted/triplet),
   AHR envelope with curve, pitch, mono/poly, swing, global pitch, ½×/2×.

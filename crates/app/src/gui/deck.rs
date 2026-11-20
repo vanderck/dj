@@ -818,7 +818,11 @@ fn mix_button(ui: &mut Ui, core: &mut Core, d: usize, rect: Rect, font: egui::Fo
     }
     let Some(out) = core.mix_target(d) else { return };
     let resp = button(ui, rect, "Mix", Style::Outline(GREEN, true), font)
-        .on_hover_text(format!("Mix into deck {} (syncs this deck)", out + 1));
+        .on_hover_text(if core.external_routing() {
+            format!("Drop in, in sync with deck {}; you fade on your mixer", out + 1)
+        } else {
+            format!("Mix into deck {} (syncs this deck)", out + 1)
+        });
     if core.mix_is_urgent(out) {
         // Less than a minute of the playing track left: no question, mix now.
         if resp.clicked() && !core.learn {

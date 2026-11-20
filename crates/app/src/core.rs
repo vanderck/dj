@@ -2776,7 +2776,14 @@ mod tests {
         for _ in 0..100 {
             pump(&mut e, &mut c);
         }
+        let deadline = Instant::now() + std::time::Duration::from_secs(60);
+        while !c.snap.decks[1].stems_ready {
+            assert!(Instant::now() < deadline, "stems never attached");
+            pump(&mut e, &mut c);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
         assert_eq!(c.mix_target(1), Some(0));
+        let stems = c.snap.decks[1].stems_ready;
         let plan = c.plan_now(1, 0);
         c.start_mix(plan);
         let mut blocks = 0;
@@ -2792,6 +2799,8 @@ mod tests {
         let p = |ch: usize| c.session.channels[ch].params;
         assert_eq!((p(0).volume, p(1).volume), (0.7, 0.6), "volumes untouched");
         assert_eq!((p(0).eq[0], p(1).eq[0]), (0.5, 0.5), "no bass swap");
+        assert!(stems);
+        assert_eq!(c.snap.decks[1].stem_gains[2], 0.0, "the new track's vocals stay out");
     }
 
     #[test]

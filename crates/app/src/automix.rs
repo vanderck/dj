@@ -7,9 +7,10 @@
 //! preferring the outgoing track's outro or break). With less than a minute of the outgoing
 //! track left, it always mixes now.
 //!
-//! With an external mixer dj can't see or move the faders: Mix syncs the incoming deck and drops
-//! it out of its loop on the start beat, and at the end of the mix time drops the outgoing deck
-//! into a loop, so both stay in time while you fade on the mixer.
+//! With an external mixer dj can't see or move the faders: Mix (Now or Best, as usual) syncs the
+//! incoming deck and drops it out of its loop on the start beat, and at the end of the mix time
+//! drops the outgoing deck into a loop, so both stay in time while you fade on the mixer. With Now
+//! the incoming vocals stay out; bringing them back is up to you.
 //!
 //! The mix runs on the outgoing track's beats: the incoming track starts from its cue on the
 //! first beat, its volume comes up over the first half, the basses swap at the midpoint, the
@@ -286,12 +287,9 @@ impl Core {
             if p >= 1.0 {
                 self.deck_cmd(o, DeckCmd::LoopBeats(self.loop_size[o]));
                 self.log(format!("Deck {} is in, deck {} loops until you fade it out", i + 1, o + 1));
-                let m = self.automix.as_mut().unwrap();
-                if m.in_vocals.is_some() {
-                    m.finished = Some(vi.beat);
-                } else {
-                    self.automix = None;
-                }
+                // The vocals stay out: dj can't tell when you've faded the old track out, so
+                // bringing them back is yours (the deck's stems).
+                self.automix = None;
             }
             return;
         }
