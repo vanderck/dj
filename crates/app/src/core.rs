@@ -147,6 +147,18 @@ pub fn snap_tempo(v: f32, range: dj_engine::deck::TempoRange, step_pct: f32) -> 
     ((range.fader_for_speed(1.0 + snapped / 100.0).clamp(-1.0, 1.0) + 1.0) / 2.0) as f32
 }
 
+/// Why a music folder can't be read, and what to do about it.
+fn folder_error(dir: &Path, e: &std::io::Error) -> String {
+    match e.kind() {
+        std::io::ErrorKind::NotFound => format!("Folder not found: {} (is the drive connected?)", dir.display()),
+        std::io::ErrorKind::PermissionDenied if cfg!(target_os = "macos") => format!(
+            "No access to {}: use Import folder to choose it, or allow dj in System Settings → Privacy & Security → Files and Folders",
+            dir.display()
+        ),
+        _ => format!("Can't read {}: {e}", dir.display()),
+    }
+}
+
 /// Deck stem levels (`/deck/N/stemvocalslevel` etc., 0..1) -> stem index.
 pub fn stem_level(name: &str) -> Option<usize> {
     stem_switch(name.strip_suffix("level")?)
@@ -726,9 +738,34 @@ impl Core {
 
     // ------------------------------------------------------------ library & scans
 
+    /// Add a music folder to the library (if it's readable) and scan it.
+    pub fn add_library_folder(&mut self, dir: PathBuf) {
+        // "~/Music" as typed in Settings.
+        let dir = match dir.to_str().and_then(|s| s.strip_prefix("~/")) {
+            Some(rest) => dirs::home_dir().map(|h| h.join(rest)).unwrap_or(dir),
+            None => dir,
+        };
+        if let Err(e) = std::fs::read_dir(&dir) {
+            self.log(folder_error(&dir, &e));
+            return;
+        }
+        if !self.settings.library_folders.contains(&dir) {
+            self.settings.library_folders.push(dir.clone());
+            self.mark_dirty();
+        }
+        self.log(format!("Scanning {}…", dir.display()));
+        self.rescan_library();
+    }
+
     pub fn rescan_library(&mut self) {
         if self.library_scanning {
             return;
+        }
+        // Say which folders can't be read instead of silently finding nothing.
+        for root in self.settings.library_folders.clone() {
+            if let Err(e) = std::fs::read_dir(&root) {
+                self.log(folder_error(&root, &e));
+            }
         }
         let roots = self.settings.library_folders.clone();
         let cache = self.library.clone();
@@ -2340,7 +2377,11 @@ impl Core {
                 self.library_scanning = false;
                 self.library_rx = None;
                 let _ = crate::settings::save_json(&crate::settings::config_dir().join("library-cache.json"), &self.library);
-                self.log(format!("Library: {} tracks", self.library.len()));
+                if self.library.is_empty() && !self.settings.library_folders.is_empty() {
+                    self.log("No music files found (MP3, WAV, AIFF, FLAC, Ogg, M4A) in the library folders");
+                } else {
+                    self.log(format!("Library: {} tracks", self.library.len()));
+                }
             }
         }
         if let Some(rx) = &self.vst3_rx {
@@ -2975,6 +3016,36 @@ mod tests {
         }
         pump(&mut e, &mut c);
         assert_eq!(c.snap.decks[0].stem_gains, [1.0; 4]);
+    }
+
+    #[test]
+    fn imported_folders_include_every_depth_and_report_problems() {
+        let (mut e, mut c, _config) = core();
+        let root = crate::settings::config_dir().join("music");
+        let deep = root.join("a/b/c/d");
+        std::fs::create_dir_all(&deep).unwrap();
+        let wav = kick_wav("deep.wav", 2);
+        std::fs::copy(&wav, deep.join("deep.wav")).unwrap();
+        std::fs::copy(&wav, root.join("top.wav")).unwrap();
+
+        c.add_library_folder(root.join("missing"));
+        assert!(c.settings.library_folders.is_empty(), "a folder that isn't there isn't added");
+        assert!(c.status.back().is_some_and(|(_, m)| m.contains("not found")), "{:?}", c.status.back());
+
+        c.add_library_folder(root.clone());
+        assert_eq!(c.settings.library_folders, vec![root.clone()]);
+        let deadline = Instant::now() + std::time::Duration::from_secs(60);
+        while c.library_scanning {
+            assert!(Instant::now() < deadline, "scan never finished");
+            pump(&mut e, &mut c);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let mut names: Vec<String> = c.library.iter().map(|t| t.path.file_name().unwrap().to_string_lossy().into_owned()).collect();
+        names.sort();
+        assert_eq!(names, vec!["deep.wav", "top.wav"]);
+        // Adding it again doesn't duplicate it.
+        c.add_library_folder(root.clone());
+        assert_eq!(c.settings.library_folders.len(), 1);
     }
 
     #[test]

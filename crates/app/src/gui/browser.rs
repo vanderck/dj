@@ -124,9 +124,13 @@ pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect) {
 
     let imp_w = pill_width(ui, "Import folder", 13.0);
     let ir = Rect::from_min_size(Pos2::new(r.right() - imp_w, y), Vec2::new(imp_w, bar_h));
-    if pill(ui, ir, "Import folder", false).on_hover_text("Add music folders in Settings → Library, then rescan").clicked() {
-        st.settings_open = true;
-        core.rescan_library();
+    if pill(ui, ir, "Import folder", false).on_hover_text("Choose a music folder (all its subfolders are included)").clicked() {
+        // The system folder picker (on macOS this also grants access to an external drive).
+        match rfd::FileDialog::new().set_title("Import music folder").pick_folder() {
+            Some(dir) => core.add_library_folder(dir),
+            None if core.settings.library_folders.is_empty() => st.settings_open = true,
+            None => {}
+        }
     }
     let info = match core.status.back() {
         Some((t, m)) if t.elapsed().as_secs() < 6 => m.clone(),

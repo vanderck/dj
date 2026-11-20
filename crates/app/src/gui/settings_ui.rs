@@ -251,13 +251,22 @@ fn settings(ui: &mut Ui, core: &mut Core, st: &mut UiState) {
         core.rescan_library(); // its tracks leave the browser
     }
     ui.horizontal(|ui| {
-        ui.add(egui::TextEdit::singleline(&mut st.new_folder).hint_text("/path/to/music").desired_width(300.0));
-        if ui.button("Add folder").clicked() && !st.new_folder.trim().is_empty() {
-            core.settings.library_folders.push(st.new_folder.trim().into());
+        let edit = ui.add(egui::TextEdit::singleline(&mut st.new_folder).hint_text("/path/to/music").desired_width(300.0));
+        let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        if (ui.button("Add folder").clicked() || enter) && !st.new_folder.trim().is_empty() {
+            core.add_library_folder(st.new_folder.trim().into());
             st.new_folder.clear();
+        }
+        if ui.button("Choose…").clicked() {
+            if let Some(dir) = rfd::FileDialog::new().set_title("Import music folder").pick_folder() {
+                core.add_library_folder(dir);
+            }
+        }
+        if ui.button("Rescan").clicked() {
             core.rescan_library();
         }
     });
+    ui.label(RichText::new("Every subfolder is included, at any depth.").small().weak());
 
     section(ui, "OSC");
     changed_osc |= ui.checkbox(&mut core.settings.osc_enabled, "OSC input").changed();

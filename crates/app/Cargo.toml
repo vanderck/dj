@@ -34,3 +34,4 @@ crossbeam-channel.workspace = true
 eframe.workspace = true
 dirs.workspace = true
 dj-vst3.workspace = true
+rfd = "0.15"
