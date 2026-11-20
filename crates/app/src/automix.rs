@@ -107,6 +107,9 @@ pub struct AutoMix {
     tracks: (u64, u64),
     /// External mixer: dj can't see or move the faders (no volume or EQ moves).
     external: bool,
+    /// The outgoing deck's beat minus the master clock's when the mix started. The mix runs on
+    /// the clock (+ this), which keeps counting while the outgoing deck loops.
+    beat_offset: f64,
 }
 
 fn smooth(x: f64) -> f32 {
@@ -362,6 +365,7 @@ impl Core {
             vocals_out,
             tracks: (self.snap.decks[i].track_id, self.snap.decks[o].track_id),
             external,
+            beat_offset: self.snap.decks[o].beat - self.snap.clock.beat,
             plan,
         };
         match mix.plan.how {
@@ -428,6 +432,11 @@ impl Core {
         }
     }
 
+    /// Where a running mix is, in the outgoing track's beats (counted on the clock).
+    pub fn mix_beat(&self) -> f64 {
+        self.automix.as_ref().map_or(0.0, |m| self.snap.clock.beat + m.beat_offset)
+    }
+
     fn mix_set(&mut self, addr: &str, v: f32) {
         self.set_picked_up(addr, v);
     }
@@ -443,7 +452,8 @@ impl Core {
             self.cancel_mix();
             return;
         }
-        let beat = vo.beat;
+        // The outgoing track's beats, counted on the clock: a loop on that deck doesn't stall the mix.
+        let beat = self.snap.clock.beat + m.beat_offset;
         // Half a beat ahead: the incoming deck leaves its loop on the next beat, which is `start`.
         // If it hasn't started playing yet (a paused deck waits for the beat), a bar later.
         if !m.released && beat >= start - 0.5 && !vi.playing {
