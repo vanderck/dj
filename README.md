@@ -209,8 +209,8 @@ Fonts: Inter and JetBrains Mono, bundled under the SIL Open Font License (see
 - **Mix**: tap a cue on a silent deck (volume down) while another deck plays:
   it loops from the cue, and a **Mix** button appears next to Sync. Mix syncs
   it and asks *Now* or *Best*. **Now** starts on the next bar and mixes over the
-  whole bars that fit in about 10 s, with the new track's vocals (stems) out
-  until the old track is gone. **Best** waits for an 8-bar phrase start and
+  whole bars that fit in about 10 s, with the new track's vocals (stems) out;
+  they stay out until you bring them back on the deck. **Best** waits for an 8-bar phrase start and
   mixes over 16 bars, picking the moment where the two tracks' vocals clash
   least (from the stems), preferring the playing track's outro or break. With
   less than a minute of the playing track left, Mix mixes now without asking.
@@ -223,8 +223,7 @@ Fonts: Inter and JetBrains Mono, bundled under the SIL Open Font License (see
   looping at a cue while another plays gets Mix (Now or Best as above). It
   syncs the new deck and drops it out of its loop on the chosen beat; when the
   mix time is up the old deck drops into a loop, so both stay in time while you
-  fade on the mixer. With Now the new track's vocals stay out (bring them back
-  on the deck when you want). dj's volume, EQ and bass swap aren't touched.
+  fade on the mixer. dj's volume, EQ and bass swap aren't touched.
 - **Sampler decks**: 8 lanes, 16 steps, 8 patterns, per-step velocity, per-lane
   length (polyrhythms), direction (→ ← ↔ random), rate (normal/dotted/triplet),
   AHR envelope with curve, pitch, mono/poly, swing, global pitch, ½×/2×.

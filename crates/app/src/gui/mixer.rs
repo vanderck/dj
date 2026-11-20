@@ -26,6 +26,13 @@ fn db_text(g: f32) -> String {
 }
 
 pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect) {
+    for ch in 0..4 {
+        let id = core.snap.decks[ch].track_id;
+        if st.group_track[ch] != id {
+            st.group_track[ch] = id;
+            st.group_restore.remove(&(ch, Group::Stems));
+        }
+    }
     card(ui, rect);
     let r = rect.shrink(16.0);
     if core.external_routing() {

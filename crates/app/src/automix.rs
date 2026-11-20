@@ -2,15 +2,14 @@
 //!
 //! The incoming deck loops at its cue with its volume down while another deck plays. Mix
 //! (see `gui::deck`) switches its Sync on and either mixes **now** (on the next bar, within
-//! about 10 s, the incoming track's vocals faded out until the outgoing one is gone) or at the
+//! about 10 s, with the incoming track's vocals taken out; they stay out) or at the
 //! **best** moment (a 16-bar mix on a phrase start where the two tracks' vocals do not clash,
 //! preferring the outgoing track's outro or break). With less than a minute of the outgoing
 //! track left, it always mixes now.
 //!
 //! With an external mixer dj can't see or move the faders: Mix (Now or Best, as usual) syncs the
 //! incoming deck and drops it out of its loop on the start beat, and at the end of the mix time
-//! drops the outgoing deck into a loop, so both stay in time while you fade on the mixer. With Now
-//! the incoming vocals stay out; bringing them back is up to you.
+//! drops the outgoing deck into a loop, so both stay in time while you fade on the mixer.
 //!
 //! The mix runs on the outgoing track's beats: the incoming track starts from its cue on the
 //! first beat, its volume comes up over the first half, the basses swap at the midpoint, the
@@ -48,9 +47,8 @@ pub struct AutoMix {
     pub plan: MixPlan,
     released: bool,
     swapped: bool,
-    /// The incoming deck's beat when the outgoing track stopped (its vocals then come back).
-    finished: Option<f64>,
-    /// Levels to restore afterwards: outgoing low EQ, incoming low EQ, incoming vocals.
+    /// Levels to restore afterwards (or on cancel): outgoing low EQ, incoming low EQ, and the
+    /// incoming vocals (only on cancel: after a Now mix they stay out).
     out_low: f32,
     in_low: f32,
     in_vocals: Option<f32>,
@@ -195,7 +193,6 @@ impl Core {
         let mix = AutoMix {
             released: false,
             swapped: false,
-            finished: None,
             out_low: params(o).eq[0],
             in_low: params(i).eq[0],
             in_vocals,
@@ -245,23 +242,9 @@ impl Core {
         let Some(m) = self.automix.as_ref() else { return };
         let (i, o, start, len) = (m.plan.incoming, m.plan.outgoing, m.plan.start_beat, m.plan.length_beats);
         let (vi, vo) = (self.snap.decks[i], self.snap.decks[o]);
-        // Another track loaded (on the outgoing deck it only matters until that deck stopped).
-        if vi.track_id != m.tracks.0 || (m.finished.is_none() && vo.track_id != m.tracks.1) {
+        // Another track loaded on either deck: give up.
+        if (vi.track_id, vo.track_id) != m.tracks {
             self.cancel_mix();
-            return;
-        }
-        if let Some(since) = m.finished {
-            // The old track is gone: bring the incoming track's vocals back over one bar.
-            let x = (vi.beat - since) / 4.0;
-            if !vi.playing || !vi.loaded {
-                self.cancel_mix();
-                return;
-            }
-            let target = m.in_vocals.unwrap_or(1.0);
-            self.mix_set(&format!("Deck/{}/StemVocalsLevel", i + 1), target * smooth(x));
-            if x >= 1.0 {
-                self.automix = None;
-            }
             return;
         }
         // A deck was stopped, ejected or replaced: give up (and put the EQ and vocals back).
@@ -287,8 +270,6 @@ impl Core {
             if p >= 1.0 {
                 self.deck_cmd(o, DeckCmd::LoopBeats(self.loop_size[o]));
                 self.log(format!("Deck {} is in, deck {} loops until you fade it out", i + 1, o + 1));
-                // The vocals stay out: dj can't tell when you've faded the old track out, so
-                // bringing them back is yours (the deck's stems).
                 self.automix = None;
             }
             return;
@@ -310,12 +291,8 @@ impl Core {
             self.mix_set(&format!("Mixer/CH{}/Volume", o + 1), 0.0);
             self.mix_set(&format!("Mixer/CH{}/EQ/Low", o + 1), out_low);
             self.log(format!("Mixed into deck {}", i + 1));
-            let m = self.automix.as_mut().unwrap();
-            if m.in_vocals.is_some() {
-                m.finished = Some(vi.beat);
-            } else {
-                self.automix = None;
-            }
+            // With Now, the new track's vocals stay out: bringing them back is yours.
+            self.automix = None;
         }
     }
 }

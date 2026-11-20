@@ -577,6 +577,10 @@ impl Core {
             self.request_stems(d, &lt.path, info.cues_pending);
         }
         self.send(Command::Load { deck: d as u8, track: lt.track, start_at_first_cue: self.settings.load_at_first_cue });
+        // A new track starts with every stem on (the engine resets them): forget pick-up for the
+        // old track's stem levels.
+        let stems = format!("deck/{}/stem", d + 1);
+        self.pickup.retain(|k, _| !k.starts_with(&stems));
         if self.settings.keylock_on_load {
             self.session.decks[d].keylock = true;
         }
@@ -2582,6 +2586,13 @@ mod tests {
         for _ in 0..100 {
             pump(&mut e, &mut c);
         }
+        // Deck 2's stems are ready, so Now can take its vocals out.
+        let deadline = Instant::now() + std::time::Duration::from_secs(60);
+        while !c.snap.decks[1].stems_ready {
+            assert!(Instant::now() < deadline, "stems never attached");
+            pump(&mut e, &mut c);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
         assert_eq!(c.snap.clock.owner, ClockOwner::Deck(1));
         assert_eq!(c.mix_target(1), Some(0));
         assert_eq!(c.mix_target(0), None, "the playing deck is not a candidate");
@@ -2643,7 +2654,18 @@ mod tests {
         assert!((low(&c, 0) - 0.5).abs() < 1e-6 && (low(&c, 1) - 0.5).abs() < 1e-6);
         // The incoming track played on from its cue (12 s of mix after 8 s).
         assert!(c.snap.decks[1].position_secs > 18.0, "{}", c.snap.decks[1].position_secs);
-        assert_eq!(c.snap.decks[1].stem_gains[2], 1.0, "vocals back");
+        assert_eq!(c.snap.decks[1].stem_gains[2], 0.0, "the new track's vocals stay out");
+        // Until another track is loaded on that deck: it starts with every stem on.
+        c.load_track(1, &kick_wav("automix-c.wav", 30));
+        let deadline = Instant::now() + std::time::Duration::from_secs(60);
+        while c.decks[1].info.as_ref().is_none_or(|i| !i.path.ends_with("automix-c.wav")) || !c.snap.decks[1].loaded {
+            assert!(Instant::now() < deadline, "track never loaded");
+            pump(&mut e, &mut c);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        pump(&mut e, &mut c);
+        assert_eq!(c.snap.decks[1].stem_gains, [1.0; 4], "stems reset on load");
+        assert!(c.pickup_allows("Deck/2/StemVocalsLevel", 0.3), "no pick-up left from the old track");
 
         // MIDI pick-up: the controller's CH1 fader (still up) is ignored until it comes down to
         // dj's 0, then follows again.
