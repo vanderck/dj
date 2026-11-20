@@ -48,6 +48,9 @@ pub enum TempoRange {
 }
 
 impl TempoRange {
+    /// In the order of `Deck/N/TempoRange` indices.
+    pub const ALL: [TempoRange; 5] = [TempoRange::Pct6, TempoRange::Pct10, TempoRange::Pct16, TempoRange::Pct50, TempoRange::Semitones12];
+
     pub fn speed(self, fader: f64) -> f64 {
         let f = fader.clamp(-1.0, 1.0);
         match self {

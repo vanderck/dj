@@ -201,8 +201,8 @@ Fonts: Inter and JetBrains Mono, bundled under the SIL Open Font License (see
 
 - **Decks**: 4 decks (or 2). Key lock with a WSOLA time-stretcher and
   independent transpose. Tempo ranges ±6/10/16/50 % or ±12 semitones. Sync with
-  continuous phase lock; the tempo master is picked automatically (handoff when
-  it stops); wallclock lock. Quantized launches (global or per deck), 8 hot cues
+  continuous phase lock; the tempo master is always a playing deck, picked
+  automatically (handoff when it stops or is ejected). Quantized launches (global or per deck), 8 hot cues
   (momentary, cue-to-next-cue loops), loops (in/out, halve/double, move,
   free-loop), slip mode, slip loops (with dotted/triplet), beat/bar skip,
   reverse, backspin, tape stop, half/double speed, phase nudge.
