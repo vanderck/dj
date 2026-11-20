@@ -2750,6 +2750,60 @@ mod tests {
     }
 
     #[test]
+    fn mix_with_an_external_mixer_only_drops_decks_in_and_out_of_loops() {
+        let (mut e, mut c, _config) = core();
+        c.audio_channels = 4; // two stereo pairs: external routing works
+        c.set_external_mixer(true);
+        assert!(c.external_routing());
+        for (d, name, secs) in [(1, "ext-b.wav", 60), (0, "ext-a.wav", 90)] {
+            c.load_track(d, &kick_wav(name, secs));
+            let deadline = Instant::now() + std::time::Duration::from_secs(60);
+            while !(c.snap.decks[d].loaded && c.decks[d].info.is_some()) {
+                assert!(Instant::now() < deadline, "track never loaded");
+                pump(&mut e, &mut c);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+        for d in 0..2 {
+            c.deck_cmd(d, DeckCmd::SetGrid(Some(dj_engine::track::BeatGrid { bpm: 120.0, anchor_secs: 0.0 })));
+        }
+        // dj's own volumes mean nothing here (both up): the looping deck is still a candidate.
+        c.route("Mixer/CH1/Volume", &[OscType::Float(0.7)]);
+        c.route("Mixer/CH2/Volume", &[OscType::Float(0.6)]);
+        c.deck_cmd(0, DeckCmd::Play);
+        c.deck_cmd(1, DeckCmd::SetCue { idx: 0, secs: Some(8.0), end_secs: None });
+        c.deck_cmd(1, DeckCmd::CueBeatLoop { idx: 0, beats: 4.0 });
+        for _ in 0..100 {
+            pump(&mut e, &mut c);
+        }
+        let deadline = Instant::now() + std::time::Duration::from_secs(60);
+        while !c.snap.decks[1].stems_ready {
+            assert!(Instant::now() < deadline, "stems never attached");
+            pump(&mut e, &mut c);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(c.mix_target(1), Some(0));
+        let stems = c.snap.decks[1].stems_ready;
+        let plan = c.plan_now(1, 0);
+        c.start_mix(plan);
+        let mut blocks = 0;
+        while c.automix.is_some() {
+            pump(&mut e, &mut c);
+            blocks += 4;
+            assert!(blocks < 48000 / 512 * 40, "mix never finished");
+        }
+        pump(&mut e, &mut c);
+        let (a, b) = (c.snap.decks[0], c.snap.decks[1]);
+        assert!(b.playing && !b.loop_on && b.sync, "the new deck dropped in, in sync");
+        assert!(a.playing && a.loop_on, "the old deck waits in a loop for your fade");
+        let p = |ch: usize| c.session.channels[ch].params;
+        assert_eq!((p(0).volume, p(1).volume), (0.7, 0.6), "volumes untouched");
+        assert_eq!((p(0).eq[0], p(1).eq[0]), (0.5, 0.5), "no bass swap");
+        assert!(stems);
+        assert_eq!(c.snap.decks[1].stem_gains[2], 0.0, "the new track's vocals stay out");
+    }
+
+    #[test]
     fn loaded_tracks_get_stems_in_the_background() {
         let (mut e, mut c, _config) = core();
         let dir = crate::settings::config_dir();

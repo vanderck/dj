@@ -142,14 +142,17 @@ fn settings(ui: &mut Ui, core: &mut Core, st: &mut UiState) {
             }
         }
     });
-    ui.horizontal(|ui| {
-        ui.label("Direct outputs apply:");
-        let e = &mut core.settings.ext_stages;
-        changed_engine |= ui.checkbox(&mut e.trim, "Trim").changed();
-        changed_engine |= ui.checkbox(&mut e.eq, "EQ").changed();
-        changed_engine |= ui.checkbox(&mut e.filter, "Filter").changed();
-        changed_engine |= ui.checkbox(&mut e.volume, "Volume").changed();
-    });
+    // With an external mixer, volume, EQ and filter are on the hardware: nothing to choose here.
+    if !core.external_routing() {
+        ui.horizontal(|ui| {
+            ui.label("Direct outputs apply:");
+            let e = &mut core.settings.ext_stages;
+            changed_engine |= ui.checkbox(&mut e.trim, "Trim").changed();
+            changed_engine |= ui.checkbox(&mut e.eq, "EQ").changed();
+            changed_engine |= ui.checkbox(&mut e.filter, "Filter").changed();
+            changed_engine |= ui.checkbox(&mut e.volume, "Volume").changed();
+        });
+    }
     ui.horizontal(|ui| {
         let m = &mut core.session.master;
         let mut c = ui.checkbox(&mut m.metronome_to_master, "Metronome to master").changed();
