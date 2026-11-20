@@ -242,6 +242,18 @@ Fonts: Inter and JetBrains Mono, bundled under the SIL Open Font License (see
     With less than a minute of the playing track left, Mix mixes now (in the
     last style) without asking.
 
+  **Each mix is planned from the music** when both decks have stems: dj reads
+  both tracks' drums, bass, vocals and other bar by bar over the mix window.
+  The basses swap where the new bass comes in on its own, or where the old
+  bass stops, else halfway. Parts that come in or stop by themselves are left
+  alone; parts that are there get moved (new drums halfway to the swap, old
+  drums after it, old vocals and other by the end); with Best, the new vocals
+  wait until the old ones are gone. Best's length follows the music: 8 bars
+  when the energy steps up (2+ levels), 32 when it steps down or the new
+  intro has no bass for 16 bars, else 16. The popup shows what each plan
+  follows ("bass swaps at bar 9, where the new bass comes in"). Without stems
+  the moves follow the fixed script above.
+
   The old track stops at the end and the new one becomes the tempo master.
   Tap the button during a mix to cancel it. Controller faders that dj moved
   are picked up: they take effect again once moved to (or past) dj's value.

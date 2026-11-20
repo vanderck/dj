@@ -859,7 +859,7 @@ fn mix_button(ui: &mut Ui, core: &mut Core, d: usize, rect: Rect, font: egui::Fo
         return;
     }
     let external = core.external_routing();
-    const W: f32 = 320.0;
+    const W: f32 = 360.0;
     egui::Popup::from_toggle_button_response(&resp)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .width(W)
@@ -909,11 +909,19 @@ fn mix_button(ui: &mut Ui, core: &mut Core, d: usize, rect: Rect, font: egui::Fo
                 ("Best", format!("{} · in {:.0} bars · {}", how(&best), bars_away(&best), best.reason), best),
             ];
             for (title, detail, plan) in options {
-                let (r, _) = ui.allocate_exact_size(Vec2::new(W, 54.0), Sense::hover());
+                // What the plan follows in the music (from the stems), on a third line.
+                let notes = plan.blend.as_ref().map(|b| b.notes.iter().take(2).cloned().collect::<Vec<_>>().join(" · ")).unwrap_or_default();
+                let h = if notes.is_empty() { 54.0 } else { 72.0 };
+                let (r, _) = ui.allocate_exact_size(Vec2::new(W, h), Sense::hover());
                 let resp = button(ui, r, "", Style::Dark, bold(15.0));
                 let p = ui.painter();
                 p.text(Pos2::new(r.left() + 14.0, r.top() + 17.0), Align2::LEFT_CENTER, title, bold(16.0), TEXT);
-                p.text(Pos2::new(r.left() + 14.0, r.bottom() - 15.0), Align2::LEFT_CENTER, detail, mono(11.0), TEXT_DIM);
+                let detail = fit_text(ui, &detail, mono(11.0), W - 28.0);
+                p.text(Pos2::new(r.left() + 14.0, r.top() + 38.0), Align2::LEFT_CENTER, detail, mono(11.0), TEXT_DIM);
+                if !notes.is_empty() {
+                    let notes = fit_text(ui, &notes, sans(11.0), W - 28.0);
+                    p.text(Pos2::new(r.left() + 14.0, r.top() + 56.0), Align2::LEFT_CENTER, notes, sans(11.0), GREEN);
+                }
                 if resp.clicked() {
                     core.start_mix(plan);
                     ui.close();
