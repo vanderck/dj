@@ -905,7 +905,7 @@ fn mix_button(ui: &mut Ui, core: &mut Core, d: usize, rect: Rect, font: egui::Fo
             };
             let now_when = if now.how == crate::core::automix::MixHow::Drop { now.reason.clone() } else { format!("{:.0} bars", now.length_beats / 4.0) };
             let options = [
-                ("Now", format!("{} · {now_when} · vocals out", how(&now)), now),
+                ("Now", format!("{} · {now_when} · vocals back on their next phrase", how(&now)), now),
                 ("Best", format!("{} · in {:.0} bars · {}", how(&best), bars_away(&best), best.reason), best),
             ];
             for (title, detail, plan) in options {

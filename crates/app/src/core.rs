@@ -242,6 +242,8 @@ pub struct Core {
     dirty_since: Option<Instant>,
     /// The auto-mix in progress, if any.
     pub automix: Option<automix::AutoMix>,
+    /// After a Now mix: the new track's vocals coming back on its next vocal phrase.
+    pub vocal_return: Option<automix::VocalReturn>,
     /// MIDI pick-up: controls dj moved itself (lowercase address -> last MIDI value seen).
     pickup: HashMap<String, Option<f32>>,
     /// Each deck's loop size in beats (the loop buttons, and hot cue pads in Loop mode).
@@ -324,6 +326,7 @@ impl Core {
             audio_channels: 2,
             dirty_since: None,
             automix: None,
+            vocal_return: None,
             pickup: HashMap::new(),
             loop_size,
         };
@@ -2511,10 +2514,33 @@ mod tests {
     /// Tests share the process-wide `DJ_CONFIG_DIR`; hold this for the whole test.
     static CONFIG_DIR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    fn core() -> (dj_engine::Engine, Core, std::sync::MutexGuard<'static, ()>) {
-        let guard = CONFIG_DIR_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    /// A test's config folder (settings, prepared stems, generated audio): removed when the test
+    /// ends, so runs don't pile up gigabytes in the temp folder.
+    struct TestDir {
+        dir: PathBuf,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn core() -> (dj_engine::Engine, Core, TestDir) {
+        let lock = CONFIG_DIR_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let dir = std::env::temp_dir().join(format!("dj-core-test-{}-{:?}", std::process::id(), std::thread::current().id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // Folders of earlier runs (a background stems write can land after a test ends).
+        let mine = format!("dj-core-test-{}-", std::process::id());
+        for e in std::fs::read_dir(std::env::temp_dir()).into_iter().flatten().flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.starts_with("dj-core-test-") && !name.starts_with(&mine) {
+                let _ = std::fs::remove_dir_all(e.path());
+            }
+        }
         std::env::set_var("DJ_CONFIG_DIR", &dir);
+        let guard = TestDir { dir, _lock: lock };
         let (engine, ctl) = create(EngineConfig { sample_rate: 48000.0, max_block: 512, max_latency: 4096 });
         // Stems from the tiny stand-in HT-Demucs model (stems-core's test data).
         let demucs = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../stems-core/tests/data/demucs_test.onnx"));
@@ -3222,6 +3248,59 @@ mod tests {
         run_mix(&mut e, &mut c, |_, _| {});
         assert!(!c.snap.decks[0].playing && c.snap.decks[1].playing, "mixed out of the loop");
         assert_eq!(c.session.channels[1].params.volume, 1.0);
+    }
+
+    #[test]
+    fn mixes_start_on_phrases_and_bars_and_vocals_come_back() {
+        use crate::core::automix::{MixHow, MixWhen};
+        let (mut e, mut c, _config) = core();
+        mix_setup(&mut e, &mut c);
+        // Clashing keys with stems on both decks: Stems, only drums and bass overlapping.
+        c.decks[0].info.as_mut().unwrap().tags.key = dj_library::key::Key::parse("8A");
+        c.decks[1].info.as_mut().unwrap().tags.key = dj_library::key::Key::parse("2A");
+        assert!(c.keys_clash(1, 0));
+        let (how, why) = c.assess(1, 0, MixWhen::Now);
+        assert_eq!(how, MixHow::Stems, "{why}");
+        assert!(why.contains("keys clash"));
+        c.decks[1].info.as_mut().unwrap().tags.key = dj_library::key::Key::parse("8A");
+
+        // The new track's cue is a beat into its bar (beat 17 at 120 BPM): it starts 3 beats early
+        // so its bar lines fall on the playing track's.
+        c.deck_cmd(1, DeckCmd::SetCue { idx: 0, secs: Some(8.5), end_secs: None });
+        c.deck_cmd(1, DeckCmd::CueBeatLoop { idx: 0, beats: 4.0 });
+        for _ in 0..60 {
+            pump(&mut e, &mut c);
+        }
+        // Vocals throughout the new track (the stand-in model's are too quiet to count).
+        let bins = (c.snap.decks[1].duration_secs * dj_library::waveform::BINS_PER_SEC) as usize + 1;
+        let w = crate::stems::StemWave { bins_per_sec: dj_library::waveform::BINS_PER_SEC, levels: std::array::from_fn(|_| vec![0.5; bins]) };
+        c.decks[1].stem_wave = Some(Arc::new(w));
+        let plan = c.plan_now(1, 0, crate::settings::MixStyle::Stems);
+        let beat = c.snap.decks[0].beat;
+        // Now: on a phrase (8 bars when that's within 4 bars, else 4 bars): at most 4 bars after
+        // the new track's lead-in.
+        assert_eq!(plan.start_beat % 16.0, 0.0, "{plan:?}");
+        assert!(plan.start_beat - plan.lead_in > beat + 0.5 && plan.start_beat - beat <= 16.0 + 0.5 + plan.lead_in, "{} {}", plan.start_beat, beat);
+        assert_eq!(plan.lead_in, 3.0);
+        c.start_mix(plan);
+        let mut checked = false;
+        run_mix(&mut e, &mut c, |c, p| {
+            if p > 0.2 && p < 0.9 {
+                let d = (c.snap.decks[1].beat - c.snap.decks[0].beat).rem_euclid(4.0);
+                assert!(d < 0.05 || d > 3.95, "bars line up: {d}");
+                checked = true;
+            }
+        });
+        assert!(checked);
+        // Now: the new vocals are out after the mix, then come back on its next vocal phrase.
+        assert_eq!(c.snap.decks[1].stem_gains[2], 0.0);
+        assert!(c.vocal_return.is_some(), "a vocal phrase was found ahead");
+        let deadline = Instant::now() + std::time::Duration::from_secs(60);
+        while c.snap.decks[1].stem_gains[2] < 1.0 {
+            assert!(Instant::now() < deadline, "vocals never came back");
+            pump(&mut e, &mut c);
+        }
+        assert!(c.vocal_return.is_none());
     }
 
     #[test]

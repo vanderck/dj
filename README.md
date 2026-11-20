@@ -218,10 +218,11 @@ Fonts: Inter and JetBrains Mono, bundled under the SIL Open Font License (see
   looping at a cue with its volume down gets a **Mix** button next to Sync.
   Mix syncs it (a paused deck is first turned down, looped where it stands and
   started in time) and asks *how* and *when*.
-  - **How** (remembered): **Auto** (default) assesses the two tracks: *Drop*
-    when their keys clash or their tempos are far apart (no long overlap), or
-    for a Best mix when the new track has a drop cue; else *Stems* when both
-    decks have stems; else *EQ*. The popup says what it chose and why.
+  - **How** (remembered): **Auto** (default) assesses the two tracks: when
+    their keys clash, *Stems* with only drums and bass overlapping (the
+    melodies and vocals switch at the bass swap; *Drop* without stems); *Drop*
+    when their tempos are far apart, or for a Best mix when the new track has
+    a drop cue; else *Stems* when both decks have stems; else *EQ*. The popup says what it chose and why.
     **Stems**: the new track's volume opens quickly on its melody (other)
     alone, then its drums come in, the basses swap at the midpoint (the kick
     stays whole), then the old drums go, then its vocals and other. Volume
@@ -234,10 +235,10 @@ Fonts: Inter and JetBrains Mono, bundled under the SIL Open Font License (see
     volume closes only the last part. **Drop**: no
     blend, the new track cuts in on the beat from its drop cue (if it has one)
     and the old one is gone within a beat.
-  - **When**: **Now** starts on the next bar (a drop on the next phrase when
-    it's close) over the whole bars that fit in about 10 s, with the new
-    track's vocals (stems) out; they stay out until you bring them back on the
-    deck. **Best** waits for the phrase start where the two tracks' vocals
+  - **When**: **Now** starts on the playing track's next phrase (its next 8
+    bars when that's within 4 bars, else its next 4-bar line) over the whole
+    bars that fit in about 10 s, with the new track's vocals (stems) out; they
+    come back on its next phrase that has vocals. **Best** waits for the phrase start where the two tracks' vocals
     clash least, preferring the playing track's outro or break (16 bars).
     With less than a minute of the playing track left, Mix mixes now (in the
     last style) without asking.
@@ -253,6 +254,10 @@ Fonts: Inter and JetBrains Mono, bundled under the SIL Open Font License (see
   intro has no bass for 16 bars, else 16. The popup shows what each plan
   follows ("bass swaps at bar 9, where the new bass comes in"). Without stems
   the moves follow the fixed script above.
+
+  The new track always starts on its own bar line: if its cue isn't on a
+  downbeat, it starts a few beats early so its bars fall on the playing
+  track's. The tempo stays the playing track's.
 
   The old track stops at the end and the new one becomes the tempo master.
   Tap the button during a mix to cancel it. Controller faders that dj moved
