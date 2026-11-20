@@ -822,8 +822,7 @@ fn mix_shown(core: &Core, d: usize) -> bool {
 /// state and a tap cancels it.
 fn mix_button(ui: &mut Ui, core: &mut Core, d: usize, rect: Rect, font: egui::FontId) {
     if let Some(m) = core.automix.as_ref().filter(|m| m.plan.incoming == d) {
-        let beat = core.snap.decks[m.plan.outgoing].beat;
-        let bars = ((m.plan.start_beat - beat) / 4.0).ceil();
+        let bars = ((m.plan.start_beat - core.mix_beat()) / 4.0).ceil();
         let label = if bars > 0.0 { format!("Mix in {bars:.0}") } else { "Mixing…".to_string() };
         let resp = button(ui, rect, &label, Style::Fill(GREEN), font)
             .on_hover_text(format!("{} · {} — tap to cancel", m.plan.how.name(core.external_routing()), m.plan.reason));
