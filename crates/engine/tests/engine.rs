@@ -210,7 +210,7 @@ fn release_loop_jumps_to_the_loop_start_on_the_beat() {
     deck(&mut c, 0, DeckCmd::SetCue { idx: 0, secs: Some(10.0), end_secs: None });
     deck(&mut c, 0, DeckCmd::CueBeatLoop { idx: 0, beats: 4.0 });
     run(&mut e, (1.3 * SR as f64 / BLOCK as f64) as usize); // inside the loop, mid-beat
-    deck(&mut c, 0, DeckCmd::ReleaseLoop);
+    deck(&mut c, 0, DeckCmd::ReleaseLoop { to_cue: None });
     run(&mut e, 2);
     assert!(e.snapshot().decks[0].loop_on, "waits for the beat");
     run(&mut e, (0.6 * SR as f64 / BLOCK as f64) as usize);

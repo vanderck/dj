@@ -130,6 +130,8 @@ pub struct Settings {
     /// What a set hot cue pad does, on screen and on a controller: loop from the cue (at the
     /// deck's loop size) or jump to it.
     pub cue_pads: CuePadMode,
+    /// How Mix blends two tracks (the last choice in the Mix popup).
+    pub mix_style: MixStyle,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -139,6 +141,25 @@ pub enum CuePoints {
     Tags,
     /// dj detects the cue points of every track (from its stems).
     Detected,
+}
+
+/// How Mix blends two tracks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum MixStyle {
+    /// dj assesses the two tracks for each mix (see `Core::assess`).
+    #[default]
+    Auto,
+    /// Swap drums, bass, vocals and other one by one, with the stems.
+    Stems,
+    /// Bass cut on the EQ and swapped at the midpoint, with volume fades (with an external mixer:
+    /// you fade on the mixer).
+    Eq,
+    /// No blend: the new track cuts in on the beat, from its drop cue if it has one.
+    Drop,
+}
+
+impl MixStyle {
+    pub const ALL: [MixStyle; 4] = [MixStyle::Auto, MixStyle::Stems, MixStyle::Eq, MixStyle::Drop];
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -196,6 +217,7 @@ impl Default for Settings {
             layout: LayoutMode::Auto,
             cue_points: CuePoints::Tags,
             cue_pads: CuePadMode::Loop,
+            mix_style: MixStyle::Auto,
             tempo_step_pct: 0.0,
         }
     }
