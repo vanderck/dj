@@ -120,7 +120,8 @@ enum PendingAction {
     JumpCue(u8),
     CueLoop(u8),
     CueBeatLoop(u8, f64),
-    ReleaseLoop,
+    /// Leave the loop: to its start, or to this hot cue.
+    ReleaseLoop(Option<u8>),
 }
 
 /// What happens at a hot cue besides jumping to it (stored loop cues always loop).
@@ -934,7 +935,8 @@ impl Deck {
     /// On the next beat (of the master clock when synced, whatever the quantize setting): jump
     /// back to the loop's start and leave the loop, so the track plays on from there (e.g. from
     /// the cue it was looping at, on a bar line of the track it is mixed into).
-    pub fn release_loop(&mut self, ctx: &DeckCtx) {
+    /// With `to_cue`, it jumps to that hot cue instead (e.g. a drop).
+    pub fn release_loop(&mut self, to_cue: Option<u8>, ctx: &DeckCtx) {
         if !self.loop_on {
             return;
         }
@@ -944,18 +946,19 @@ impl Deck {
             Some(b) if self.playing => {
                 let at = (b - 0.002).ceil().max(b);
                 if at - b > 0.002 {
-                    self.pending = Some(Pending { action: PendingAction::ReleaseLoop, at_beat: at, on_clock });
+                    self.pending = Some(Pending { action: PendingAction::ReleaseLoop(to_cue), at_beat: at, on_clock });
                 } else {
-                    self.fire_release_loop();
+                    self.fire_release_loop(to_cue);
                 }
             }
-            _ => self.fire_release_loop(),
+            _ => self.fire_release_loop(to_cue),
         }
     }
 
-    fn fire_release_loop(&mut self) {
-        if let Some(l) = self.loop_region {
-            self.jump_to(l.start);
+    fn fire_release_loop(&mut self, to_cue: Option<u8>) {
+        let cue = to_cue.and_then(|i| self.hot_cues.get(i as usize).copied().flatten()).map(|c| c.start);
+        if let Some(pos) = cue.or(self.loop_region.map(|l| l.start)) {
+            self.jump_to(pos);
         }
         self.loop_on = false;
     }
@@ -1227,7 +1230,7 @@ impl Deck {
                         PendingAction::JumpCue(c) => self.fire_cue(c, CueLoopMode::None, ctx),
                         PendingAction::CueLoop(c) => self.fire_cue(c, CueLoopMode::ToNextCue, ctx),
                         PendingAction::CueBeatLoop(c, beats) => self.fire_cue(c, CueLoopMode::Beats(beats), ctx),
-                        PendingAction::ReleaseLoop => self.fire_release_loop(),
+                        PendingAction::ReleaseLoop(to_cue) => self.fire_release_loop(to_cue),
                     }
                 }
             }

@@ -209,24 +209,38 @@ Fonts: Inter and JetBrains Mono, bundled under the SIL Open Font License (see
   (momentary, cue-to-next-cue loops), loops (in/out, halve/double, move,
   free-loop), slip mode, slip loops (with dotted/triplet), beat/bar skip,
   reverse, backspin, tape stop, half/double speed, phase nudge.
-- **Mix**: tap a cue on a silent deck (volume down) while another deck plays:
+- **Mix**: tap a cue on a deck whose volume is down while another deck plays:
   it loops from the cue, and a **Mix** button appears next to Sync. Mix syncs
-  it and asks *Now* or *Best*. **Now** starts on the next bar and mixes over the
-  whole bars that fit in about 10 s, with the new track's vocals (stems) out;
-  they stay out until you bring them back on the deck. **Best** waits for an 8-bar phrase start and
-  mixes over 16 bars, picking the moment where the two tracks' vocals clash
-  least (from the stems), preferring the playing track's outro or break. With
-  less than a minute of the playing track left, Mix mixes now without asking.
-  Either way the new track comes up over the first half with its bass out, the
-  basses swap at the midpoint, the old track fades over the second half and
-  stops, and the new one becomes the tempo master. Tap the button during a mix
-  to cancel it. Controller faders that dj moved are picked up: they take
-  effect again once moved to (or past) dj's value.
+  it and asks *how* and *when*.
+  - **How** (remembered): **Auto** (default) assesses the two tracks: *Drop*
+    when their keys clash or their tempos are far apart (no long overlap), or
+    for a Best mix when the new track has a drop cue; else *Stems* when both
+    decks have stems; else *EQ*. The popup says what it chose and why.
+    **Stems**: the new track comes in with drums and other only, the basses
+    swap at the midpoint (the kick stays whole), then the old drums go, then
+    its vocals and other. With dj's own mixer the EQ smooths it: the new
+    track's highs rise over the first half and the old track's highs roll off
+    while its drums leave. **EQ**: the new track comes up with its bass cut on
+    the EQ, the basses swap at the midpoint, the old track fades. **Drop**: no
+    blend, the new track cuts in on the beat from its drop cue (if it has one)
+    and the old one is gone within a beat.
+  - **When**: **Now** starts on the next bar (a drop on the next phrase when
+    it's close) over the whole bars that fit in about 10 s, with the new
+    track's vocals (stems) out; they stay out until you bring them back on the
+    deck. **Best** waits for the phrase start where the two tracks' vocals
+    clash least, preferring the playing track's outro or break (16 bars).
+    With less than a minute of the playing track left, Mix mixes now (in the
+    last style) without asking.
+
+  The old track stops at the end and the new one becomes the tempo master.
+  Tap the button during a mix to cancel it. Controller faders that dj moved
+  are picked up: they take effect again once moved to (or past) dj's value.
   **With an external mixer** dj can't see or move your faders: any deck
-  looping at a cue while another plays gets Mix (Now or Best as above). It
-  syncs the new deck and drops it out of its loop on the chosen beat; when the
-  mix time is up the old deck drops into a loop, so both stay in time while you
-  fade on the mixer. dj's volume, EQ and bass swap aren't touched.
+  looping at a cue while another plays gets Mix, volume and EQ are never
+  touched, and *EQ* becomes *You fade*. Stems and Drop still blend on the
+  decks. At the end the old deck drops into a loop, with its stems at 0 after
+  Stems or Drop, and stays that way until you load another track or change
+  it, so nothing comes back before you've faded it out.
 - **Sampler decks**: 8 lanes, 16 steps, 8 patterns, per-step velocity, per-lane
   length (polyrhythms), direction (→ ← ↔ random), rate (normal/dotted/triplet),
   AHR envelope with curve, pitch, mono/poly, swing, global pitch, ½×/2×.

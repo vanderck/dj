@@ -2599,14 +2599,14 @@ mod tests {
         assert!(!c.mix_is_urgent(0));
 
         // Best: 16 bars on an 8-bar phrase start, ahead, ending before the track does.
-        let best = c.plan_best(1, 0);
+        let best = c.plan_best(1, 0, crate::settings::MixStyle::Eq);
         let beat = c.snap.decks[0].beat;
         assert_eq!(best.mode, automix::MixWhen::Best);
         assert_eq!(best.length_beats, 64.0);
         assert_eq!(best.start_beat % 32.0, 0.0);
         assert!(best.start_beat > beat && best.start_beat + 64.0 <= 180.0, "{best:?}");
 
-        let plan = c.plan_now(1, 0);
+        let plan = c.plan_now(1, 0, crate::settings::MixStyle::Eq);
         // 120 BPM: 2 s bars, 5 of them fit in 10 s; it starts on the next bar line.
         assert_eq!(plan.length_beats, 20.0);
         assert_eq!(plan.start_beat % 4.0, 0.0);
@@ -2806,7 +2806,7 @@ mod tests {
         }
         assert_eq!(c.mix_target(1), Some(0));
         let stems = c.snap.decks[1].stems_ready;
-        let plan = c.plan_now(1, 0);
+        let plan = c.plan_now(1, 0, crate::settings::MixStyle::Eq);
         c.start_mix(plan);
         let mut blocks = 0;
         while c.automix.is_some() {
@@ -2823,6 +2823,158 @@ mod tests {
         assert_eq!((p(0).eq[0], p(1).eq[0]), (0.5, 0.5), "no bass swap");
         assert!(stems);
         assert_eq!(c.snap.decks[1].stem_gains[2], 0.0, "the new track's vocals stay out");
+    }
+
+    /// Deck 1 plays (volume 0.9); deck 2 waits silently in a loop at its cue (8 s), with a second
+    /// cue at 16 s; both have stems.
+    fn mix_setup(e: &mut dj_engine::Engine, c: &mut Core) {
+        // Deck 1 first: it is the tempo master.
+        for (d, name, secs) in [(0, "style-a.wav", 90), (1, "style-b.wav", 60)] {
+            c.load_track(d, &kick_wav(name, secs));
+            let deadline = Instant::now() + std::time::Duration::from_secs(60);
+            while !(c.snap.decks[d].loaded && c.decks[d].info.is_some()) {
+                assert!(Instant::now() < deadline, "track never loaded");
+                pump(e, c);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+        for d in 0..2 {
+            c.deck_cmd(d, DeckCmd::SetGrid(Some(dj_engine::track::BeatGrid { bpm: 120.0, anchor_secs: 0.0 })));
+        }
+        c.route("Mixer/CH1/Volume", &[OscType::Float(0.9)]);
+        c.route("Mixer/CH2/Volume", &[OscType::Float(0.0)]);
+        c.deck_cmd(0, DeckCmd::Play);
+        c.deck_cmd(1, DeckCmd::SetCue { idx: 0, secs: Some(8.0), end_secs: None });
+        c.deck_cmd(1, DeckCmd::SetCue { idx: 1, secs: Some(16.0), end_secs: None });
+        c.deck_cmd(1, DeckCmd::CueBeatLoop { idx: 0, beats: 4.0 });
+        let deadline = Instant::now() + std::time::Duration::from_secs(60);
+        // (Also until dj's cue detection is done, so it doesn't replace the cues tests set.)
+        let pending = |c: &Core, d: usize| c.decks[d].info.as_ref().is_none_or(|i| i.cues_pending);
+        while !(c.snap.decks[0].stems_ready && c.snap.decks[1].stems_ready && c.snap.decks[0].playing && c.snap.decks[1].loop_on)
+            || pending(c, 0)
+            || pending(c, 1)
+        {
+            assert!(Instant::now() < deadline, "decks never ready");
+            pump(e, c);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(c.mix_target(1), Some(0));
+    }
+
+    fn run_mix(e: &mut dj_engine::Engine, c: &mut Core, mut each: impl FnMut(&Core, f64)) {
+        let (start, len) = c.automix.as_ref().map(|m| (m.plan.start_beat, m.plan.length_beats)).unwrap();
+        let mut blocks = 0;
+        while c.automix.is_some() {
+            pump(e, c);
+            blocks += 4;
+            assert!(blocks < 48000 / 512 * 60, "mix never finished");
+            if c.snap.decks[0].playing {
+                each(c, (c.snap.decks[0].beat - start) / len);
+            }
+        }
+        pump(e, c);
+    }
+
+    #[test]
+    fn auto_assesses_the_tracks_and_stems_mix_swaps_the_parts() {
+        use crate::core::automix::{MixHow, MixWhen};
+        use crate::settings::MixStyle;
+        let (mut e, mut c, _config) = core();
+        mix_setup(&mut e, &mut c);
+
+        // Same tempo, no keys, stems on both: Auto picks Stems.
+        assert_eq!(c.assess(1, 0, MixWhen::Now).0, MixHow::Stems);
+        // A drop cue on the new track: Auto drops for a Best mix (Now still blends).
+        c.decks[1].info.as_mut().unwrap().cues[1] = Some(Cue { kind: CueKind::Hot, secs: 16.0, end_secs: None, name: "Drop".into(), color: [0; 3] });
+        assert_eq!(c.assess(1, 0, MixWhen::Best), (MixHow::Drop, "the new track has a drop".to_string()));
+        assert_eq!(c.assess(1, 0, MixWhen::Now).0, MixHow::Stems);
+        // Tempos far apart: Drop.
+        c.deck_cmd(1, DeckCmd::SetGrid(Some(dj_engine::track::BeatGrid { bpm: 140.0, anchor_secs: 0.0 })));
+        pump(&mut e, &mut c);
+        assert_eq!(c.assess(1, 0, MixWhen::Now).0, MixHow::Drop);
+        c.deck_cmd(1, DeckCmd::SetGrid(Some(dj_engine::track::BeatGrid { bpm: 120.0, anchor_secs: 0.0 })));
+        pump(&mut e, &mut c);
+        // Stems asked for but missing on a deck: EQ.
+        let plan = c.plan_now(1, 0, MixStyle::Stems);
+        assert_eq!(plan.how, MixHow::Stems);
+
+        c.start_mix(plan);
+        let (mut before, mut after) = (false, false);
+        run_mix(&mut e, &mut c, |c, p| {
+            let (gi, go) = (c.snap.decks[1].stem_gains, c.snap.decks[0].stem_gains);
+            if (0.05..0.45).contains(&p) {
+                assert_eq!((gi[1], gi[2], go[1]), (0.0, 0.0, 1.0), "first half: new bass and vocals out, old bass in");
+                assert!(c.session.channels[1].params.eq[2] < 0.5, "new highs still rising");
+                before = true;
+            }
+            if (0.55..0.7).contains(&p) {
+                assert_eq!((gi[1], go[1]), (1.0, 0.0), "the basses swapped");
+                assert!(go[0] < 1.0 && go[2] == 1.0, "old drums going, its vocals still there");
+                assert_eq!(c.session.channels[1].params.eq[2], 0.5, "new highs in");
+                assert!(c.session.channels[0].params.eq[2] < 0.5, "old highs rolling off");
+                after = true;
+            }
+        });
+        assert!(before && after);
+        let p = |ch: usize| c.session.channels[ch].params;
+        assert!(!c.snap.decks[0].playing && c.snap.decks[1].playing);
+        assert_eq!((p(0).volume, p(1).volume), (0.0, 1.0));
+        assert_eq!((p(0).eq[0], p(1).eq[0]), (0.5, 0.5), "the bass swaps on the stems, not the EQ");
+        assert_eq!((p(0).eq[2], p(1).eq[2]), (0.5, 0.5), "highs back to where they were");
+        assert_eq!(c.snap.decks[0].stem_gains, [1.0; 4], "the old deck's stems back for next time");
+        assert_eq!(c.snap.decks[1].stem_gains, [1.0, 1.0, 0.0, 1.0], "Now: the new vocals stay out");
+    }
+
+    #[test]
+    fn drop_mix_cuts_in_from_the_drop_cue() {
+        use crate::core::automix::MixHow;
+        let (mut e, mut c, _config) = core();
+        mix_setup(&mut e, &mut c);
+        c.decks[1].info.as_mut().unwrap().cues[1] = Some(Cue { kind: CueKind::Hot, secs: 16.0, end_secs: None, name: "Drop 1".into(), color: [0; 3] });
+        c.deck_cmd(1, DeckCmd::SetCue { idx: 1, secs: Some(16.0), end_secs: None });
+        let plan = c.plan_now(1, 0, crate::settings::MixStyle::Drop);
+        assert_eq!((plan.how, plan.length_beats), (MixHow::Drop, 4.0));
+        let start = plan.start_beat;
+        c.start_mix(plan);
+        run_mix(&mut e, &mut c, |c, p| {
+            if p > 0.3 {
+                assert_eq!(c.session.channels[1].params.volume, 1.0, "cut in at full");
+                assert!(c.session.channels[0].params.volume < 0.01, "old track gone within a beat");
+            }
+        });
+        let b = c.snap.decks[1];
+        assert!(!c.snap.decks[0].playing && b.playing && !b.loop_on);
+        // From the drop: 16 s plus the bar of the mix (and a little).
+        assert!((18.0..19.0).contains(&b.position_secs), "{} (start beat {start})", b.position_secs);
+    }
+
+    #[test]
+    fn external_stems_mix_leaves_the_old_deck_silent_in_its_loop() {
+        let (mut e, mut c, _config) = core();
+        c.audio_channels = 4;
+        c.set_external_mixer(true);
+        mix_setup(&mut e, &mut c);
+        let plan = c.plan_now(1, 0, crate::settings::MixStyle::Stems);
+        c.start_mix(plan);
+        run_mix(&mut e, &mut c, |_, _| {});
+        // Until you've faded it out on the mixer: looping, every stem at 0, and it stays so.
+        for _ in 0..200 {
+            pump(&mut e, &mut c);
+        }
+        let a = c.snap.decks[0];
+        assert!(a.playing && a.loop_on);
+        assert_eq!(a.stem_gains, [0.0; 4], "the old deck's sound doesn't come back");
+        assert_eq!(c.snap.decks[1].stem_gains, [1.0, 1.0, 0.0, 1.0]);
+        // Only a new track (or you) changes that.
+        c.load_track(0, &kick_wav("style-c.wav", 30));
+        let deadline = Instant::now() + std::time::Duration::from_secs(60);
+        while c.decks[0].info.as_ref().is_none_or(|i| !i.path.ends_with("style-c.wav")) || !c.snap.decks[0].loaded {
+            assert!(Instant::now() < deadline, "track never loaded");
+            pump(&mut e, &mut c);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        pump(&mut e, &mut c);
+        assert_eq!(c.snap.decks[0].stem_gains, [1.0; 4]);
     }
 
     #[test]
