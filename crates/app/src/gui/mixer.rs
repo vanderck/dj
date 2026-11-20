@@ -319,6 +319,18 @@ fn strip(ui: &mut Ui, core: &mut Core, st: &mut UiState, ch: usize, rect: Rect) 
     // Muted (over MIDI or the channel menu) is volume off: the fader shows it at the bottom.
     let shown = if level && p.mute { 0.0 } else { t.value };
     let (resp, mut new) = vfader(ui, track, shown, mode_color, meter, t.centred);
+    // A stem level only changes the sound once the deck has stems: say so on the fader.
+    if mode.is_stem() && core.snap.decks[ch].loaded && !core.snap.decks[ch].stems_ready {
+        let (text, _) = super::deck::stems_status(core, ch).unwrap_or(("no stems yet".into(), TEXT_FAINT));
+        let text = text.replace(" (Settings)", "");
+        let pr = Rect::from_center_size(track.center(), Vec2::new(track.width() - 6.0, 34.0));
+        ui.painter().rect_filled(pr, CornerRadius::same(6), Color32::from_black_alpha(200));
+        let mut y = pr.center().y - 7.0;
+        for line in text.splitn(2, ' ') {
+            ui.painter().text(Pos2::new(pr.center().x, y), Align2::CENTER_CENTER, line, bold(10.5), TEXT);
+            y += 14.0;
+        }
+    }
     if mode == FaderMode::Tempo {
         // The deck's tempo change, on the fader; drags snap to the global step setting.
         let dv = core.snap.decks[ch];

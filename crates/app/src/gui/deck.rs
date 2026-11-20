@@ -135,18 +135,23 @@ fn title_block(ui: &Ui, core: &Core, d: usize, rect: Rect, big: bool) {
     }
 }
 
-/// Short stems status for the deck header: separation progress, or where the stems came from.
-fn stems_status(core: &Core, d: usize) -> Option<(String, Color32)> {
+/// Short stems status for the deck header: separation progress, where the stems came from, or
+/// why there are none (stem levels only change the sound once a deck has stems).
+pub fn stems_status(core: &Core, d: usize) -> Option<(String, Color32)> {
     let v = core.snap.decks[d];
-    if !core.settings.stems_enabled || !v.loaded {
+    if !v.loaded {
         return None;
+    }
+    if !core.settings.stems_enabled {
+        return Some(("stems off (Settings)".into(), TEXT_FAINT));
     }
     let source = core.decks[d].stems_source.as_deref();
     match (core.decks[d].stems_progress, source) {
         (Some(f), _) => Some((format!("stems {:.0}%", f * 100.0), DECK[d])),
         (None, Some(src)) if v.stems_ready && src.contains("placeholder") => Some(("placeholder stems".into(), RED)),
         (None, Some(src)) if v.stems_ready => Some((format!("stems: {src}"), TEXT_FAINT)),
-        _ => None,
+        _ if v.stems_ready => Some(("stems".into(), TEXT_FAINT)),
+        _ => Some(("no stems yet".into(), TEXT_FAINT)),
     }
 }
 
@@ -193,17 +198,24 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
     let bpm_r = Rect::from_min_size(Pos2::new(time_r.left() - 88.0, r.top()), Vec2::new(80.0, hh));
     let p = ui.painter();
     // (The tempo change in % is shown inside the tempo slider.)
-    p.text(Pos2::new(bpm_r.right(), bpm_r.center().y), Align2::RIGHT_CENTER, if !v.has_grid {
+    let bpm_text = if !v.has_grid {
         "—".into()
     } else if core.decks[d].info.as_ref().is_some_and(|i| i.grid_source == Some(dj_library::GridSource::Detected)) {
         format!("≈{:.2}", v.bpm) // detected, not from a tag
     } else {
         format!("{:.2}", v.bpm)
-    }, mono(if dense { 18.0 } else { 22.0 }), TEXT);
-    // The deck that sets the master tempo (chosen automatically) says so above its BPM.
+    };
+    let bpm_font = mono(if dense { 18.0 } else { 22.0 });
+    let tag_font = bold(if dense { 8.5 } else { 9.5 });
+    // The deck that sets the master tempo (chosen automatically) says so above its BPM: the pair
+    // is centred together, so the label never sits on the digits.
+    let bpm_h = p.layout_no_wrap(bpm_text.clone(), bpm_font.clone(), TEXT).size().y;
+    let tag_h = if is_master { p.layout_no_wrap("MASTER".into(), tag_font.clone(), RED).size().y } else { 0.0 };
+    let top = bpm_r.center().y - (bpm_h + tag_h) / 2.0;
     if is_master {
-        p.text(Pos2::new(bpm_r.right(), bpm_r.top() + 1.0), Align2::RIGHT_TOP, "MASTER", bold(9.5), RED);
+        p.text(Pos2::new(bpm_r.right(), top), Align2::RIGHT_TOP, "MASTER", tag_font, RED);
     }
+    p.text(Pos2::new(bpm_r.right(), top + tag_h), Align2::RIGHT_TOP, bpm_text, bpm_font, TEXT);
     let key = core.key_text(core.deck_key(d));
     let chip = Rect::from_min_size(Pos2::new(bpm_r.left() - 56.0, r.top() + (hh - 30.0).max(4.0) / 2.0), Vec2::new(46.0, (hh - 8.0).min(30.0)));
     if !key.is_empty() {

@@ -191,7 +191,10 @@ One screen, laid out for 1600×1000 points and fitted to the window:
   moved to the new value, so nothing jumps. Muting is volume off: the
   fader drops to the bottom. CUE per strip, LIMIT on the master. Tempo fine
   steps: Settings.
-- **Browser**: search, All tracks / History, **Fits**: tracks whose key mixes
+- **Browser**: **Import folder** opens the system folder picker (every
+  subfolder is included; on macOS this also grants access to an external
+  drive); folders can also be typed in Settings → Library. Search, All tracks /
+  History, **Fits**: tracks whose key mixes
   with the master deck and whose BPM is within ±5, best match first and
   focused; Quantize and Menu (settings, recording, layout); Title, Artist, BPM,
   Key (Camelot + musical), Match/Boost tag, Energy, Time, Genre; a deck badge marks loaded
