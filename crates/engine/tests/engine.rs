@@ -505,3 +505,29 @@ fn decks_routed_to_direct_pairs_reach_only_their_own_outputs() {
     assert!(tone_energy(&p1[4096..], 1000.0, SR) < 1e-4 * tone_energy(&p0[4096..], 1000.0, SR), "deck 1 not on 3/4");
     assert!(p1.iter().any(|f| f[0] > 0.5), "deck 2 clicks on outputs 3/4");
 }
+
+#[test]
+fn empty_decks_do_not_loop_and_gridless_loops_report_their_length() {
+    let (mut e, mut c) = setup();
+    send(&mut c, Command::GlobalQuantize(None));
+    // Nothing loaded: every way into a loop is ignored.
+    deck(&mut c, 2, DeckCmd::LoopBeats(4.0));
+    deck(&mut c, 2, DeckCmd::LoopToggle);
+    deck(&mut c, 2, DeckCmd::LoopIn);
+    deck(&mut c, 2, DeckCmd::LoopOut);
+    deck(&mut c, 2, DeckCmd::FreeLoop(50.0));
+    deck(&mut c, 2, DeckCmd::SlipLoop { beats: 1.0, pressed: true });
+    run(&mut e, 2);
+    assert!(!e.snapshot().decks[2].loop_on, "an empty deck never loops");
+
+    // A track without a grid loops at an assumed 120 BPM, and says how many beats.
+    let t = click_track(1, 120.0, 30.0, 48000);
+    let audio = AudioData { sample_rate: t.audio.sample_rate, frames: t.audio.frames.to_vec() };
+    let gridless = Track { id: 2, audio, grid: None, gain: 1.0, cues: Default::default() };
+    send(&mut c, Command::Load { deck: 0, track: Arc::new(gridless), start_at_first_cue: false });
+    deck(&mut c, 0, DeckCmd::LoopBeats(4.0));
+    run(&mut e, 2);
+    let s = e.snapshot().decks[0];
+    assert!(s.loop_on && !s.has_grid, "loop {} grid {}", s.loop_on, s.has_grid);
+    assert!((s.loop_beats - 4.0).abs() < 1e-9, "{}", s.loop_beats);
+}

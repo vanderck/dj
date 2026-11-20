@@ -540,8 +540,10 @@ fn fit_text(ui: &Ui, text: &str, font: egui::FontId, max_w: f32) -> String {
 }
 
 pub fn beats_label(b: f64) -> String {
-    if b >= 1.0 {
-        format!("{}", b as i64)
+    if !(b.is_finite() && b > 0.0) {
+        "—".into()
+    } else if b >= 1.0 {
+        if (b - b.round()).abs() < 0.01 { format!("{}", b.round() as i64) } else { format!("{b:.1}") }
     } else {
         format!("1/{}", (1.0 / b).round() as i64)
     }
