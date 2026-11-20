@@ -135,8 +135,8 @@ fn title_block(ui: &Ui, core: &Core, d: usize, rect: Rect, big: bool) {
     }
 }
 
-/// Short stems status for the deck header: separation progress, where the stems came from, or
-/// why there are none (stem levels only change the sound once a deck has stems).
+/// Short stems status for the deck header while a deck has no stems: separation progress, or why
+/// there are none (stem levels only change the sound once a deck has stems). Hidden once ready.
 pub fn stems_status(core: &Core, d: usize) -> Option<(String, Color32)> {
     let v = core.snap.decks[d];
     if !v.loaded {
@@ -145,12 +145,11 @@ pub fn stems_status(core: &Core, d: usize) -> Option<(String, Color32)> {
     if !core.settings.stems_enabled {
         return Some(("stems off (Settings)".into(), TEXT_FAINT));
     }
-    let source = core.decks[d].stems_source.as_deref();
-    match (core.decks[d].stems_progress, source) {
-        (Some(f), _) => Some((format!("stems {:.0}%", f * 100.0), DECK[d])),
-        (None, Some(src)) if v.stems_ready => Some((format!("stems: {src}"), TEXT_FAINT)),
-        _ if v.stems_ready => Some(("stems".into(), TEXT_FAINT)),
-        _ => Some((core.decks[d].stems_missing.unwrap_or("stems…").into(), TEXT_FAINT)),
+    // Once the stems are there, nothing to say.
+    match core.decks[d].stems_progress {
+        Some(f) => Some((format!("stems {:.0}%", f * 100.0), DECK[d])),
+        None if v.stems_ready => None,
+        None => Some((core.decks[d].stems_missing.unwrap_or("stems…").into(), TEXT_FAINT)),
     }
 }
 
@@ -526,7 +525,7 @@ fn stems_row(ui: &mut Ui, core: &mut Core, d: usize, r: Rect) {
             p.rect_filled(fill, rad, alpha(color, 0.35));
             (format!("Separating {:.0}%", f * 100.0), TEXT)
         }
-        (None, Some(src), true) if ready => (src.clone(), TEXT_DIM),
+        (None, _, true) if ready => (String::new(), TEXT_DIM),
         (None, _, true) => (core.decks[d].stems_missing.unwrap_or("No stems").into(), TEXT_FAINT),
         _ => ("Stems".into(), TEXT_FAINT),
     };

@@ -8,12 +8,12 @@
 //!
 //! And **how** ([`MixStyle`], remembered in the settings):
 //!
-//! - **EQ**: the incoming track comes up over the first half with its bass cut, the basses swap
-//!   on the EQ at the midpoint, then the outgoing track leaves on the EQ (mids, then highs) and
-//!   its volume closes the last part.
-//! - **Stems**: the incoming track comes in with drums and other only; at the midpoint the basses
-//!   swap (stems, so the kick stays whole), then the outgoing drums go, then its vocals and other
-//!   (its volume stays up: the stems do the fading).
+//! - **EQ**: the incoming volume opens quickly with its EQ closed; its highs come in, then its
+//!   mids; at the midpoint the basses swap; then the outgoing track leaves on the EQ (mids, then
+//!   highs) and its volume closes the last part.
+//! - **Stems**: the incoming volume opens quickly on its melody (other) alone; then its drums come
+//!   in; at the midpoint the basses swap (stems, so the kick stays whole); then the outgoing drums
+//!   go, then its vocals and other. Volume only opens and closes the edges.
 //!   With dj's own mixer the EQ smooths it: the new track's highs rise over the first half and the
 //!   old track's highs roll off while its drums leave.
 //! - **Drop**: no blend. The incoming track waits at its drop cue (if it has one) and cuts in on
@@ -97,6 +97,7 @@ pub struct AutoMix {
     out_high: f32,
     out_mid: f32,
     in_high: f32,
+    in_mid: f32,
     out_volume: f32,
     in_stems: [f32; 4],
     out_stems: [f32; 4],
@@ -114,10 +115,13 @@ fn smooth(x: f64) -> f32 {
 }
 
 /// Stem levels of a Stems blend at position `p` (0..1) of the mix, as fractions of the decks'
-/// own levels: (incoming, outgoing).
+/// own levels: (incoming, outgoing). In: other, then drums, then (midpoint) bass. Out: bass at the
+/// midpoint, then drums, then vocals and other.
 fn stems_at(p: f64, vocals_out: bool, best: bool) -> ([f32; 4], [f32; 4]) {
     let mut i = [1.0, 0.0, 1.0, 1.0];
     let mut o = [1.0; 4];
+    // The incoming melody (other) is there from the start; its drums come in next.
+    i[DRUMS] = smooth((p - 0.15) / 0.2);
     if p >= 0.5 {
         // Midpoint: the basses swap.
         i[BASS] = 1.0;
@@ -351,6 +355,7 @@ impl Core {
             out_high: params(o).eq[2],
             out_mid: params(o).eq[1],
             in_high: params(i).eq[2],
+            in_mid: params(i).eq[1],
             out_volume: params(o).volume,
             in_stems: self.snap.decks[i].stem_gains,
             out_stems: self.snap.decks[o].stem_gains,
@@ -361,7 +366,12 @@ impl Core {
         };
         match mix.plan.how {
             // The incoming bass stays out until the swap.
-            MixHow::Eq if !external => self.mix_set(&format!("Mixer/CH{}/EQ/Low", i + 1), 0.0),
+            // The incoming track starts thinned out on the EQ: its parts come in one by one.
+            MixHow::Eq if !external => {
+                for band in ["Low", "Mid", "High"] {
+                    self.mix_set(&format!("Mixer/CH{}/EQ/{band}", i + 1), 0.0);
+                }
+            }
             MixHow::Stems => {
                 let (si, _) = stems_at(0.0, vocals_out, mix.plan.mode == MixWhen::Best);
                 self.set_stem_levels(i, si, mix.in_stems);
@@ -398,6 +408,8 @@ impl Core {
                 if !m.swapped {
                     self.mix_set(&format!("Mixer/CH{}/EQ/Low", i + 1), m.in_low);
                 }
+                self.mix_set(&format!("Mixer/CH{}/EQ/Mid", i + 1), m.in_mid);
+                self.mix_set(&format!("Mixer/CH{}/EQ/High", i + 1), m.in_high);
                 self.mix_set(&format!("Mixer/CH{}/EQ/Low", o + 1), m.out_low);
                 self.mix_set(&format!("Mixer/CH{}/EQ/Mid", o + 1), m.out_mid);
                 self.mix_set(&format!("Mixer/CH{}/EQ/High", o + 1), m.out_high);
@@ -450,7 +462,10 @@ impl Core {
         }
         let p = (beat - start) / len;
         let (how, external, swapped) = (m.plan.how, m.external, m.swapped);
-        let (out_volume, in_low, out_low, in_high, out_high, out_mid) = (m.out_volume, m.in_low, m.out_low, m.in_high, m.out_high, m.out_mid);
+        let (out_volume, in_low, out_low, in_high, out_high, out_mid, in_mid) =
+            (m.out_volume, m.in_low, m.out_low, m.in_high, m.out_high, m.out_mid, m.in_mid);
+        // Volume only opens the start (and closes the end): the EQ or stems do the blending.
+        let open = smooth(p / 0.15);
         let (in_stems, out_stems, vocals_out, best) = (m.in_stems, m.out_stems, m.vocals_out, m.plan.mode == MixWhen::Best);
         let vol = |c: usize| format!("Mixer/CH{}/Volume", c + 1);
         let low = |c: usize| format!("Mixer/CH{}/EQ/Low", c + 1);
@@ -459,12 +474,18 @@ impl Core {
         match how {
             MixHow::Eq if external => {} // you fade on the mixer
             MixHow::Eq => {
-                // First half: incoming up. Midpoint: swap the basses. Then the outgoing track leaves
-                // on the EQ (mids, then highs); its volume only closes the last part.
-                self.mix_set(&vol(i), smooth(p / 0.5));
+                // In: volume opens, then highs, then mids; the bass at the midpoint, swapped with the
+                // outgoing one. Out: mids, then highs; its volume only closes the last part.
+                self.mix_set(&vol(i), open);
+                if p < 0.5 {
+                    self.mix_set(&high(i), in_high * smooth((p - 0.1) / 0.25));
+                    self.mix_set(&mid(i), in_mid * smooth((p - 0.25) / 0.25));
+                }
                 if p >= 0.5 && !swapped {
                     self.automix.as_mut().unwrap().swapped = true;
                     self.mix_set(&low(i), in_low);
+                    self.mix_set(&mid(i), in_mid);
+                    self.mix_set(&high(i), in_high);
                     self.mix_set(&low(o), 0.0);
                 }
                 if p >= 0.5 {
@@ -479,10 +500,10 @@ impl Core {
                 self.set_stem_levels(o, so, out_stems);
                 if !external {
                     // The outgoing track leaves on its stems; its volume stays up (it's at 0 at the end).
-                    self.mix_set(&vol(i), smooth(p / 0.5));
+                    self.mix_set(&vol(i), open);
                     // The EQ smooths the stem swaps: the new highs rise over the first half; the
                     // old highs roll off while its drums leave.
-                    self.mix_set(&high(i), in_high * smooth(p / 0.5));
+                    self.mix_set(&high(i), in_high * smooth((p - 0.05) / 0.3));
                     self.mix_set(&high(o), out_high * (1.0 - smooth((p - 0.5) / 0.25)));
                 }
             }
@@ -543,7 +564,8 @@ mod tests {
     #[test]
     fn stems_blend_swaps_bass_then_drums_then_the_rest() {
         let (i, o) = stems_at(0.0, true, false);
-        assert_eq!((i, o), ([1.0, 0.0, 0.0, 1.0], [1.0; 4]), "start: incoming drums and other only");
+        assert_eq!((i, o), ([0.0, 0.0, 0.0, 1.0], [1.0; 4]), "start: incoming melody (other) only");
+        assert_eq!(stems_at(0.35, true, false).0[0], 1.0, "then its drums");
         let (i, o) = stems_at(0.5, true, false);
         assert_eq!((i[1], o[1]), (1.0, 0.0), "midpoint: the basses swap");
         assert_eq!(o[0], 1.0);
