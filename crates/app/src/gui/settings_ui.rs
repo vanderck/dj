@@ -166,9 +166,14 @@ fn settings(ui: &mut Ui, core: &mut Core, st: &mut UiState) {
         ui.selectable_value(&mut core.settings.deck_count, 2, "2");
         ui.selectable_value(&mut core.settings.deck_count, 4, "4");
     });
-    egui::ComboBox::from_label("Default tempo range").selected_text(core.settings.tempo_range.label()).show_ui(ui, |ui| {
-        for r in [TempoRange::Pct6, TempoRange::Pct10, TempoRange::Pct16, TempoRange::Pct50, TempoRange::Semitones12] {
-            ui.selectable_value(&mut core.settings.tempo_range, r, r.label());
+    // Applies to every deck now (each deck's menu can still change its own).
+    egui::ComboBox::from_label("Tempo range (all decks)").selected_text(core.settings.tempo_range.label()).show_ui(ui, |ui| {
+        for (i, r) in TempoRange::ALL.into_iter().enumerate() {
+            if ui.selectable_value(&mut core.settings.tempo_range, r, r.label()).clicked() {
+                for d in 0..4 {
+                    core.route(&format!("Deck/{}/TempoRange", d + 1), &[rosc::OscType::Int(i as i32)]);
+                }
+            }
         }
     });
     let steps: [(f32, &str); 6] = [(0.0, "Continuous"), (0.01, "0.01 %"), (0.05, "0.05 %"), (0.1, "0.1 %"), (0.5, "0.5 %"), (1.0, "1 %")];
@@ -205,8 +210,14 @@ fn settings(ui: &mut Ui, core: &mut Core, st: &mut UiState) {
     ui.horizontal(|ui| {
         ui.label("Tape stop");
         changed_engine |= ui.add(egui::DragValue::new(&mut core.settings.tape_stop_ms).range(0.0..=3000.0).suffix(" ms")).changed();
-        ui.label("Default loop");
-        changed_engine |= ui.add(egui::DragValue::new(&mut core.settings.default_loop_beats).range(1.0..=64.0).suffix(" beats")).changed();
+        ui.label("Loop size");
+        let resp = ui.add(egui::DragValue::new(&mut core.settings.default_loop_beats).range(1.0..=64.0).suffix(" beats"))
+            .on_hover_text("Every deck's loop size (the ÷2 / ×2 buttons change one deck's)");
+        if resp.changed() {
+            for d in 0..4 {
+                core.route(&format!("Deck/{}/LoopSize", d + 1), &[rosc::OscType::Float(core.settings.default_loop_beats as f32)]);
+            }
+        }
         ui.label("Skip");
         ui.add(egui::DragValue::new(&mut core.settings.skip_beats).range(1.0..=32.0).suffix(" beats"));
     });
@@ -234,6 +245,7 @@ fn settings(ui: &mut Ui, core: &mut Core, st: &mut UiState) {
     }
     if let Some(i) = remove {
         core.settings.library_folders.remove(i);
+        core.rescan_library(); // its tracks leave the browser
     }
     ui.horizontal(|ui| {
         ui.add(egui::TextEdit::singleline(&mut st.new_folder).hint_text("/path/to/music").desired_width(300.0));
@@ -399,12 +411,18 @@ fn settings(ui: &mut Ui, core: &mut Core, st: &mut UiState) {
     }
     if let Some(i) = remove {
         core.settings.vst3_paths.remove(i);
+        if core.settings.vst3_enabled {
+            core.rescan_vst3();
+        }
     }
     ui.horizontal(|ui| {
         ui.add(egui::TextEdit::singleline(&mut st.new_vst_path).hint_text("extra VST3 folder").desired_width(260.0));
         if ui.button("Add").clicked() && !st.new_vst_path.trim().is_empty() {
             core.settings.vst3_paths.push(st.new_vst_path.trim().into());
             st.new_vst_path.clear();
+            if core.settings.vst3_enabled {
+                core.rescan_vst3();
+            }
         }
         if ui.button("Rescan").clicked() {
             core.rescan_vst3();
@@ -420,10 +438,6 @@ fn settings(ui: &mut Ui, core: &mut Core, st: &mut UiState) {
         core.send(dj_engine::Command::SplitCue(s.audio.split_cue));
         for d in 0..4u8 {
             core.send(dj_engine::Command::Deck { deck: d, cmd: dj_engine::engine::DeckCmd::TapeStopMs(s.tape_stop_ms) });
-            core.send(dj_engine::Command::Deck {
-                deck: d,
-                cmd: dj_engine::engine::DeckCmd::DefaultLoopBeats(s.default_loop_beats),
-            });
         }
     }
     if changed_osc {

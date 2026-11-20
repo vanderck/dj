@@ -531,3 +531,26 @@ fn empty_decks_do_not_loop_and_gridless_loops_report_their_length() {
     assert!(s.loop_on && !s.has_grid, "loop {} grid {}", s.loop_on, s.has_grid);
     assert!((s.loop_beats - 4.0).abs() < 1e-9, "{}", s.loop_beats);
 }
+
+#[test]
+fn a_playing_deck_takes_the_clock_when_nobody_has_it() {
+    let (mut e, mut c) = setup();
+    send(&mut c, Command::GlobalQuantize(None));
+    send(&mut c, Command::Load { deck: 0, track: click_track(1, 126.0, 60.0, 48000), start_at_first_cue: false });
+    deck(&mut c, 0, DeckCmd::Play);
+    run(&mut e, 10);
+    assert_eq!(e.snapshot().clock.owner, ClockOwner::Deck(0));
+    // The master is ejected while nothing else plays: no deck can have the clock.
+    send(&mut c, Command::Eject { deck: 0 });
+    run(&mut e, 4);
+    assert_eq!(e.snapshot().clock.owner, ClockOwner::Header);
+    // The next deck that plays becomes master, at its own tempo (not synced to a hidden one).
+    send(&mut c, Command::Load { deck: 1, track: click_track(2, 122.0, 60.0, 48000), start_at_first_cue: false });
+    deck(&mut c, 1, DeckCmd::Sync(false));
+    deck(&mut c, 1, DeckCmd::Play);
+    run(&mut e, 10);
+    let s = e.snapshot();
+    assert_eq!(s.clock.owner, ClockOwner::Deck(1));
+    assert!((s.clock.bpm - 122.0).abs() < 0.01, "{}", s.clock.bpm);
+    assert!((s.decks[1].bpm - 122.0).abs() < 0.01, "kept its tempo: {}", s.decks[1].bpm);
+}

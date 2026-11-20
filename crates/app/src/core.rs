@@ -135,6 +135,18 @@ pub fn stem_switch(name: &str) -> Option<usize> {
     }
 }
 
+/// A tempo fader position (0..1) snapped to whole steps of `step_pct` percent (Settings → Tempo
+/// fader steps; 0 = continuous), for the on-screen fader and controllers alike.
+pub fn snap_tempo(v: f32, range: dj_engine::deck::TempoRange, step_pct: f32) -> f32 {
+    if step_pct <= 0.0 {
+        return v;
+    }
+    let fader = (v as f64 * 2.0 - 1.0).clamp(-1.0, 1.0);
+    let pct = (range.speed(fader) - 1.0) * 100.0;
+    let snapped = (pct / step_pct as f64).round() * step_pct as f64;
+    ((range.fader_for_speed(1.0 + snapped / 100.0).clamp(-1.0, 1.0) + 1.0) / 2.0) as f32
+}
+
 /// Deck stem levels (`/deck/N/stemvocalslevel` etc., 0..1) -> stem index.
 pub fn stem_level(name: &str) -> Option<usize> {
     stem_switch(name.strip_suffix("level")?)
@@ -379,7 +391,10 @@ impl Core {
         self.send(Command::ExtStages(self.ext_stages()));
         self.send(Command::SplitCue(s.audio.split_cue));
         let ses = self.session.clone();
-        self.send(Command::Wallclock(ses.wallclock));
+        // Wallclock (a fixed tempo nobody can see) has no on-screen control any more: dj always
+        // picks a playing deck as master, so a session saved with it on starts with it off.
+        self.session.wallclock = false;
+        self.send(Command::Wallclock(false));
         self.send(Command::SetBpm(ses.bpm));
         self.send(Command::GlobalQuantize(ses.global_quantize()));
         self.apply_master();
@@ -1445,8 +1460,7 @@ impl Core {
             ["temposlider"] => f.map(|v| DeckCmd::Tempo(v.clamp(-1.0, 1.0) as f64)),
             ["tempo"] => f.map(|v| DeckCmd::Tempo((v.clamp(0.0, 1.0) * 2.0 - 1.0) as f64)),
             ["temporange"] => ints.first().map(|i| {
-                let r = [TempoRange::Pct6, TempoRange::Pct10, TempoRange::Pct16, TempoRange::Pct50, TempoRange::Semitones12]
-                    [(*i).clamp(0, 4) as usize];
+                let r = TempoRange::ALL[(*i).clamp(0, 4) as usize];
                 self.session.decks[d].tempo_range = r;
                 DeckCmd::TempoRange(r)
             }),
@@ -1944,6 +1958,18 @@ impl Core {
                 }
                 (MapMode::Absolute, Kind::Value) => {
                     let lower = m.address.to_ascii_lowercase();
+                    // Tempo from a controller moves in the same steps as on screen.
+                    let tempo_deck = lower
+                        .trim_matches('/')
+                        .strip_prefix("deck/")
+                        .and_then(|r| r.split_once('/'))
+                        .filter(|(_, c)| *c == "tempo" || *c == "temposlider")
+                        .and_then(|(n, _)| n.parse::<usize>().ok()?.checked_sub(1))
+                        .filter(|d| *d < NUM_DECKS);
+                    let v = match tempo_deck {
+                        Some(d) => snap_tempo(v, self.snap.decks[d].tempo_range, self.settings.tempo_step_pct),
+                        None => v,
+                    };
                     let scaled = if lower.ends_with("temposlider") || lower.ends_with("phasebend") {
                         v * 2.0 - 1.0
                     } else if lower.ends_with("/pitch") {
@@ -2695,6 +2721,32 @@ mod tests {
         assert!(!c.pickup_allows("Deck/2/TempoSlider", 0.9));
         assert!(c.pickup_allows("Deck/2/TempoSlider", 0.4), "crossed 0 %");
         assert!(c.pickup_allows("Deck/2/TempoSlider", 0.9), "then free");
+    }
+
+    #[test]
+    fn controller_tempo_moves_in_the_tempo_step_setting() {
+        let (mut e, mut c, _config) = core();
+        c.load_track(0, &kick_wav("steps.wav", 20));
+        let deadline = Instant::now() + std::time::Duration::from_secs(60);
+        while !(c.snap.decks[0].loaded && c.decks[0].info.is_some()) {
+            assert!(Instant::now() < deadline, "track never loaded");
+            pump(&mut e, &mut c);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        c.route("Deck/1/TempoRange", &[OscType::Int(1)]); // ±10 %
+        c.settings.tempo_step_pct = 1.0;
+        c.profile.mappings = vec![MidiMapping {
+            source: MidiSource { kind: MidiKind::Cc, channel: 0, number: 7 },
+            address: "Deck/1/TempoSlider".into(),
+            mode: MapMode::Absolute,
+            invert: false,
+            feedback: false,
+        }];
+        // CC 70 of 127 is +1.0236 of ±10 % = +1.02 %: snapped to +1 %.
+        c.handle_midi(&[0xb0, 7, 70]);
+        pump(&mut e, &mut c);
+        let pct = (c.snap.decks[0].speed / c.snap.decks[0].speed_mult - 1.0) * 100.0;
+        assert!((pct - 1.0).abs() < 1e-6, "{pct}");
     }
 
     #[test]

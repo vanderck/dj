@@ -451,6 +451,20 @@ impl Engine {
             }
             return;
         }
+        if self.owner == ClockOwner::Header {
+            // dj picks the master: the first playing deck with a grid (synced ones first) takes
+            // the clock at its own tempo, so nothing follows a tempo nobody set.
+            let pick = (0..NUM_DECKS)
+                .filter(|&i| self.mode[i] == DeckMode::Track && self.decks[i].is_playing() && self.decks[i].grid().is_some())
+                .min_by_key(|&i| !self.decks[i].sync());
+            if let Some(i) = pick {
+                if let Some(b) = self.decks[i].effective_bpm() {
+                    self.header_bpm = b - self.header_bend;
+                }
+                self.set_owner(ClockOwner::Deck(i as u8));
+            }
+            return;
+        }
         if let ClockOwner::Deck(d) = self.owner {
             let deck = &self.decks[d as usize];
             let ok = deck.is_loaded() && deck.grid().is_some() && self.mode[d as usize] == DeckMode::Track;

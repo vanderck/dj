@@ -10,7 +10,7 @@ use dj_engine::mixer::Output;
 
 use super::skin::*;
 use super::{act_f, act_i, learnable, UiState};
-use crate::core::Core;
+use crate::core::{snap_tempo, Core};
 use crate::model::{MasterModel, QUANTIZE_VALUES};
 
 fn db_text(g: f32) -> String {
@@ -148,14 +148,6 @@ fn menu(ui: &mut Ui, core: &mut Core, st: &mut UiState) {
     let met = core.session.master.metronome;
     if ui.selectable_label(met, "Metronome").clicked() {
         act_i(core, "Header/Metronome", !met as i32);
-    }
-    let header_owns = core.snap.clock.owner == ClockOwner::Header;
-    if ui.selectable_label(header_owns, "Header owns the clock").on_hover_text("Click to hand the clock to a playing synced deck / take it back").clicked() {
-        act_i(core, "Header/Master", 1);
-    }
-    let wc = core.session.wallclock;
-    if ui.selectable_label(wc, "Wallclock (tempo stays put)").clicked() {
-        act_i(core, "Header/Wallclock", !wc as i32);
     }
     ui.separator();
     ui.horizontal(|ui| {
@@ -432,16 +424,6 @@ pub fn fader_function(addr: &str) -> Option<(FaderMode, usize)> {
 
 /// Tempo fader position (0..1, centre = 0 %) snapped so the speed change is a multiple of
 /// `step_pct` percent (0 = no snapping).
-pub fn snap_tempo(v: f32, range: dj_engine::deck::TempoRange, step_pct: f32) -> f32 {
-    if step_pct <= 0.0 {
-        return v;
-    }
-    let fader = (v as f64 * 2.0 - 1.0).clamp(-1.0, 1.0);
-    let pct = (range.speed(fader) - 1.0) * 100.0;
-    let snapped = (pct / step_pct as f64).round() * step_pct as f64;
-    ((range.fader_for_speed(1.0 + snapped / 100.0).clamp(-1.0, 1.0) + 1.0) / 2.0) as f32
-}
-
 const FADER_POPUP_W: f32 = 330.0;
 
 /// The fader popup of channel `ch`: what its fader controls, and switches that turn whole groups
@@ -793,7 +775,8 @@ fn master_strip(ui: &mut Ui, core: &mut Core, rect: Rect) {
 
 #[cfg(test)]
 mod tests {
-    use super::{fader_function, snap_tempo, FaderMode};
+    use super::{fader_function, FaderMode};
+    use crate::core::snap_tempo;
 
     #[test]
     fn midi_addresses_map_to_fader_functions() {
