@@ -276,7 +276,7 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
     let pgap = if dense { 6.0 } else { gap };
     let pw = (w - (cols - 1) as f32 * pgap) / cols as f32;
     // Narrow pads show just the number (the pad colour says the rest).
-    let pad_labels = pw >= 80.0;
+    let pad_labels = pw >= 56.0;
     let pad_font = if dense { 13.0 } else { 16.0 };
     let slot = |k: usize| Rect::from_min_size(Pos2::new(r.left() + (k % cols) as f32 * (pw + pgap), y + (k / cols) as f32 * (ph + 8.0)), Vec2::new(pw, ph));
     let rad = CornerRadius::same(8);
@@ -305,12 +305,20 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
             let c = CUE[i];
             p.rect_filled(rr, rad, if resp.hovered() { dim(c, 0.42) } else { dim(c, 0.32) });
             p.rect_stroke(rr, rad, Stroke::new(1.5, dim(c, 0.85)), egui::StrokeKind::Inside);
-            let label = if !name.is_empty() { name } else if v.hot_cue_is_loop[i] { "Loop".into() } else { "Cue".into() };
-            if pad_labels {
-                p.text(Pos2::new(rr.left() + 14.0, rr.center().y), Align2::LEFT_CENTER, format!("{}", i + 1), bold(pad_font), TEXT);
-                p.text(Pos2::new(rr.left() + 32.0, rr.center().y), Align2::LEFT_CENTER, label, sans(pad_font - 1.0), TEXT);
+            // The cue's name (pads are in order, so no number needed); a cue without a name shows
+            // its number. The name fits inside the pad: a smaller font first, then shortened.
+            if pad_labels && !name.is_empty() {
+                let room = rr.width() - 14.0;
+                let font = [pad_font - 1.0, pad_font - 3.0, pad_font - 4.5]
+                    .into_iter()
+                    .map(sans)
+                    .find(|f| ui.painter().layout_no_wrap(name.clone(), f.clone(), TEXT).size().x <= room)
+                    .unwrap_or_else(|| sans(pad_font - 4.5));
+                let label = fit_text(ui, &name, font.clone(), room);
+                ui.painter().text(rr.center(), Align2::CENTER_CENTER, label, font, TEXT);
             } else {
-                p.text(rr.center(), Align2::CENTER_CENTER, format!("{}", i + 1), bold(pad_font), TEXT);
+                let label = if v.hot_cue_is_loop[i] { format!("{} Loop", i + 1) } else { format!("{}", i + 1) };
+                p.text(rr.center(), Align2::CENTER_CENTER, label, bold(pad_font), TEXT);
             }
         } else {
             // "+": set hot cue `i` (the first free one) here.

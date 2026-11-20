@@ -172,7 +172,8 @@ One screen, laid out for 1600×1000 points and fitted to the window:
     clash), BPM (`≈` = detected; **MASTER** on the deck that sets the tempo,
     chosen automatically), remaining time; Play/Pause, Sync, and **Mix** when
     the deck is waiting to be mixed in; cue pads: the main cue first, then the
-    hot cues that are set (up to 9 pads); loop In/Out/Exit, ÷2, loop size, ×2, « ».
+    hot cues that are set, showing their names (up to 9 pads); loop In/Out/Exit,
+    ÷2, loop size, ×2, « ».
     A set hot cue pad loops from its cue at the loop size, or jumps to it
     (Settings → Hot cue pads); controller pads do the same.
   - Compact: Play/Pause, Cue, Sync, Swap (and Mix).
@@ -183,7 +184,8 @@ One screen, laid out for 1600×1000 points and fitted to the window:
   fader shows one function, named on the chip above it: Volume, High, Mid,
   Low, Filter, Drums, Bass, Vocals, Other or Tempo. Tap the chip for the
   fader popup: pick the function, or turn a whole group back to neutral (EQ,
-  Stems, Tempo reset, Volume, Filter; ↺ restores). Moving a mapped MIDI
+  Stems, Tempo reset, Volume, Filter; ↺ restores). On a synced deck, Tempo
+  reset resets the master's tempo, which the deck follows. Moving a mapped MIDI
   control switches that channel's fader to show it. Controls dj moves itself
   (these buttons, Mix) are picked up: a controller fader takes over again once
   moved to the new value, so nothing jumps. Muting is volume off: the
@@ -210,9 +212,10 @@ Fonts: Inter and JetBrains Mono, bundled under the SIL Open Font License (see
   (momentary, cue-to-next-cue loops), loops (in/out, halve/double, move,
   free-loop), slip mode, slip loops (with dotted/triplet), beat/bar skip,
   reverse, backspin, tape stop, half/double speed, phase nudge.
-- **Mix**: tap a cue on a deck whose volume is down while another deck plays:
-  it loops from the cue, and a **Mix** button appears next to Sync. Mix syncs
-  it and asks *how* and *when*.
+- **Mix**: while another deck plays, a deck that is paused (at its cue) or
+  looping at a cue with its volume down gets a **Mix** button next to Sync.
+  Mix syncs it (a paused deck is first turned down, looped where it stands and
+  started in time) and asks *how* and *when*.
   - **How** (remembered): **Auto** (default) assesses the two tracks: *Drop*
     when their keys clash or their tempos are far apart (no long overlap), or
     for a Best mix when the new track has a drop cue; else *Stems* when both

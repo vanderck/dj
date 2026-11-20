@@ -148,7 +148,9 @@ impl Core {
             return None;
         }
         let v = &self.snap.decks[d];
-        if !(v.loaded && v.playing && v.loop_on && v.has_grid) {
+        // Waiting: paused (Mix loops it where it stands, at its cue), or looping at a cue.
+        let waiting = !v.playing && !v.play_pending || (v.playing && v.loop_on);
+        if !(v.loaded && v.has_grid && waiting) {
             return None;
         }
         if self.external_routing() {
@@ -158,8 +160,9 @@ impl Core {
                 _ => (0..self.deck_count()).find(|&o| playing(o)),
             };
         }
+        // A looping deck must be silent (else you're mixing it yourself); a paused one is made so.
         let p = &self.session.channels[d].params;
-        if p.volume > 0.02 && !p.mute {
+        if v.playing && p.volume > 0.02 && !p.mute {
             return None;
         }
         let audible = |o: usize| {
@@ -239,10 +242,12 @@ impl Core {
     pub fn plan_now(&self, incoming: usize, outgoing: usize, style: MixStyle) -> MixPlan {
         let o = &self.snap.decks[outgoing];
         let (how, why_how) = self.resolve_style(style, incoming, outgoing, MixWhen::Now);
-        let next_bar = ((o.beat + 0.5) / 4.0).ceil() * 4.0;
+        // A paused deck needs a moment to start in sync: one bar more.
+        let lead = if self.snap.decks[incoming].playing { 0.5 } else { 4.5 };
+        let next_bar = ((o.beat + lead) / 4.0).ceil() * 4.0;
         if how == MixHow::Drop {
             // On the next 8-bar phrase start when it's at most 4 bars away, else the next bar.
-            let phrase = ((o.beat + 0.5) / 32.0).ceil() * 32.0;
+            let phrase = ((o.beat + lead) / 32.0).ceil() * 32.0;
             let (start_beat, reason) = if phrase - o.beat <= 16.0 { (phrase, "on the phrase") } else { (next_bar, "on the next bar") };
             return MixPlan { incoming, outgoing, mode: MixWhen::Now, how, start_beat, length_beats: DROP_BEATS, reason: reason.into(), why_how };
         }
@@ -318,6 +323,14 @@ impl Core {
         }
         self.deck_cmd(i, DeckCmd::Sync(true));
         let external = self.external_routing();
+        // A paused deck: silent (dj's mixer), a loop where it stands (its cue), and play in sync.
+        if !self.snap.decks[i].playing {
+            if !external {
+                self.set_picked_up(&format!("Mixer/CH{}/Volume", i + 1), 0.0);
+            }
+            self.deck_cmd(i, DeckCmd::LoopBeats(self.loop_size[i]));
+            self.deck_cmd(i, DeckCmd::Play);
+        }
         // Muted counts as silent: make it volume-down instead, so the fade-in is heard.
         if !external && self.session.channels[i].params.mute {
             self.set_channel(i, |p| {
@@ -408,12 +421,17 @@ impl Core {
         let (vi, vo) = (self.snap.decks[i], self.snap.decks[o]);
         // Another track loaded on either deck, or a deck stopped or ejected: give up (and put the
         // EQ and stems back).
-        if (vi.track_id, vo.track_id) != m.tracks || !vi.loaded || !vo.loaded || !vo.playing || !vi.playing {
+        if (vi.track_id, vo.track_id) != m.tracks || !vi.loaded || !vo.loaded || !vo.playing || !(vi.playing || vi.play_pending) {
             self.cancel_mix();
             return;
         }
         let beat = vo.beat;
         // Half a beat ahead: the incoming deck leaves its loop on the next beat, which is `start`.
+        // If it hasn't started playing yet (a paused deck waits for the beat), a bar later.
+        if !m.released && beat >= start - 0.5 && !vi.playing {
+            self.automix.as_mut().unwrap().plan.start_beat += 4.0;
+            return;
+        }
         if !m.released && beat >= start - 0.5 {
             // A drop starts from the incoming track's drop cue.
             let to_cue = if m.plan.how == MixHow::Drop { self.drop_cue(i) } else { None };

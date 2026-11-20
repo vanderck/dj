@@ -540,7 +540,16 @@ impl Group {
                 ["Drums", "Bass", "Vocals", "Other"].iter().enumerate().map(|(i, s)| (format!("Deck/{n}/Stem{s}Level"), v.stem_gains[i])).collect(),
                 1.0,
             ),
-            Group::Tempo => (vec![(format!("Deck/{n}/Tempo"), (v.tempo_fader as f32 + 1.0) / 2.0)], 0.5),
+            // A synced deck follows the master's tempo: reset that (the whole mix goes back to the
+            // master track's own tempo).
+            Group::Tempo => {
+                let t = match core.snap.clock.owner {
+                    ClockOwner::Deck(m) if v.sync && m as usize != ch => m as usize,
+                    _ => ch,
+                };
+                let tv = &core.snap.decks[t];
+                (vec![(format!("Deck/{}/Tempo", t + 1), (tv.tempo_fader as f32 + 1.0) / 2.0)], 0.5)
+            }
             Group::Volume => (vec![(format!("Mixer/CH{n}/Volume"), if p.mute { 0.0 } else { p.volume })], 0.0),
             Group::Filter => (vec![(format!("Mixer/CH{n}/Filter1"), p.cutoff)], 0.5),
         }
