@@ -2977,26 +2977,25 @@ mod tests {
         let plan = c.plan_now(1, 0, MixStyle::Stems);
         assert_eq!(plan.how, MixHow::Stems);
 
+        // The plan comes from both tracks' stems; the moves follow it.
+        let blend = plan.blend.clone().expect("both decks have stems: a planned blend");
+        let ps = blend.swap_fraction();
         c.start_mix(plan);
         let (mut before, mut after) = (false, false);
         run_mix(&mut e, &mut c, |c, p| {
             let (gi, go) = (c.snap.decks[1].stem_gains, c.snap.decks[0].stem_gains);
-            if (0.05..0.45).contains(&p) {
-                assert_eq!((gi[1], gi[2], go[1]), (0.0, 0.0, 1.0), "first half: new bass and vocals out, old bass in");
+            assert_eq!(gi[2], 0.0, "Now: the new vocals stay out");
+            if (0.05..ps - 0.03).contains(&p) {
+                assert_eq!((gi[1], go[1]), (0.0, 1.0), "before the swap: new bass out, old bass in");
                 if p < 0.3 {
                     assert!(c.session.channels[1].params.eq[2] < 0.5, "new highs still rising");
                 }
-                if p < 0.12 {
-                    assert_eq!(gi[0], 0.0, "new drums not in yet: its melody first");
-                }
                 before = true;
             }
-            if (0.55..0.7).contains(&p) {
-                assert_eq!((gi[1], go[1]), (1.0, 0.0), "the basses swapped");
-                assert!(go[0] < 1.0 && go[2] == 1.0, "old drums going, its vocals still there");
+            if (ps + 0.03..0.75).contains(&p) {
+                assert_eq!((gi[1], go[1]), (1.0, 0.0), "the basses swapped where the plan says");
                 assert_eq!(c.session.channels[0].params.volume, 0.9, "the stems do the fading, not the volume");
                 assert_eq!(c.session.channels[1].params.eq[2], 0.5, "new highs in");
-                assert!(c.session.channels[0].params.eq[2] < 0.5, "old highs rolling off");
                 after = true;
             }
         });
