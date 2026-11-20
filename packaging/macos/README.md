@@ -1,13 +1,13 @@
 # macOS packaging
 
 ```bash
-cargo xtask package-macos --universal
+cargo xtask package-macos
 ```
 
-builds dj for Apple Silicon and Intel, merges them into one binary and writes:
+builds dj for Apple Silicon (also when run on an Intel Mac) and writes:
 
 - `target/package/dj.app`
-- `target/package/dj-<version>-macos-universal.dmg` (drag-to-Applications disk image)
+- `target/package/dj-<version>-macos-arm64.dmg` (drag-to-Applications disk image)
 
 Run `cargo xtask help` for all options. Useful ones:
 
@@ -19,11 +19,8 @@ Run `cargo xtask help` for all options. Useful ones:
 | `--notarize` | Notarize and staple the `.dmg`. |
 | `--no-dmg` | Only build the `.app`. |
 
-Without `--universal` it builds for the Mac you are on only, which is faster.
-
-**Intel Macs:** ONNX Runtime has no prebuilt static library for `x86_64-apple-darwin`, so the
-Intel build (and the Intel half of `--universal`) is compiled without model support and separates
-stems with the low-quality placeholder. Models run on Apple Silicon.
+**Intel Macs aren't supported**: ONNX Runtime has no prebuilt library for them, so stem
+separation (Demucs) wouldn't work.
 
 The minimum macOS version is 13.4: the statically linked ONNX Runtime used for stem separation is
 built for it. The build sets `MACOSX_DEPLOYMENT_TARGET` and `LSMinimumSystemVersion` to match.
@@ -43,7 +40,7 @@ built for it. The build sets `MACOSX_DEPLOYMENT_TARGET` and `LSMinimumSystemVers
   then build with:
 
   ```bash
-  NOTARY_KEYCHAIN_PROFILE=dj cargo xtask package-macos --universal --sign "Developer ID Application: Your Name (TEAMID)" --notarize
+  NOTARY_KEYCHAIN_PROFILE=dj cargo xtask package-macos --sign "Developer ID Application: Your Name (TEAMID)" --notarize
   ```
 
 `entitlements.plist` disables library validation: dj loads third-party VST3 plugins, which
@@ -51,7 +48,7 @@ the hardened runtime would otherwise refuse because they are signed by other dev
 
 ## CI
 
-`.github/workflows/macos.yml` runs the tests and builds the universal `.dmg` on every push. The
+`.github/workflows/macos.yml` runs the tests and builds the Apple Silicon `.dmg` on every push. The
 `.dmg` is attached to the workflow run as an artifact, and to a GitHub release for `v*` tags.
 
 Optional repository secrets for signed, notarized builds:

@@ -23,10 +23,9 @@ const DEFAULT_ICON: &str = "packaging/macos/AppIcon.icns";
 const USAGE: &str = "\
 cargo xtask package-macos [options]
 
-Builds dj (release) and packages target/package/dj.app and a .dmg.
+Builds dj (release, Apple Silicon) and packages target/package/dj.app and a .dmg.
 
 Options:
-  --universal            Build for Apple Silicon and Intel and merge them (lipo)
   --model <file.onnx>    Bundle a stem-separation model (the fallback when none is configured)
   --icon <file>          App icon: .icns, or a 1024x1024 .png (converted with sips/iconutil).
                          Default: packaging/macos/AppIcon.icns
@@ -66,7 +65,6 @@ fn main() -> ExitCode {
 
 #[derive(Debug, Default)]
 struct Options {
-    universal: bool,
     model: Option<PathBuf>,
     icon: Option<PathBuf>,
     sign: Option<String>,
@@ -101,7 +99,7 @@ impl Options {
                     .ok_or_else(|| format!("{name} needs a value"))
             };
             match a.as_str() {
-                "--universal" => o.universal = true,
+                "--universal" => return Err("Intel Macs aren't supported any more: dj is built for Apple Silicon only".into()),
                 "--model" => o.model = Some(value(a)?.into()),
                 "--icon" => o.icon = Some(value(a)?.into()),
                 "--sign" => o.sign = Some(value(a)?),
@@ -198,14 +196,9 @@ fn package_macos(o: &Options) -> Result<(), String> {
         step("skipping .dmg (needs macOS)");
         return Ok(());
     }
-    let arch = if o.universal {
-        "universal"
-    } else {
-        env::consts::ARCH
-    };
     let dmg = o
         .out
-        .join(format!("{APP_NAME}-{}-macos-{arch}.dmg", version()));
+        .join(format!("{APP_NAME}-{}-macos-arm64.dmg", version()));
     make_dmg(&app, &dmg, o)?;
     if o.notarize {
         notarize(&dmg)?;
@@ -230,79 +223,27 @@ fn run(cmd: &mut Command) -> Result<(), String> {
     }
 }
 
-/// `cargo build --release` for one or both architectures; returns the (merged) binary.
+/// Apple Silicon only (Intel Macs aren't supported: there is no prebuilt ONNX Runtime for them).
+const TARGET: &str = "aarch64-apple-darwin";
+
+/// `cargo build --release` for Apple Silicon (also from an Intel Mac); returns the binary.
 fn build(o: &Options) -> Result<PathBuf, String> {
     let root = workspace_root();
     let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".into());
-    let targets: Vec<Option<&str>> = if o.universal {
-        vec![Some("aarch64-apple-darwin"), Some("x86_64-apple-darwin")]
-    } else {
-        vec![None]
-    };
-
-    let mut outputs = Vec::new();
-    for target in &targets {
-        step(&format!(
-            "building {CARGO_BIN} ({})",
-            target.unwrap_or("host")
-        ));
-        let mut cmd = Command::new(&cargo);
-        cmd.current_dir(&root)
-            .args(["build", "--release", "-p", CARGO_BIN]);
-        if let Some(t) = target {
-            cmd.args(["--target", t]);
-        }
-        let (no_default, features) = features_for(*target, o);
-        if no_default {
-            cmd.arg("--no-default-features");
-        }
-        if !features.is_empty() {
-            cmd.args(["--features", &features.join(",")]);
-        }
-        // Must match LSMinimumSystemVersion; also what the prebuilt ONNX Runtime needs.
-        cmd.env("MACOSX_DEPLOYMENT_TARGET", &o.min_macos);
-        run(&mut cmd)?;
-        let dir = match target {
-            Some(t) => root.join("target").join(t).join("release"),
-            None => root.join("target/release"),
-        };
-        outputs.push(dir.join(CARGO_BIN));
+    step(&format!("building {CARGO_BIN} ({TARGET})"));
+    let mut cmd = Command::new(&cargo);
+    cmd.current_dir(&root)
+        .args(["build", "--release", "-p", CARGO_BIN, "--target", TARGET]);
+    if o.no_default_features {
+        cmd.arg("--no-default-features");
     }
-
-    if outputs.len() == 1 {
-        return Ok(outputs.remove(0));
+    if !o.features.is_empty() {
+        cmd.args(["--features", &o.features.join(",")]);
     }
-    step("merging architectures (lipo)");
-    let merged = o.out.join(format!("{CARGO_BIN}-universal"));
-    run(Command::new("lipo")
-        .arg("-create")
-        .arg("-output")
-        .arg(&merged)
-        .args(&outputs))?;
-    run(Command::new("lipo").arg("-info").arg(&merged))?;
-    Ok(merged)
-}
-
-/// The app's default `stems-onnx` feature links a prebuilt ONNX Runtime, which exists for Apple
-/// Silicon but not for Intel Macs. The Intel slice of a universal build is therefore built without
-/// it: stem separation there uses the placeholder separator.
-const NO_PREBUILT_ORT: &[&str] = &["x86_64-apple-darwin"];
-
-fn features_for(target: Option<&str>, o: &Options) -> (bool, Vec<String>) {
-    let mut features = o.features.clone();
-    let intel = target.is_some_and(|t| NO_PREBUILT_ORT.contains(&t))
-        || (target.is_none() && on_macos() && env::consts::ARCH == "x86_64");
-    if !intel {
-        return (o.no_default_features, features);
-    }
-    features.retain(|f| f != "stems-onnx");
-    if !o.no_default_features || o.features.iter().any(|f| f == "stems-onnx") {
-        eprintln!(
-            "warning: no prebuilt ONNX Runtime for Intel Macs; the x86_64 build uses the placeholder \
-             stem separator (models run on Apple Silicon only)"
-        );
-    }
-    (true, features)
+    // Must match LSMinimumSystemVersion; also what the prebuilt ONNX Runtime needs.
+    cmd.env("MACOSX_DEPLOYMENT_TARGET", &o.min_macos);
+    run(&mut cmd)?;
+    Ok(root.join("target").join(TARGET).join("release").join(CARGO_BIN))
 }
 
 /// Lay out `dj.app` (works on any OS).
@@ -585,17 +526,6 @@ mod tests {
     }
 
     #[test]
-    fn intel_slice_drops_the_static_onnx_runtime() {
-        let o = Options::parse(&args(&["--features", "stems-onnx,extra"])).unwrap();
-        let (no_default, f) = features_for(Some("x86_64-apple-darwin"), &o);
-        assert!(no_default);
-        assert_eq!(f, vec!["extra"]);
-        let (no_default, f) = features_for(Some("aarch64-apple-darwin"), &o);
-        assert!(!no_default);
-        assert_eq!(f, vec!["stems-onnx", "extra"]);
-    }
-
-    #[test]
     fn dmg_size_has_headroom() {
         assert_eq!(dmg_size_mb(0), 32);
         let mb = 1_048_576;
@@ -634,7 +564,6 @@ mod tests {
     #[test]
     fn options_parse_and_validate() {
         let o = Options::parse(&args(&[
-            "--universal",
             "--no-dmg",
             "--features",
             "a, b",
@@ -642,7 +571,8 @@ mod tests {
             "14.0",
         ]))
         .unwrap();
-        assert!(o.universal && !o.dmg);
+        assert!(!o.dmg);
+        assert!(Options::parse(&args(&["--universal"])).is_err(), "no Intel builds");
         assert_eq!(o.features, vec!["a", "b"]);
         assert_eq!(o.min_macos, "14.0");
         assert!(Options::parse(&args(&["--bogus"])).is_err());

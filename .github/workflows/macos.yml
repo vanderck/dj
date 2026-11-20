@@ -41,7 +41,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
+          targets: aarch64-apple-darwin
       - uses: Swatinem/rust-cache@v2
         with:
           key: package
@@ -69,7 +69,7 @@ jobs:
 
       - name: Build and package
         run: |
-          ARGS=(--universal)
+          ARGS=()
           [ -f "$RUNNER_TEMP/stems-model.onnx" ] && ARGS+=(--model "$RUNNER_TEMP/stems-model.onnx")
           [ -n "$MACOS_SIGN_IDENTITY" ] && [ -n "$APPLE_ID" ] && ARGS+=(--notarize)
           cargo xtask package-macos "${ARGS[@]}"
@@ -81,7 +81,7 @@ jobs:
           test -s "$APP/Contents/Resources/AppIcon.icns" && /usr/libexec/PlistBuddy -c "Print :CFBundleIconFile" "$APP/Contents/Info.plist"
           test -s "$APP/Contents/Resources/stems-model.onnx" && echo "bundled model: $(du -h "$APP/Contents/Resources/stems-model.onnx" | cut -f1)"
           codesign --verify --strict --verbose=2 "$APP"
-          lipo -info "$APP/Contents/MacOS/dj" | tee /dev/stderr | grep -q "x86_64 arm64"
+          lipo -archs "$APP/Contents/MacOS/dj" | tee /dev/stderr | grep -qx "arm64"
           "$APP/Contents/MacOS/dj" --help > /dev/null
           hdiutil verify target/package/*.dmg
 
