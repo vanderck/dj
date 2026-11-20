@@ -834,6 +834,9 @@ fn mix_button(ui: &mut Ui, core: &mut Core, d: usize, rect: Rect, font: egui::Fo
             ui.label(egui::RichText::new(format!("MIX INTO DECK {}", out + 1)).font(mono(11.0)).color(TEXT_DIM));
             let now = core.plan_now(d, out);
             let best = core.plan_best(d, out);
+            if core.external_routing() {
+                ui.label(egui::RichText::new("You fade on your mixer: the old deck loops when the mix time is up.").font(sans(11.0)).color(TEXT_DIM));
+            }
             let bars_away = |p: &crate::core::MixPlan| ((p.start_beat - core.snap.decks[out].beat) / 4.0).ceil().max(0.0);
             let options = [
                 ("Now", format!("{:.0} bars from the next bar · vocals out", now.length_beats / 4.0), now),

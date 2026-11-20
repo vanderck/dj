@@ -7,6 +7,10 @@
 //! preferring the outgoing track's outro or break). With less than a minute of the outgoing
 //! track left, it always mixes now.
 //!
+//! With an external mixer dj can't see or move the faders: Mix syncs the incoming deck and drops
+//! it out of its loop on the start beat, and at the end of the mix time drops the outgoing deck
+//! into a loop, so both stay in time while you fade on the mixer.
+//!
 //! The mix runs on the outgoing track's beats: the incoming track starts from its cue on the
 //! first beat, its volume comes up over the first half, the basses swap at the midpoint, the
 //! outgoing volume fades over the second half, then the outgoing deck stops. Every control dj
@@ -52,6 +56,9 @@ pub struct AutoMix {
     out_volume: f32,
     /// The tracks on (incoming, outgoing) when the mix started.
     tracks: (u64, u64),
+    /// External mixer: dj can't see or move the faders, so it only drops the decks in and out of
+    /// loops on the beat and you fade on the mixer.
+    external: bool,
 }
 
 fn smooth(x: f64) -> f32 {
@@ -63,13 +70,26 @@ impl Core {
     /// The deck `d` could be mixed into (the playing deck it would replace), if `d` is ready:
     /// loaded, looping at a cue, silent (volume down) and synced or syncable, with another
     /// deck playing audibly. Not in external-mixer mode (the volumes are on the hardware).
+    ///
+    /// With an external mixer dj can't know the volumes: any deck looping at a cue while another
+    /// plays is a candidate, and the outgoing deck is the master (or another playing deck).
     pub fn mix_target(&self, d: usize) -> Option<usize> {
-        if self.external_routing() || self.automix.is_some() {
+        if self.automix.is_some() {
             return None;
         }
         let v = &self.snap.decks[d];
+        if !(v.loaded && v.playing && v.loop_on && v.has_grid) {
+            return None;
+        }
+        if self.external_routing() {
+            let playing = |o: usize| o != d && self.snap.decks[o].playing && self.snap.decks[o].has_grid && !self.snap.decks[o].loop_on;
+            return match self.snap.clock.owner {
+                ClockOwner::Deck(m) if playing(m as usize) => Some(m as usize),
+                _ => (0..self.deck_count()).find(|&o| playing(o)),
+            };
+        }
         let p = &self.session.channels[d].params;
-        if !(v.loaded && v.playing && v.loop_on && v.has_grid) || (p.volume > 0.02 && !p.mute) {
+        if p.volume > 0.02 && !p.mute {
             return None;
         }
         let audible = |o: usize| {
@@ -161,8 +181,9 @@ impl Core {
             self.deck_cmd(o, DeckCmd::ToggleMaster);
         }
         self.deck_cmd(i, DeckCmd::Sync(true));
+        let external = self.external_routing();
         // Muted counts as silent: make it volume-down instead, so the fade-in is heard.
-        if self.session.channels[i].params.mute {
+        if !external && self.session.channels[i].params.mute {
             self.set_channel(i, |p| {
                 p.volume = 0.0;
                 p.mute = false;
@@ -179,10 +200,13 @@ impl Core {
             in_vocals,
             out_volume: params(o).volume,
             tracks: (self.snap.decks[i].track_id, self.snap.decks[o].track_id),
+            external,
             plan,
         };
         // The incoming bass stays out until the swap; its vocals (Now) until the old track is gone.
-        self.mix_set(&format!("Mixer/CH{}/EQ/Low", i + 1), 0.0);
+        if !external {
+            self.mix_set(&format!("Mixer/CH{}/EQ/Low", i + 1), 0.0);
+        }
         if mix.in_vocals.is_some() {
             self.mix_set(&format!("Deck/{}/StemVocalsLevel", i + 1), 0.0);
         }
@@ -198,10 +222,12 @@ impl Core {
     pub fn cancel_mix(&mut self) {
         if let Some(m) = self.automix.take() {
             let (i, o) = (m.plan.incoming, m.plan.outgoing);
-            if !m.swapped {
-                self.mix_set(&format!("Mixer/CH{}/EQ/Low", i + 1), m.in_low);
+            if !m.external {
+                if !m.swapped {
+                    self.mix_set(&format!("Mixer/CH{}/EQ/Low", i + 1), m.in_low);
+                }
+                self.mix_set(&format!("Mixer/CH{}/EQ/Low", o + 1), m.out_low);
             }
-            self.mix_set(&format!("Mixer/CH{}/EQ/Low", o + 1), m.out_low);
             if let Some(v) = m.in_vocals {
                 self.mix_set(&format!("Deck/{}/StemVocalsLevel", i + 1), v);
             }
@@ -254,6 +280,21 @@ impl Core {
             return;
         }
         let p = (beat - start) / len;
+        if m.external {
+            // You fade on the mixer. When the mix time is up, the old deck drops into a loop (the
+            // deck's loop size) so it stays in time until you've faded it out.
+            if p >= 1.0 {
+                self.deck_cmd(o, DeckCmd::LoopBeats(self.loop_size[o]));
+                self.log(format!("Deck {} is in, deck {} loops until you fade it out", i + 1, o + 1));
+                let m = self.automix.as_mut().unwrap();
+                if m.in_vocals.is_some() {
+                    m.finished = Some(vi.beat);
+                } else {
+                    self.automix = None;
+                }
+            }
+            return;
+        }
         let (out_volume, in_low, out_low, swapped) = (m.out_volume, m.in_low, m.out_low, m.swapped);
         // First half: incoming up. Midpoint: swap the basses. Second half: outgoing down.
         self.mix_set(&format!("Mixer/CH{}/Volume", i + 1), smooth(p / 0.5));
