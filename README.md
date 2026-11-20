@@ -218,7 +218,9 @@ Fonts: Inter and JetBrains Mono, bundled under the SIL Open Font License (see
     decks have stems; else *EQ*. The popup says what it chose and why.
     **Stems**: the new track comes in with drums and other only, the basses
     swap at the midpoint (the kick stays whole), then the old drums go, then
-    its vocals and other. **EQ**: the new track comes up with its bass cut on
+    its vocals and other. With dj's own mixer the EQ smooths it: the new
+    track's highs rise over the first half and the old track's highs roll off
+    while its drums leave. **EQ**: the new track comes up with its bass cut on
     the EQ, the basses swap at the midpoint, the old track fades. **Drop**: no
     blend, the new track cuts in on the beat from its drop cue (if it has one)
     and the old one is gone within a beat.

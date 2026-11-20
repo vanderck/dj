@@ -2904,11 +2904,14 @@ mod tests {
             let (gi, go) = (c.snap.decks[1].stem_gains, c.snap.decks[0].stem_gains);
             if (0.05..0.45).contains(&p) {
                 assert_eq!((gi[1], gi[2], go[1]), (0.0, 0.0, 1.0), "first half: new bass and vocals out, old bass in");
+                assert!(c.session.channels[1].params.eq[2] < 0.5, "new highs still rising");
                 before = true;
             }
             if (0.55..0.7).contains(&p) {
                 assert_eq!((gi[1], go[1]), (1.0, 0.0), "the basses swapped");
                 assert!(go[0] < 1.0 && go[2] == 1.0, "old drums going, its vocals still there");
+                assert_eq!(c.session.channels[1].params.eq[2], 0.5, "new highs in");
+                assert!(c.session.channels[0].params.eq[2] < 0.5, "old highs rolling off");
                 after = true;
             }
         });
@@ -2916,7 +2919,8 @@ mod tests {
         let p = |ch: usize| c.session.channels[ch].params;
         assert!(!c.snap.decks[0].playing && c.snap.decks[1].playing);
         assert_eq!((p(0).volume, p(1).volume), (0.0, 1.0));
-        assert_eq!((p(0).eq[0], p(1).eq[0]), (0.5, 0.5), "stems, not the EQ");
+        assert_eq!((p(0).eq[0], p(1).eq[0]), (0.5, 0.5), "the bass swaps on the stems, not the EQ");
+        assert_eq!((p(0).eq[2], p(1).eq[2]), (0.5, 0.5), "highs back to where they were");
         assert_eq!(c.snap.decks[0].stem_gains, [1.0; 4], "the old deck's stems back for next time");
         assert_eq!(c.snap.decks[1].stem_gains, [1.0, 1.0, 0.0, 1.0], "Now: the new vocals stay out");
     }
