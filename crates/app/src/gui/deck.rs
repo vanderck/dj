@@ -835,8 +835,7 @@ fn mix_button(ui: &mut Ui, core: &mut Core, d: usize, rect: Rect, font: egui::Fo
     if let Some(m) = core.automix.as_ref().filter(|m| m.plan.incoming == d) {
         let bars = ((m.plan.start_beat - core.mix_beat()) / 4.0).ceil();
         let label = if bars > 0.0 { format!("Mix in {bars:.0}") } else { "Mixing…".to_string() };
-        let resp = button(ui, rect, &label, Style::Fill(GREEN), font)
-            .on_hover_text(format!("{} · {} — tap to cancel", m.plan.how.name(core.external_routing()), m.plan.reason));
+        let resp = button(ui, rect, &label, Style::Fill(GREEN), font).on_hover_text("Tap to cancel");
         if resp.clicked() && !core.learn {
             core.cancel_mix();
         }
@@ -849,89 +848,25 @@ fn mix_button(ui: &mut Ui, core: &mut Core, d: usize, rect: Rect, font: egui::Fo
         } else {
             format!("Mix into deck {} (syncs this deck)", out + 1)
         });
-    let style = core.settings.mix_style;
+    // dj measures both tracks and picks how to mix (stems and EQ together, or a cut).
+    let style = crate::settings::MixStyle::Auto;
     if core.mix_is_urgent(out) {
-        // Less than a minute of the playing track left: no question, mix now (the last style).
+        // Less than a minute of the playing track left: no question, mix now.
         if resp.clicked() && !core.learn {
             let plan = core.plan_now(d, out, style);
             core.start_mix(plan);
         }
         return;
     }
-    let external = core.external_routing();
-    const W: f32 = 360.0;
+    const W: f32 = 220.0;
     egui::Popup::from_toggle_button_response(&resp)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .width(W)
         .show(|ui| {
-            ui.label(egui::RichText::new(format!("MIX INTO DECK {}", out + 1)).font(mono(11.0)).color(TEXT_DIM));
-            // How: remembered for next time.
-            let gap = 6.0;
-            let pw = (W - 3.0 * gap) / 4.0;
-            let (row, _) = ui.allocate_exact_size(Vec2::new(W, 34.0), Sense::hover());
-            for (k, st) in crate::settings::MixStyle::ALL.into_iter().enumerate() {
-                let label = match st {
-                    crate::settings::MixStyle::Auto => "Auto",
-                    crate::settings::MixStyle::Stems => "Stems",
-                    crate::settings::MixStyle::Eq if external => "You fade",
-                    crate::settings::MixStyle::Eq => "EQ",
-                    crate::settings::MixStyle::Drop => "Drop",
-                };
-                let tip = match st {
-                    crate::settings::MixStyle::Auto => "dj looks at both tracks and picks Stems, EQ or Drop for this mix: Drop when the keys clash, the tempos are far apart or (Best) the new track has a drop; else Stems when both have stems; else EQ",
-                    crate::settings::MixStyle::Stems => "In: volume opens on the new melody, then its drums. Midpoint: the basses swap. Out: the old drums, then its vocals and other (volume only closes the end)",
-                    crate::settings::MixStyle::Eq if external => "dj drops the decks in and out of loops on the beat; you fade on your mixer",
-                    crate::settings::MixStyle::Eq => "In: volume opens with the EQ closed, then the highs, then the mids. Midpoint: the basses swap. Out: the old mids, then its highs (volume only closes the end)",
-                    crate::settings::MixStyle::Drop => "In: the new track cuts in on the beat, from its drop cue if it has one. Out: the old track is gone within a beat",
-                };
-                let r = Rect::from_min_size(Pos2::new(row.left() + k as f32 * (pw + gap), row.top()), Vec2::new(pw, row.height()));
-                let sel = style == st;
-                if button(ui, r, label, if sel { Style::Light } else { Style::Dark }, bold(13.0)).on_hover_text(tip).clicked() {
-                    core.settings.mix_style = st;
-                }
-            }
-            ui.add_space(6.0);
-            let style = core.settings.mix_style;
-            let now = core.plan_now(d, out, style);
-            let best = core.plan_best(d, out, style);
-            if external {
-                ui.label(egui::RichText::new("External mixer: the old deck loops when the mix is done, until you fade it out.").font(sans(11.0)).color(TEXT_DIM));
-            }
-            let bars_away = |p: &crate::core::MixPlan| ((p.start_beat - core.snap.decks[out].beat) / 4.0).ceil().max(0.0);
-            // What each choice will do: the style (and why Auto chose it), then the moment.
-            let how = |p: &crate::core::MixPlan| {
-                let name = p.how.name(external);
-                if p.why_how.is_empty() { name.to_string() } else { format!("{name} ({})", p.why_how) }
-            };
-            let now_when = if now.how == crate::core::automix::MixHow::Drop { now.reason.clone() } else { format!("{:.0} bars", now.length_beats / 4.0) };
-            let mut options = vec![
-                ("Now".to_string(), format!("{} · {now_when} · vocals back on their next phrase", how(&now)), now),
-                ("Best".to_string(), format!("{} · in {:.0} bars · {}", how(&best), bars_away(&best), best.reason), best),
-            ];
-            // Runners-up of the search, to choose from.
-            for alt in core.plan_alternatives(d, out, style).into_iter().take(2) {
-                let detail = format!("{} · in {:.0} bars · {}", how(&alt), bars_away(&alt), alt.reason);
-                options.push(("Also".to_string(), detail, alt));
-            }
-            for (title, detail, plan) in options {
-                // What the plan follows in the music (from the stems), on a third line.
-                let notes = if plan.notes.is_empty() {
-                    plan.blend.as_ref().map(|b| b.notes.iter().take(2).cloned().collect::<Vec<_>>().join(" · ")).unwrap_or_default()
-                } else {
-                    plan.notes.iter().take(3).cloned().collect::<Vec<_>>().join(" · ")
-                };
-                let h = if notes.is_empty() { 54.0 } else { 72.0 };
-                let (r, _) = ui.allocate_exact_size(Vec2::new(W, h), Sense::hover());
-                let resp = button(ui, r, "", Style::Dark, bold(15.0));
-                let p = ui.painter();
-                p.text(Pos2::new(r.left() + 14.0, r.top() + 17.0), Align2::LEFT_CENTER, title, bold(16.0), TEXT);
-                let detail = fit_text(ui, &detail, mono(11.0), W - 28.0);
-                p.text(Pos2::new(r.left() + 14.0, r.top() + 38.0), Align2::LEFT_CENTER, detail, mono(11.0), TEXT_DIM);
-                if !notes.is_empty() {
-                    let notes = fit_text(ui, &notes, sans(11.0), W - 28.0);
-                    p.text(Pos2::new(r.left() + 14.0, r.top() + 56.0), Align2::LEFT_CENTER, notes, sans(11.0), GREEN);
-                }
-                if resp.clicked() {
+            for title in ["Now", "Best"] {
+                let (r, _) = ui.allocate_exact_size(Vec2::new(W, 56.0), Sense::hover());
+                if button(ui, r, title, Style::Dark, bold(20.0)).clicked() {
+                    let plan = if title == "Now" { core.plan_now(d, out, style) } else { core.plan_best(d, out, style) };
                     core.start_mix(plan);
                     ui.close();
                 }

@@ -21,7 +21,6 @@ use rosc::OscType;
 
 #[path = "automix.rs"]
 pub mod automix;
-pub use automix::MixPlan;
 
 use crate::fxcat::{self, CatalogEntry, FxLive, ScanCache};
 use crate::model::{FxChainModel, FxSlotModel, MacroModel, Session, QUANTIZE_VALUES};

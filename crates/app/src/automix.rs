@@ -501,11 +501,6 @@ impl Core {
             .collect()
     }
 
-    /// The runners-up of a Best search (to choose from in the popup).
-    pub fn plan_alternatives(&self, incoming: usize, outgoing: usize, style: MixStyle) -> Vec<MixPlan> {
-        self.search_plans(incoming, outgoing, MixWhen::Best, style).into_iter().skip(1).collect()
-    }
-
     /// Mix now: a blend from the next bar line over the whole bars that fit in about 10 s; a drop
     /// on the next 8-bar phrase start (or the next bar when the track ends sooner).
     pub fn plan_now(&self, incoming: usize, outgoing: usize, style: MixStyle) -> MixPlan {

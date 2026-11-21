@@ -217,24 +217,10 @@ Fonts: Inter and JetBrains Mono, bundled under the SIL Open Font License (see
 - **Mix**: while another deck plays, a deck that is paused (at its cue) or
   looping at a cue with its volume down gets a **Mix** button next to Sync.
   Mix syncs it (a paused deck is first turned down, looped where it stands and
-  started in time) and asks *how* and *when*.
-  - **How** (remembered): **Auto** (default) assesses the two tracks: when
-    their keys clash, *Stems* with only drums and bass overlapping (the
-    melodies and vocals switch at the bass swap; *Drop* without stems); *Drop*
-    when their tempos are far apart, or for a Best mix when the new track has
-    a drop cue; else *Stems* when both decks have stems; else *EQ*. The popup says what it chose and why.
-    **Stems**: the new track's volume opens quickly on its melody (other)
-    alone, then its drums come in, the basses swap at the midpoint (the kick
-    stays whole), then the old drums go, then its vocals and other. Volume
-    only opens and closes the edges. With
-    dj's own mixer the EQ smooths it: the new
-    track's highs rise over the first half and the old track's highs roll off
-    while its drums leave. **EQ**: the new track's volume opens quickly with its
-    EQ closed, then its highs come in, then its mids; the basses swap at the
-    midpoint; then the old track leaves on the EQ (mids, then highs) and its
-    volume closes only the last part. **Drop**: no
-    blend, the new track cuts in on the beat from its drop cue (if it has one)
-    and the old one is gone within a beat.
+  started in time) and asks only **Now** or **Best**. dj works out the rest:
+  how (stems and EQ together, EQ alone without stems, or a cut when that
+  fits best), where and how long, measured as the best transition within the
+  range (soon for Now, anywhere in the playing track for Best).
   - **When**: **Now** starts on the playing track's next phrase (its next 8
     bars when that's within 4 bars, else its next 4-bar line) over the whole
     bars that fit in about 10 s, with the new track's vocals (stems) out; they
