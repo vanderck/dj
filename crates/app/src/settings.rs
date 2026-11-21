@@ -126,8 +126,6 @@ pub struct Settings {
     /// What a set hot cue pad does, on screen and on a controller: loop from the cue (at the
     /// deck's loop size) or jump to it.
     pub cue_pads: CuePadMode,
-    /// How Mix blends two tracks (the last choice in the Mix popup).
-    pub mix_style: MixStyle,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -211,7 +209,6 @@ impl Default for Settings {
             layout: LayoutMode::Auto,
             cue_points: CuePoints::Tags,
             cue_pads: CuePadMode::Loop,
-            mix_style: MixStyle::Auto,
             tempo_step_pct: 0.0,
         }
     }
