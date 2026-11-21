@@ -2680,6 +2680,7 @@ mod tests {
         assert_eq!(c.snap.clock.owner, ClockOwner::Deck(1));
         assert_eq!(c.mix_target(1), Some(0));
         assert_eq!(c.mix_target(0), None, "the playing deck is not a candidate");
+        assert!(!c.mix_is_urgent(0));
 
         // Best: searched over the whole track: on a 4-bar line, ahead, whole phrases long.
         let best = c.plan_best(1, 0, crate::settings::MixStyle::Eq);
@@ -3264,8 +3265,11 @@ mod tests {
         // Now: on a phrase (8 bars when that's within 4 bars, else 4 bars): at most 4 bars after
         // the new track's lead-in.
         assert_eq!(plan.start_beat % 16.0, 0.0, "{plan:?}");
-        assert!(plan.start_beat - plan.lead_in > beat + 0.5 && plan.start_beat - beat <= 16.0 + 0.5 + plan.lead_in, "{} {}", plan.start_beat, beat);
-        assert_eq!(plan.lead_in, 3.0);
+        // (Ahead by the time it takes to start and its lead-in, then the next 4-bar line.)
+        assert!(plan.start_beat - plan.lead_in > beat + 0.5 && plan.start_beat - beat <= 16.0 + 8.0, "{} {}", plan.start_beat, beat);
+        // Coming in at the cue (a beat into its bar): 3 beats early; elsewhere it's on a bar line.
+        let at_cue = plan.entry_secs.is_some_and(|t| (t - 8.5).abs() < 0.01);
+        assert_eq!(plan.lead_in, if at_cue { 3.0 } else { 0.0 }, "{plan:?}");
         c.start_mix(plan);
         let mut checked = false;
         run_mix(&mut e, &mut c, |c, p| {

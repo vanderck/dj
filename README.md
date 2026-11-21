@@ -227,9 +227,10 @@ Fonts: Inter and JetBrains Mono, bundled under the SIL Open Font License (see
   within the range (soon for Now, anywhere in the playing track for Best).
   - **When**: **Now** starts on the playing track's next phrase lines, with
     the new track's vocals (stems) out; they come back on its next phrase
-    that has vocals. **Best** looks over the whole playing track. No rush
-    near the end: a mix may run past the playing track's end, which then
-    fades out on its own under the new one.
+    that has vocals. **Best** looks over the whole playing track. In the
+    playing track's last minute Mix doesn't ask: it mixes at the best moment
+    left. No rush near the end: a mix may run past the playing track's end,
+    which then fades out on its own under the new one.
 
   **Each mix is found, not scripted.** dj reads both tracks bar by bar: the
   level of drums, bass, vocals and other (from the stems; without stems, an
@@ -237,18 +238,19 @@ Fonts: Inter and JetBrains Mono, bundled under the SIL Open Font License (see
   sections: intro (no bass yet), drops (bass back after 4+ bars), breaks,
   outro. It then tries every combination of where the old track can start
   leaving (its 4-bar lines, within 4 bars for *Now*), where the new track
-  comes in (your cue, which wins unless a mix from there can't fit; else its
-  start, its intro end, its drops and the phrases before them; its drop cue
-  for a cut) and how long, and scores each bar of the
+  comes in (your cue is a starting point, slightly preferred; its start, its
+  intro end, its drops and the phrases before them; its drop cue for a cut)
+  and how long, and scores each bar of the
   overlap on what you'd hear: vocals or (clashing keys) melodies on top of
   each other, both tracks full at once, the old outro/break meeting the new
   intro; plus the new drop landing as the old track leaves, a natural bass
   swap, phrase lines, the loudness jump after the mix, and waiting.
-  **How long comes from the songs:** every phrase length from 8 to 64 bars is
-  tried; every bar of the blend counts, more where the two fit together, and
-  clashes count against it, so the mix is as long and gradual as the music
-  lets it be (with stems even two full tracks get a long blend, the parts
-  taken apart; vocals on vocals without stems: a short one). The waveform lanes mark where the
+  **How long comes from the songs:** every phrase length from 8 to 128 bars
+  is tried; every bar of the blend counts, more where the two fit together,
+  and only what sounds wrong counts against it (vocals on vocals, melodies in
+  clashing keys), so the mix is as long and gradual as the music lets it be.
+  Two full tracks in sync are fine; vocals on vocals without stems: a short
+  one. The waveform lanes mark where the
   mix starts, ends and where the basses swap, and the reasons are printed
   in the terminal.
 

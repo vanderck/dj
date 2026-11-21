@@ -850,6 +850,15 @@ fn mix_button(ui: &mut Ui, core: &mut Core, d: usize, rect: Rect, font: egui::Fo
         });
     // dj measures both tracks and picks how to mix (stems and EQ together, or a cut).
     let style = crate::settings::MixStyle::Auto;
+    if core.mix_is_urgent(out) {
+        // The playing track's last minute: no question, the best moment left (no rush: the mix
+        // may run past its end, which fades on its own).
+        if resp.clicked() && !core.learn {
+            let plan = core.plan_best(d, out, style);
+            core.start_mix(plan);
+        }
+        return;
+    }
     const W: f32 = 220.0;
     egui::Popup::from_toggle_button_response(&resp)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)

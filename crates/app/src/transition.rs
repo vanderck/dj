@@ -215,7 +215,7 @@ pub fn score(out: &Bars, inc: &Bars, c: &Candidate, lim: &Limits) -> (f32, Vec<S
             s -= 2.0;
         }
     }
-    let (mut vox, mut mel, mut busy, mut fit) = (0, 0, 0, 0);
+    let (mut vox, mut mel, mut fit) = (0, 0, 0);
     let (mut out_room, mut in_room) = (0usize, 0usize);
     if c.technique == Technique::Blend {
         for k in 0..playing {
@@ -226,10 +226,8 @@ pub fn score(out: &Bars, inc: &Bars, c: &Candidate, lim: &Limits) -> (f32, Vec<S
             if lim.keys_clash && out.on(OTHER, o) && inc.on(OTHER, i) {
                 mel += 1;
             }
+            // Both full is fine (in sync, the EQ and stems shape it); only clashes sound wrong.
             let full = out.fullness(o) >= 3 && inc.fullness(i) >= 3;
-            if full {
-                busy += 1;
-            }
             let clash_here = (out.on(VOCALS, o) && inc.on(VOCALS, i) && !lim.vocals_out) || (lim.keys_clash && out.on(OTHER, o) && inc.on(OTHER, i));
             if !full && !clash_here {
                 fit += 1;
@@ -242,10 +240,10 @@ pub fn score(out: &Bars, inc: &Bars, c: &Candidate, lim: &Limits) -> (f32, Vec<S
                 in_room += 1;
             }
         }
-        // Stems keep vocals, melodies and two full tracks apart (each part moves on its own): a
-        // smaller cost than with the EQ alone.
-        let (wv, wm, wb) = if lim.stems { (0.6, 0.4, 0.1) } else { (2.0, 1.5, 0.35) };
-        s -= wv * vox as f32 + wm * mel as f32 + wb * busy as f32;
+        // Stems keep vocals and melodies apart (each part moves on its own): a smaller cost than
+        // with the EQ alone.
+        let (wv, wm) = if lim.stems { (0.6, 0.4) } else { (2.0, 1.5) };
+        s -= wv * vox as f32 + wm * mel as f32;
         // The longer the better: every bar of the blend counts, more where the two fit together;
         // clashes and crowding count against it, so it's as long as the music lets it be.
         s += 0.25 * playing as f32 + 0.5 * fit as f32;
@@ -275,11 +273,10 @@ pub fn score(out: &Bars, inc: &Bars, c: &Candidate, lim: &Limits) -> (f32, Vec<S
     if c.in_bar.is_multiple_of(8) || Some(c.in_bar) == lim.cue_bar {
         s += 0.5;
     }
-    // Your cue: where you chose to start it. It wins unless a mix from there can't work (other
-    // entries only when the cue is too late in the track, or for a cut on a drop).
+    // Your cue: a starting point, a small preference (the music decides where it comes in).
     let cut_on_drop_cue = c.technique == Technique::Cut && lim.drop_cue_bar.is_some();
     if Some(c.in_bar) == lim.cue_bar && !cut_on_drop_cue {
-        s += 12.0;
+        s += 2.5;
     } else if c.in_bar != 0 {
         notes.push(format!("starts it at bar {}", c.in_bar + 1));
     }

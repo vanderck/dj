@@ -40,7 +40,9 @@ const DROP_BEATS: f64 = 4.0;
 const NOW_SECS: f64 = 32.0;
 /// The shortest and longest blend the search tries, in bars.
 const MIN_MIX_BARS: usize = 8;
-const MAX_MIX_BARS: usize = 64;
+const MAX_MIX_BARS: usize = 128;
+/// In the playing track's last minute, Mix doesn't ask: it mixes at the best moment left.
+const LAST_MINUTE_SECS: f64 = 60.0;
 /// Stem order: drums, bass, vocals, other.
 use crate::transition::{BASS, DRUMS, OTHER, PRESENT, VOCALS};
 /// The echo an echo-out inserts.
@@ -239,6 +241,12 @@ impl Core {
         }
     }
 
+    /// Whether Mix should skip the popup (the playing track ends within a minute).
+    pub fn mix_is_urgent(&self, outgoing: usize) -> bool {
+        let v = &self.snap.decks[outgoing];
+        (v.duration_secs - v.position_secs) / v.speed.max(0.01) < LAST_MINUTE_SECS
+    }
+
     /// The incoming deck's drop cue (a hot cue named "Drop…"), if any.
     pub fn drop_cue(&self, d: usize) -> Option<u8> {
         let cues = &self.decks[d].info.as_ref()?.cues;
@@ -361,7 +369,7 @@ impl Core {
         let lead = if i.playing { 0.5 } else { 4.5 } + 3.0;
         let earliest = ((o.beat + lead) / 4.0).ceil().max(0.0) as usize;
         let latest = if when == MixWhen::Now { earliest + 4 } else { out.len() };
-        // Every phrase length (4 bars) from 8 up to 64: how long is up to the two songs (the
+        // Every phrase length (4 bars) from 8 up to 128: how long is up to the two songs (the
         // search scores each bar of the overlap; the longer they play well together, the better).
         let lengths: Vec<usize> = (MIN_MIX_BARS / 4..=MAX_MIX_BARS / 4).map(|k| 4 * k).collect();
         // Your cue (or where a paused deck stands) as a bar of the new track.
