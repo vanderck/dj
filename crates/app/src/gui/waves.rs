@@ -182,6 +182,39 @@ fn draw_lane(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, lane: Rec
         p.galley(fr.min + Vec2::new(4.0, 1.0), galley, on(CUE[i]));
     }
 
+    // A planned or running mix on this deck: where it starts and ends (shaded), and where the
+    // basses swap.
+    if let Some(m) = core.automix.as_ref().filter(|m| m.plan.incoming == d || m.plan.outgoing == d) {
+        let plan = &m.plan;
+        let now = core.mix_beat();
+        let spb = 60.0 / v.track_bpm.max(1.0);
+        // Track time on this deck at mix beat `b`.
+        let t_of = |b: f64| {
+            if plan.outgoing == d {
+                v.position_secs + (b - now) * spb
+            } else {
+                let entry = plan.entry_secs.unwrap_or(v.loop_start_secs);
+                entry + (b - (plan.start_beat - plan.lead_in)) * spb
+            }
+        };
+        let (b0, b1) = (plan.start_beat, plan.start_beat + plan.length_beats);
+        let (x0, x1) = (x_at(t_of(b0)), x_at(t_of(b1)));
+        if x1 > lane.left() && x0 < lane.right() {
+            let r = Rect::from_min_max(Pos2::new(x0.max(lane.left()), lane.top()), Pos2::new(x1.min(lane.right()), lane.bottom()));
+            p.rect_filled(r, CornerRadius::ZERO, Color32::from_rgba_unmultiplied(0x4a, 0xde, 0x80, 22));
+            for x in [x0, x1] {
+                p.line_segment([Pos2::new(x, lane.top()), Pos2::new(x, lane.bottom())], Stroke::new(1.0, GREEN));
+            }
+            let font = bold(if small { 9.0 } else { 10.0 });
+            p.text(Pos2::new(x0 + 4.0, lane.bottom() - 2.0), Align2::LEFT_BOTTOM, if plan.outgoing == d { "mix out" } else { "mix in" }, font.clone(), GREEN);
+            if let Some(b) = &plan.blend {
+                let xs = x_at(t_of(b0 + b.swap * 4.0));
+                p.line_segment([Pos2::new(xs, lane.top()), Pos2::new(xs, lane.bottom())], Stroke::new(2.0, GREEN));
+                p.text(Pos2::new(xs + 4.0, lane.bottom() - 2.0), Align2::LEFT_BOTTOM, "bass swap", font, GREEN);
+            }
+        }
+    }
+
     // Playhead.
     p.line_segment([Pos2::new(play_x, lane.top()), Pos2::new(play_x, lane.bottom())], Stroke::new(2.0, Color32::WHITE));
     deck_badge(ui, badge, d, if small { 11.0 } else { 13.0 });

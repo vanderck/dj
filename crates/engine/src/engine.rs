@@ -58,8 +58,9 @@ pub enum DeckCmd {
     LoopIn,
     LoopOut,
     LoopExit,
-    /// On the next beat: leave the loop, jumping to its start (or to hot cue `to_cue`).
-    ReleaseLoop { to_cue: Option<u8> },
+    /// On the next beat: leave the loop, jumping to its start (or to hot cue `to_cue`, or to track
+    /// time `to_secs`).
+    ReleaseLoop { to_cue: Option<u8>, to_secs: Option<f64> },
     LoopScale(f64),
     FreeLoop(f64),
     LoopMove(f64),
@@ -539,7 +540,7 @@ impl Engine {
             DeckCmd::LoopIn => deck.loop_in(&ctx),
             DeckCmd::LoopOut => deck.loop_out(&ctx),
             DeckCmd::LoopExit => deck.loop_exit(),
-            DeckCmd::ReleaseLoop { to_cue } => deck.release_loop(to_cue, &ctx),
+            DeckCmd::ReleaseLoop { to_cue, to_secs } => deck.release_loop(to_cue, to_secs, &ctx),
             DeckCmd::LoopScale(f) => deck.loop_scale(f),
             DeckCmd::FreeLoop(ms) => deck.free_loop(ms),
             DeckCmd::LoopMove(b) => deck.loop_move(b),

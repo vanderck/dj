@@ -244,6 +244,8 @@ pub struct Core {
     pub automix: Option<automix::AutoMix>,
     /// After a Now mix: the new track's vocals coming back on its next vocal phrase.
     pub vocal_return: Option<automix::VocalReturn>,
+    /// An echo-out's insert to remove once its tail has rung out: (channel, slot, clock beat).
+    pub echo_cleanup: Option<(usize, usize, f64)>,
     /// MIDI pick-up: controls dj moved itself (lowercase address -> last MIDI value seen).
     pickup: HashMap<String, Option<f32>>,
     /// Each deck's loop size in beats (the loop buttons, and hot cue pads in Loop mode).
@@ -327,6 +329,7 @@ impl Core {
             dirty_since: None,
             automix: None,
             vocal_return: None,
+            echo_cleanup: None,
             pickup: HashMap::new(),
             loop_size,
         };
@@ -2690,20 +2693,23 @@ mod tests {
         assert_eq!(c.mix_target(0), None, "the playing deck is not a candidate");
         assert!(!c.mix_is_urgent(0));
 
-        // Best: 16 bars on an 8-bar phrase start, ahead, ending before the track does.
+        // Best: searched over the whole track: on a 4-bar line, ahead, 8/16/32 bars.
         let best = c.plan_best(1, 0, crate::settings::MixStyle::Eq);
         let beat = c.snap.decks[0].beat;
         assert_eq!(best.mode, automix::MixWhen::Best);
-        assert_eq!(best.length_beats, 64.0);
-        assert_eq!(best.start_beat % 32.0, 0.0);
-        assert!(best.start_beat > beat && best.start_beat + 64.0 <= 180.0, "{best:?}");
+        assert!([32.0, 64.0, 128.0].contains(&best.length_beats), "{best:?}");
+        assert_eq!(best.start_beat % 16.0, 0.0);
+        assert!(best.start_beat > beat, "{best:?}");
+        assert!(!best.gains.is_empty(), "volume from loudness, not a preset fade");
 
         let plan = c.plan_now(1, 0, crate::settings::MixStyle::Eq);
-        // 120 BPM: 2 s bars, 5 of them fit in 10 s; it starts on the next bar line.
-        assert_eq!(plan.length_beats, 20.0);
-        assert_eq!(plan.start_beat % 4.0, 0.0);
+        // Now: on the next 4-bar line or so, as long as the music allows (at most ~10 s).
+        assert!([8.0, 16.0, 20.0].contains(&plan.length_beats), "{plan:?}");
+        assert_eq!(plan.start_beat % 16.0, 0.0);
         assert!(plan.start_beat > c.snap.decks[0].beat);
         let start = plan.start_beat;
+        let len = plan.length_beats;
+        let ps = plan.blend.as_ref().map_or(0.5, |b| b.swap_fraction());
         c.start_mix(plan);
         pump(&mut e, &mut c);
         assert_eq!(c.snap.clock.owner, ClockOwner::Deck(0));
@@ -2720,30 +2726,18 @@ mod tests {
             blocks += 4;
             assert!(blocks < 48000 / 512 * 40, "mix never finished");
             let b = c.snap.decks[0].beat;
-            if c.snap.decks[0].playing && b > start + 1.0 && b < start + 9.0 {
-                // First half: incoming coming up without bass, outgoing at full volume.
+            let p = (b - start) / len;
+            if c.snap.decks[0].playing && p > 0.05 && p < ps - 0.05 {
+                // Before the swap: incoming coming up without bass, outgoing at full volume.
                 assert!(c.snap.decks[1].playing && !c.snap.decks[1].loop_on, "incoming left its loop");
                 assert!(c.snap.decks[1].sync);
                 assert_eq!(low(&c, 1), 0.0);
                 assert!((vol(&c, 0) - 0.9).abs() < 1e-6);
-                saw_in_bass_out = vol(&c, 1) > 0.2;
-                // Volume opens quickly (20 beats: open by beat 3); the parts follow on the EQ.
-                if b > start + 3.5 {
-                    assert!(vol(&c, 1) > 0.99, "volume open early");
-                }
-                if b < start + 4.5 {
-                    assert!(c.session.channels[1].params.eq[1] < 0.1, "mids not in yet");
-                }
+                saw_in_bass_out = vol(&c, 1) > 0.05;
             }
-            if c.snap.decks[0].playing && b > start + 11.0 && b < start + 19.0 {
-                assert_eq!(low(&c, 0), 0.0, "basses swapped at the midpoint");
+            if c.snap.decks[0].playing && p > ps + 0.05 && p < 0.95 {
+                assert_eq!(low(&c, 0), 0.0, "basses swapped where the plan says");
                 assert!((low(&c, 1) - 0.5).abs() < 1e-6);
-                if b < start + 16.0 {
-                    assert!((vol(&c, 0) - 0.9).abs() < 1e-6, "the old track leaves on the EQ first, not the volume");
-                }
-                if b > start + 15.0 {
-                    assert!(c.session.channels[0].params.eq[1] < 0.3, "old mids rolled off");
-                }
                 saw_swap = true;
             }
         }
@@ -2757,8 +2751,8 @@ mod tests {
         assert!(!c.session.channels[1].params.mute);
         assert!((low(&c, 0) - 0.5).abs() < 1e-6 && (low(&c, 1) - 0.5).abs() < 1e-6);
         assert_eq!((c.session.channels[0].params.eq[1], c.session.channels[0].params.eq[2]), (0.5, 0.5), "old mids and highs back");
-        // The incoming track played on from its cue (12 s of mix after 8 s).
-        assert!(c.snap.decks[1].position_secs > 18.0, "{}", c.snap.decks[1].position_secs);
+        // The incoming track played on from its cue (8 s) through the mix (0.5 s a beat).
+        assert!(c.snap.decks[1].position_secs > 8.0 + len * 0.5 - 0.3, "{}", c.snap.decks[1].position_secs);
         assert_eq!(c.snap.decks[1].stem_gains[2], 0.0, "the new track's vocals stay out");
         // Until another track is loaded on that deck: it starts with every stem on.
         c.load_track(1, &kick_wav("automix-c.wav", 30));
@@ -3042,8 +3036,10 @@ mod tests {
         mix_setup(&mut e, &mut c);
         c.decks[1].info.as_mut().unwrap().cues[1] = Some(Cue { kind: CueKind::Hot, secs: 16.0, end_secs: None, name: "Drop 1".into(), color: [0; 3] });
         c.deck_cmd(1, DeckCmd::SetCue { idx: 1, secs: Some(16.0), end_secs: None });
+        pump(&mut e, &mut c);
         let plan = c.plan_now(1, 0, crate::settings::MixStyle::Drop);
         assert_eq!((plan.how, plan.length_beats), (MixHow::Drop, 4.0));
+        assert_eq!(plan.entry_secs, Some(16.0), "cuts in on its drop cue: {plan:?}");
         let start = plan.start_beat;
         c.start_mix(plan);
         run_mix(&mut e, &mut c, |c, p| {
@@ -3301,6 +3297,42 @@ mod tests {
             pump(&mut e, &mut c);
         }
         assert!(c.vocal_return.is_none());
+    }
+
+    #[test]
+    fn mix_techniques_filter_echo_and_outro_loop() {
+        let (mut e, mut c, _config) = core();
+        mix_setup(&mut e, &mut c);
+        let mut plan = c.plan_now(1, 0, crate::settings::MixStyle::Eq);
+        let bars = plan.length_beats / 4.0;
+        // Force every technique on this one.
+        plan.filter = Some((0.0, bars));
+        plan.echo_at = Some(bars - 1.0);
+        plan.loop_out = Some((plan.start_beat, 8.0));
+        c.start_mix(plan);
+        let (mut swept, mut echoed, mut looped) = (false, false, false);
+        run_mix(&mut e, &mut c, |c, _| {
+            if c.session.channels[0].params.cutoff > 0.6 {
+                swept = true;
+            }
+            if c.session.channels[0].fx.slots.iter().flatten().any(|s| s.name == "Echo") {
+                echoed = true;
+            }
+            if c.snap.decks[0].loop_on {
+                looped = true;
+            }
+        });
+        assert!(swept, "high-pass sweep on the old track");
+        assert!(echoed, "echo inserted on the old track");
+        assert!(looped, "the old track looped");
+        assert_eq!(c.session.channels[0].params.cutoff, 0.5, "filter back");
+        // The echo goes once its tail has rung out (2 bars).
+        assert!(c.echo_cleanup.is_some());
+        for _ in 0..200 {
+            pump(&mut e, &mut c);
+        }
+        assert!(c.echo_cleanup.is_none());
+        assert!(!c.session.channels[0].fx.slots.iter().flatten().any(|s| s.name == "Echo"), "echo removed");
     }
 
     #[test]

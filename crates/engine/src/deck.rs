@@ -120,8 +120,8 @@ enum PendingAction {
     JumpCue(u8),
     CueLoop(u8),
     CueBeatLoop(u8, f64),
-    /// Leave the loop: to its start, or to this hot cue.
-    ReleaseLoop(Option<u8>),
+    /// Leave the loop: to its start, to this hot cue, or to this track time (seconds).
+    ReleaseLoop(Option<u8>, Option<f64>),
 }
 
 /// What happens at a hot cue besides jumping to it (stored loop cues always loop).
@@ -936,7 +936,7 @@ impl Deck {
     /// back to the loop's start and leave the loop, so the track plays on from there (e.g. from
     /// the cue it was looping at, on a bar line of the track it is mixed into).
     /// With `to_cue`, it jumps to that hot cue instead (e.g. a drop).
-    pub fn release_loop(&mut self, to_cue: Option<u8>, ctx: &DeckCtx) {
+    pub fn release_loop(&mut self, to_cue: Option<u8>, to_secs: Option<f64>, ctx: &DeckCtx) {
         if !self.loop_on {
             return;
         }
@@ -946,18 +946,19 @@ impl Deck {
             Some(b) if self.playing => {
                 let at = (b - 0.002).ceil().max(b);
                 if at - b > 0.002 {
-                    self.pending = Some(Pending { action: PendingAction::ReleaseLoop(to_cue), at_beat: at, on_clock });
+                    self.pending = Some(Pending { action: PendingAction::ReleaseLoop(to_cue, to_secs), at_beat: at, on_clock });
                 } else {
-                    self.fire_release_loop(to_cue);
+                    self.fire_release_loop(to_cue, to_secs);
                 }
             }
-            _ => self.fire_release_loop(to_cue),
+            _ => self.fire_release_loop(to_cue, to_secs),
         }
     }
 
-    fn fire_release_loop(&mut self, to_cue: Option<u8>) {
+    fn fire_release_loop(&mut self, to_cue: Option<u8>, to_secs: Option<f64>) {
+        let at = to_secs.map(|s| s * self.src_rate());
         let cue = to_cue.and_then(|i| self.hot_cues.get(i as usize).copied().flatten()).map(|c| c.start);
-        if let Some(pos) = cue.or(self.loop_region.map(|l| l.start)) {
+        if let Some(pos) = at.or(cue).or(self.loop_region.map(|l| l.start)) {
             self.jump_to(pos);
         }
         self.loop_on = false;
@@ -1230,7 +1231,7 @@ impl Deck {
                         PendingAction::JumpCue(c) => self.fire_cue(c, CueLoopMode::None, ctx),
                         PendingAction::CueLoop(c) => self.fire_cue(c, CueLoopMode::ToNextCue, ctx),
                         PendingAction::CueBeatLoop(c, beats) => self.fire_cue(c, CueLoopMode::Beats(beats), ctx),
-                        PendingAction::ReleaseLoop(to_cue) => self.fire_release_loop(to_cue),
+                        PendingAction::ReleaseLoop(to_cue, to_secs) => self.fire_release_loop(to_cue, to_secs),
                     }
                 }
             }

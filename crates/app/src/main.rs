@@ -14,6 +14,7 @@ mod osc;
 mod settings;
 mod stems;
 mod syndicate_map;
+mod transition;
 
 use std::path::PathBuf;
 use std::time::Duration;
