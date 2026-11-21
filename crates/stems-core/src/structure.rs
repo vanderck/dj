@@ -267,7 +267,7 @@ mod check {
     fn dump_spectrogram() {
         let (Ok(i), Ok(o)) = (std::env::var("SPEC_IN"), std::env::var("SPEC_OUT")) else { return };
         let raw = std::fs::read(i).unwrap();
-        let mono: Vec<f32> = raw.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+        let mono: Vec<f32> = raw.as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes(*b)).collect();
         let spec = super::spectrogram(&mono, &super::filterbank());
         let out: Vec<u8> = spec.iter().flatten().flat_map(|v| v.to_le_bytes()).collect();
         std::fs::write(o, out).unwrap();
