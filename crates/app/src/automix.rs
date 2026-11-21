@@ -510,8 +510,21 @@ impl Core {
         let spb = 60.0 / v.track_bpm;
         let start = v.position_secs - v.beat * spb;
         let cues: Vec<f64> = v.hot_cues.iter().flatten().map(|t| (t - start) / (4.0 * spb)).collect();
+        // Mixed In Key's "Energy N" cues: the energy of each section.
+        let energy: Vec<(f64, u8)> = info
+            .cues
+            .iter()
+            .enumerate()
+            .filter_map(|(i, c)| {
+                let c = c.as_ref()?;
+                let n: u8 = c.name.trim().strip_prefix("Energy")?.trim().parse().ok()?;
+                let t = v.hot_cues.get(i).copied().flatten().unwrap_or(c.secs);
+                Some(((t - start) / (4.0 * spb), n.clamp(1, 10)))
+            })
+            .collect();
         let bars = crate::transition::Bars::new(&info.waveform, self.decks[d].stem_wave.as_deref(), start, spb, v.duration_secs)
-            .with_phrase(crate::transition::phrase_offset(&cues));
+            .with_phrase(crate::transition::phrase_offset(&cues))
+            .with_energy(&energy, self.deck_energy(d));
         (!bars.is_empty()).then_some((bars, cues))
     }
 
