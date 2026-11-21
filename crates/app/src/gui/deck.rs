@@ -85,7 +85,7 @@ fn badge_menu(ui: &mut Ui, core: &mut Core, d: usize, rect: Rect, size: f32) {
                 core.set_track_locked(d, !locked);
                 ui.close();
             }
-            if core.settings.stems_enabled && ui.button("Detect cue points").on_hover_text("Find this track's sections (Intro, Drop, Break, Vocal, Outro) from its stems, replacing its cue points").clicked() {
+            if core.settings.stems_enabled && ui.button("Detect cue points").on_hover_text("Find this track's sections (Intro, Drop, Break, Vocal, Outro) from its stems: one within a bar of a cue it has replaces that cue, the others go on free pads").clicked() {
                 core.redetect_cues(d);
                 ui.close();
             }

@@ -122,8 +122,10 @@ dj reads, from MP3, WAV, AIFF, FLAC, Ogg/Opus and M4A files:
   measured directly, so a drop is where drums and bass come in and a vocal cue
   where the singing starts; bars follow the actual beats (live tempo drift).
   Settings → Library → *Cue points*: Mixed In Key's (detect only for tracks
-  without cues) or dj's detection for every track; the deck menu has *Detect
-  cue points* for one track. Cues you set yourself are always kept.
+  without cues) or dj's detection for every track. For one track that already
+  has cues, right-click the deck's number → *Detect cue points*: a detected
+  section within a bar of a cue it has replaces that cue (on the same pad),
+  the others go on free pads, and cues with nothing detected near them stay.
 
 Detected values are saved per track and shown in the library.
 
