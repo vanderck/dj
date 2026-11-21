@@ -210,18 +210,22 @@ pub fn refine_grid(env: &Envelope, grid: &BeatGrid) -> Option<BeatGrid> {
     refine_grid_within(env, grid, 0.008)
 }
 
-/// [`refine_grid`], correcting when the grid is `tolerance` seconds off or more somewhere.
-fn refine_grid_within(env: &Envelope, grid: &BeatGrid, tolerance: f64) -> Option<BeatGrid> {
+/// Where the beats really land against `grid`, every 8 bars: (window centre time, offset in
+/// seconds, clarity) for the windows with a clear beat, and how many windows there were. On the
+/// kick band when it has a clear pulse (offbeat hats and claps are as strong as the beat in the
+/// full band), else on the full band.
+/// Measured beats: (time or beat, offset in seconds, clarity) per window, and how many windows.
+type Offsets = (Vec<(f64, f64, f64)>, usize);
+
+fn beat_offsets(env: &Envelope, grid: &BeatGrid) -> Option<Offsets> {
     let spb = grid.seconds_per_beat();
-    if !(spb > 0.0) || env.duration < 30.0 {
+    if spb.is_nan() || spb <= 0.0 || env.duration < 30.0 {
         return None;
     }
     const WIN: usize = 32; // beats
     let step = 0.002;
     let reach = (0.3 * spb / step) as i64;
     let offsets: Vec<f64> = (-reach..=reach).map(|i| i as f64 * step).collect();
-    // The beat lands on the kicks: measure on the low band when it has a clear pulse (offbeat
-    // hats and claps are as strong as the beat in the full band), else on the full band.
     let measure = |env_band: &[f32]| -> (Vec<(f64, f64, f64)>, usize) {
         let mut pts: Vec<(f64, f64, f64)> = Vec::new(); // (time, offset, weight)
         let mut windows = 0usize;
@@ -253,7 +257,191 @@ fn refine_grid_within(env: &Envelope, grid: &BeatGrid, tolerance: f64) -> Option
         (pts, windows)
     };
     let (low, windows) = measure(&env.low_onset);
-    let (pts, windows) = if low.len() * 2 >= windows && low.iter().map(|p| p.2).sum::<f64>() / low.len().max(1) as f64 > 1.8 { (low, windows) } else { measure(&env.onset) };
+    Some(if low.len() * 2 >= windows && low.iter().map(|p| p.2).sum::<f64>() / low.len().max(1) as f64 > 1.8 { (low, windows) } else { measure(&env.onset) })
+}
+
+/// When a track's tempo really changes (a live drummer, a speed-up), no steady grid fits: the beats
+/// wander off any straight line. Measured against `grid` (already the best steady fit), a tempo
+/// map through where the beats are, every 8 bars, when they stray 12 ms or more from it; `None`
+/// when the steady grid holds.
+pub fn tempo_map(env: &Envelope, grid: &BeatGrid) -> Option<dj_engine::track::TempoMap> {
+    let spb = grid.seconds_per_beat();
+    if spb.is_nan() || spb <= 0.0 || env.duration < 30.0 {
+        return None;
+    }
+    // Follow the beat window by window (4 bars), each searched near where the previous ones
+    // predict it, so a tempo that wanders far from any straight line is still followed; then
+    // once more with every window's bend taken from its neighbours. On the kick band when it
+    // has a clear pulse.
+    const WIN: usize = 16;
+    let measure = |band: &[f32], b: f64, predict: f64, slope: f64, reach: f64| -> (f64, f64) {
+        // The window's beats moved by `predict + d`, bending by `slope` (seconds per window).
+        let score = |d: f64| -> f32 {
+            (0..WIN).map(|k| env.at(band, grid.secs_at_beat(b + k as f64) + predict + d + slope * (k as f64 / WIN as f64 - 0.5))).sum::<f32>() / WIN as f32
+        };
+        let steps = (reach / 0.002) as i64;
+        let scores: Vec<(f64, f32)> = (-steps..=steps).map(|i| (i as f64 * 0.002, score(i as f64 * 0.002))).collect();
+        let mean = scores.iter().map(|s| s.1).sum::<f32>() / scores.len() as f32;
+        let (d, best) = scores.iter().copied().fold((0.0, f32::MIN), |a, c| if c.1 > a.1 { c } else { a });
+        (predict + d, (best / mean.max(1e-6)) as f64)
+    };
+    let follow = |band: &[f32]| -> (Vec<(f64, f64, f64)>, usize) {
+        // The windows' first beats; following starts in the middle (where a steady grid fitted to
+        // the whole track is closest to the beats) and works outwards both ways.
+        let first = (-grid.anchor_secs / spb).ceil();
+        let starts: Vec<f64> = (0..).map(|w| first + (w * WIN) as f64).take_while(|b| grid.secs_at_beat(b + WIN as f64) <= env.duration).collect();
+        let windows = starts.len();
+        if windows == 0 {
+            return (Vec::new(), 0);
+        }
+        let mid = windows / 2;
+        let mut found: Vec<Option<(f64, f64, f64)>> = vec![None; windows];
+        for dir in [1i64, -1] {
+            // Going out from the middle: the last offset found and its change per window.
+            let (mut predict, mut slope) = match found[mid] {
+                Some(p) => (p.1, 0.0),
+                None => (0.0, 0.0),
+            };
+            let mut last: Option<(f64, f64)> = found[mid].map(|p| (p.0, p.1));
+            let mut i = mid as i64 + if dir == 1 || found[mid].is_none() { 0 } else { -1 };
+            while i >= 0 && (i as usize) < windows {
+                let b = starts[i as usize];
+                let reach = if last.is_none() { 0.3 } else { 0.12 } * spb;
+                let (off, clarity) = measure(band, b, predict, slope, reach);
+                if clarity > 1.4 {
+                    let c = b + WIN as f64 / 2.0;
+                    if let Some((lb, lo)) = last {
+                        slope = (off - lo) * WIN as f64 / (c - lb).abs() * dir as f64;
+                    }
+                    found[i as usize] = Some((c, off, clarity));
+                    last = Some((c, off));
+                    predict = off + slope * dir as f64;
+                } else {
+                    predict += slope * dir as f64;
+                }
+                i += dir;
+            }
+        }
+        let mut pts: Vec<(f64, f64, f64)> = found.into_iter().flatten().collect();
+        // Then a few passes: each window re-measured with the bend its neighbours give (the first
+        // windows were measured before the tempo's trend was known).
+        for _ in 0..3 {
+            let prev = pts.clone();
+            for i in 0..pts.len() {
+                let (lo, hi) = (prev[i.saturating_sub(1)], prev[(i + 1).min(prev.len() - 1)]);
+                if hi.0 > lo.0 {
+                    let slope = (hi.1 - lo.1) * WIN as f64 / (hi.0 - lo.0);
+                    let (off, clarity) = measure(band, prev[i].0 - WIN as f64 / 2.0, prev[i].1, slope, 0.05 * spb);
+                    pts[i] = (prev[i].0, off, clarity);
+                }
+            }
+        }
+        (pts, windows)
+    };
+    let (low, windows) = follow(&env.low_onset);
+    let (pts, windows) = if low.len() * 3 >= windows * 2 && low.iter().map(|p| p.2).sum::<f64>() / low.len().max(1) as f64 > 1.8 { (low, windows) } else { follow(&env.onset) };
+    if pts.len() < 6 || pts.len() * 3 < windows * 2 {
+        return None; // not enough clear beats to follow
+    }
+    // A fill or a break can mislead a window or two. Robust local smoothing (LOWESS): each window
+    // fitted by a small curve through its neighbours, re-weighted so windows far off the trend
+    // stop counting; a real tempo curve stays, a fill doesn't pull it.
+    let raw: Vec<f64> = pts.iter().map(|p| p.1 - ENVELOPE_LAG).collect();
+    let off = lowess(&pts.iter().map(|p| p.0).collect::<Vec<_>>(), &raw, 3);
+    // Only a sustained wander makes a map (12 ms or more off for 12 bars in a row); a steady
+    // track keeps its steady grid, whatever a fill or two did.
+    let longest = off.iter().fold((0, 0), |(run, best), o| if o.abs() >= 0.012 { (run + 1, best.max(run + 1)) } else { (0, best) }).1;
+    if longest < 3 {
+        return None;
+    }
+    // As few points as keep within 3 ms of the measured beats: a smooth tempo, not one that
+    // jitters every few bars.
+    let all: Vec<(f64, f64)> = pts.iter().zip(&off).map(|(p, o)| (p.0, *o)).collect();
+    let mut keep = vec![false; all.len()];
+    keep[0] = true;
+    keep[all.len() - 1] = true;
+    fn simplify(v: &[(f64, f64)], from: usize, to: usize, keep: &mut [bool]) {
+        let ((b0, o0), (b1, o1)) = (v[from], v[to]);
+        let far = (from + 1..to)
+            .map(|i| (i, (v[i].1 - (o0 + (o1 - o0) * (v[i].0 - b0) / (b1 - b0))).abs()))
+            .fold((0, 0.0), |a, c| if c.1 > a.1 { c } else { a });
+        if far.1 > 0.003 {
+            keep[far.0] = true;
+            simplify(v, from, far.0, keep);
+            simplify(v, far.0, to, keep);
+        }
+    }
+    simplify(&all, 0, all.len() - 1, &mut keep);
+    dj_engine::track::TempoMap::new(all.iter().zip(&keep).filter(|(_, k)| **k).map(|((b, o), _)| (*b, grid.secs_at_beat(*b) + o)).collect())
+}
+
+/// Robust local quadratic smoothing of `y` over `x` (LOWESS): each point fitted from its `half`
+/// neighbours each side, with tricube distance weights, twice re-weighted (bisquare) so that
+/// points far off the trend stop counting.
+fn lowess(x: &[f64], y: &[f64], half: usize) -> Vec<f64> {
+    let n = x.len();
+    let mut robust = vec![1.0f64; n];
+    let mut fit = y.to_vec();
+    for round in 0..3 {
+        for i in 0..n {
+            let (lo, hi) = (i.saturating_sub(half), (i + half + 1).min(n));
+            let reach = (lo..hi).map(|j| (x[j] - x[i]).abs()).fold(0.0, f64::max) * 1.0001 + 1e-9;
+            // Weighted least squares for y ≈ a + b·d + c·d² (d = x − x[i]); the fit at x[i] is a.
+            let mut m = [[0.0f64; 3]; 3];
+            let mut v = [0.0f64; 3];
+            for j in lo..hi {
+                let d = x[j] - x[i];
+                let t = (d.abs() / reach).min(1.0);
+                let w = (1.0 - t * t * t).powi(3) * robust[j];
+                let f = [1.0, d, d * d];
+                for r in 0..3 {
+                    for c in 0..3 {
+                        m[r][c] += w * f[r] * f[c];
+                    }
+                    v[r] += w * f[r] * y[j];
+                }
+            }
+            fit[i] = solve3(m, v).map_or(y[i], |s| s[0]);
+        }
+        if round == 2 {
+            break;
+        }
+        // Points far off the fit (in units of the median miss) count less next round.
+        let mut res: Vec<f64> = (0..n).map(|i| (y[i] - fit[i]).abs()).collect();
+        let mut sorted = res.clone();
+        sorted.sort_by(f64::total_cmp);
+        let scale = (6.0 * sorted[n / 2]).max(0.002);
+        for (r, w) in res.iter_mut().zip(robust.iter_mut()) {
+            let u = (*r / scale).min(1.0);
+            *w = (1.0 - u * u).powi(2);
+        }
+    }
+    fit
+}
+
+/// Solve a 3×3 linear system (Cramer's rule); `None` when singular.
+fn solve3(m: [[f64; 3]; 3], v: [f64; 3]) -> Option<[f64; 3]> {
+    let det = |a: [[f64; 3]; 3]| {
+        a[0][0] * (a[1][1] * a[2][2] - a[1][2] * a[2][1]) - a[0][1] * (a[1][0] * a[2][2] - a[1][2] * a[2][0]) + a[0][2] * (a[1][0] * a[2][1] - a[1][1] * a[2][0])
+    };
+    let d = det(m);
+    if d.abs() < 1e-12 {
+        return None;
+    }
+    let mut out = [0.0; 3];
+    for (c, o) in out.iter_mut().enumerate() {
+        let mut a = m;
+        for r in 0..3 {
+            a[r][c] = v[r];
+        }
+        *o = det(a) / d;
+    }
+    Some(out)
+}
+
+/// [`refine_grid`], correcting when the grid is `tolerance` seconds off or more somewhere.
+fn refine_grid_within(env: &Envelope, grid: &BeatGrid, tolerance: f64) -> Option<BeatGrid> {
+    let (pts, windows) = beat_offsets(env, grid)?;
     if pts.len() < 4 || pts.len() * 2 < windows {
         return None;
     }
@@ -774,5 +962,57 @@ pub(crate) mod tests {
         assert!((fixed.secs_at_beat(n - 4.0) - true_grid.secs_at_beat(n - 4.0)).abs() < 0.004, "{fixed:?}");
         // The right grid stays.
         assert_eq!(refine_grid(&env, &true_grid), None);
+    }
+
+    /// Kicks (and offbeat hats) at the given beat times.
+    fn kicks_at(times: &[f64], secs: f64) -> AudioData {
+        let len = (secs * SR as f64) as usize;
+        let mut frames = vec![[0.0f32; 2]; len];
+        for (n, &bt) in times.iter().enumerate() {
+            let s0 = (bt * SR as f64) as usize;
+            let next = times.get(n + 1).copied().unwrap_or(bt + 0.5);
+            let half = ((next - bt) / 2.0 * SR as f64) as usize;
+            for k in 0..6000 {
+                let Some(f) = frames.get_mut(s0 + k) else { break };
+                let t = k as f32 / SR as f32;
+                let mut v = 0.6 * (t * 50.0 * std::f32::consts::TAU).sin() * (-(k as f32) / 1500.0).exp();
+                if k >= half && k < half + 1200 {
+                    v += 0.1 * ((k * 7919 % 1000) as f32 / 500.0 - 1.0) * (-((k - half) as f32) / 300.0).exp();
+                }
+                f[0] += v;
+                f[1] += v;
+            }
+        }
+        AudioData { sample_rate: SR, frames }
+    }
+
+    #[test]
+    fn a_wandering_tempo_gets_a_map_that_follows_the_beats() {
+        // A drummer: 120 BPM, up to 123 by the middle, back to 120 (3 minutes).
+        let dur = 180.0;
+        let bpm_at = |t: f64| 120.0 + 3.0 * (std::f64::consts::PI * t / dur).sin();
+        let mut times = vec![0.5];
+        while *times.last().unwrap() < dur - 1.0 {
+            let t = *times.last().unwrap();
+            times.push(t + 60.0 / bpm_at(t));
+        }
+        let audio = kicks_at(&times, dur);
+        let env = Envelope::compute(&audio);
+        // The best steady grid (what a tagger gives, then dj's check).
+        let steady = BeatGrid { bpm: (times.len() - 1) as f64 * 60.0 / (times[times.len() - 1] - times[0]), anchor_secs: 0.5 };
+        let steady = refine_grid(&env, &steady).unwrap_or(steady);
+        let worst_steady = times.iter().enumerate().map(|(n, t)| (steady.secs_at_beat(n as f64) - t).abs()).fold(0.0, f64::max);
+        assert!(worst_steady > 0.03, "no steady grid fits: {worst_steady}");
+        let map = tempo_map(&env, &steady).expect("a map");
+        // Through the body of the track (the first and last 8 bars extrapolate), the map's beats
+        // are within 8 ms of the kicks (a flam is heard from about 20).
+        for (n, t) in times.iter().enumerate().skip(32).take(times.len() - 64) {
+            let e = (map.secs_at_beat(n as f64) - t).abs();
+            assert!(e < 0.008, "beat {n}: {:.1} ms off (steady grid: {:.1} ms)", e * 1000.0, (steady.secs_at_beat(n as f64) - t).abs() * 1000.0);
+        }
+        // A steady track gets none.
+        let steady_track = track(124.0, 0.5, &[(true, true, true, false); 64]);
+        let env = Envelope::compute(&steady_track);
+        assert_eq!(tempo_map(&env, &BeatGrid { bpm: 124.0, anchor_secs: 0.5 }), None);
     }
 }

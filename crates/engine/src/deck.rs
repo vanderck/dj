@@ -413,8 +413,16 @@ impl Deck {
         self.track.as_ref().map(|t| t.audio.frames.len() as f64).unwrap_or(0.0)
     }
 
+    /// The grid at the playhead: your edit, else the track's (with a tempo map, the steady grid
+    /// matching it here, so sync, loops and quantize follow a tempo that changes).
     pub fn grid(&self) -> Option<BeatGrid> {
-        self.grid_override.or_else(|| self.track.as_ref().and_then(|t| t.grid))
+        self.grid_override.or_else(|| {
+            let t = self.track.as_ref()?;
+            match &t.tempo_map {
+                Some(m) => Some(m.local(self.position_secs())),
+                None => t.grid,
+            }
+        })
     }
 
     fn frames_per_beat(&self) -> Option<f64> {

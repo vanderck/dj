@@ -13,7 +13,7 @@
 use std::io::Read;
 use std::path::Path;
 
-use dj_engine::track::{BeatGrid, Cue, CueKind};
+use dj_engine::track::{BeatGrid, Cue, CueKind, TempoMap};
 use serde::{Deserialize, Serialize};
 
 use crate::key::Key;
@@ -34,6 +34,9 @@ pub struct Tags {
     /// Serato hot-cue index for each cue (0-based), aligned with `cues`.
     pub cue_slots: Vec<u8>,
     pub grid: Option<BeatGrid>,
+    /// A Serato grid with several markers: the tempo changes through the track.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tempo_map: Option<TempoMap>,
     pub replaygain_db: Option<f32>,
 }
 
@@ -366,7 +369,9 @@ fn serato_object(desc: &str, payload: &[u8], tags: &mut Tags) {
         "Serato Markers2" => serato_markers2(payload, tags),
         "Serato BeatGrid" => {
             if let Some(g) = serato_beatgrid(payload) {
-                tags.grid = Some(g);
+                tags.tempo_map = serato_tempo_map(payload);
+                // With several markers, the steady grid is the overall one.
+                tags.grid = Some(tags.tempo_map.as_ref().map_or(g, |m| m.average()));
             }
         }
         _ => {}
@@ -449,6 +454,36 @@ pub fn serato_markers2(payload: &[u8], tags: &mut Tags) {
         tags.cue_slots.push(i);
         tags.cues.push(c);
     }
+}
+
+/// A Serato BeatGrid with several markers (each: its position and the beats to the next one; the
+/// last: its BPM) as a tempo map through them; `None` for a single marker (a steady grid).
+pub fn serato_tempo_map(payload: &[u8]) -> Option<TempoMap> {
+    if payload.len() < 6 || payload[0] != 1 || payload[1] != 0 {
+        return None;
+    }
+    let n = be32(&payload[2..6]) as usize;
+    if n < 2 || payload.len() < 6 + n * 8 {
+        return None;
+    }
+    let f = |at: usize| f32::from_be_bytes(payload[at..at + 4].try_into().unwrap()) as f64;
+    let mut points = Vec::with_capacity(n + 1);
+    let mut beat = 0.0;
+    for i in 0..n {
+        let at = 6 + i * 8;
+        points.push((beat, f(at)));
+        if i + 1 < n {
+            beat += be32(&payload[at + 4..at + 8]) as f64;
+        } else {
+            // The last marker's tempo carries on.
+            let bpm = f(at + 4);
+            if !(bpm > 20.0 && bpm < 999.0) {
+                return None;
+            }
+            points.push((beat + 64.0, f(at) + 64.0 * 60.0 / bpm));
+        }
+    }
+    TempoMap::new(points)
 }
 
 pub fn serato_beatgrid(payload: &[u8]) -> Option<BeatGrid> {
@@ -752,6 +787,29 @@ pub(crate) mod tests {
         assert_eq!(t.cues[2].kind, CueKind::Loop);
         assert_eq!(t.cues[2].end_secs, Some(34.0));
         assert_eq!(t.grid, Some(BeatGrid { bpm: 124.0, anchor_secs: 0.125 }));
+    }
+
+    #[test]
+    fn serato_grids_with_several_markers_are_a_tempo_map() {
+        // Markers at 0.5 s (64 beats to the next), 32.5 s (64 beats), 61.1 s at 134 BPM.
+        let mut p = vec![1u8, 0];
+        p.extend_from_slice(&3u32.to_be_bytes());
+        for (pos, tail) in [(0.5f32, 64u32.to_be_bytes()), (32.5, 64u32.to_be_bytes()), (61.1, 134.0f32.to_be_bytes())] {
+            p.extend_from_slice(&pos.to_be_bytes());
+            p.extend_from_slice(&tail);
+        }
+        p.push(0);
+        let m = serato_tempo_map(&p).expect("a map");
+        assert!((m.secs_at_beat(64.0) - 32.5).abs() < 1e-5);
+        assert!((m.local(10.0).bpm - 120.0).abs() < 1e-3, "{}", m.local(10.0).bpm);
+        assert!((m.local(70.0).bpm - 134.0).abs() < 1e-3);
+        // One marker: a steady grid, no map.
+        let mut one = vec![1u8, 0];
+        one.extend_from_slice(&1u32.to_be_bytes());
+        one.extend_from_slice(&0.5f32.to_be_bytes());
+        one.extend_from_slice(&124.0f32.to_be_bytes());
+        one.push(0);
+        assert_eq!(serato_tempo_map(&one), None);
     }
 
     #[test]

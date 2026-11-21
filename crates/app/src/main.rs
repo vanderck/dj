@@ -117,6 +117,11 @@ fn main() {
                         if let Some(g) = l.track.grid {
                             o.insert("dj_grid".into(), serde_json::json!({ "bpm": g.bpm, "anchor_secs": g.anchor_secs, "source": format!("{:?}", l.grid_source) }));
                         }
+                        if let Some(m) = &l.track.tempo_map {
+                            let tempos: Vec<f64> = m.points.windows(2).map(|w| (60.0 * (w[1].0 - w[0].0) / (w[1].1 - w[0].1) * 100.0).round() / 100.0).collect();
+                            let (lo, hi) = tempos.iter().fold((f64::MAX, f64::MIN), |a, t| (a.0.min(*t), a.1.max(*t)));
+                            o.insert("dj_tempo_map".into(), serde_json::json!({ "points": m.points.len(), "bpm_from": lo, "bpm_to": hi, "measured": l.detected.tempo_map }));
+                        }
                         if let Some((ms, bpm)) = l.detected.grid_fix {
                             o.insert("dj_grid_fix".into(), serde_json::json!({ "moved_ms": (ms * 10.0).round() / 10.0, "bpm_change": bpm }));
                         }

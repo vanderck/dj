@@ -117,8 +117,12 @@ dj reads, from MP3, WAV, AIFF, FLAC, Ogg/Opus and M4A files:
   (where the kicks land, every 8 bars) and corrected when it's audibly off: a
   grid a fraction of a beat early or late, or a hair off in tempo, would
   otherwise lock two tracks together with their kicks apart, drifting further
-  over minutes. Cues on the old grid's beats move with it. `dj --info FILE`
-  shows the grid dj plays by and the correction.
+  over minutes. Cues on the old grid's beats move with it. A track whose
+  tempo really changes (a live drummer, a speed-up) plays by a **tempo map**:
+  from a Serato grid with several markers, or measured from the audio when
+  the beats wander 12 ms or more off any steady grid for 12 bars; sync,
+  loops and quantize follow it. `dj --info FILE` shows the grid dj plays by,
+  the correction and any tempo map.
 - **Loudness**: measured when a track loads (EBU R128 / BS.1770, the same
   reading as ffmpeg's) and, with Settings → *Match loudness* (on), every
   track is brought to −12 LUFS (within ±12 dB), so a mix doesn't jump in
@@ -242,7 +246,9 @@ Fonts: Inter and JetBrains Mono, bundled under the SIL Open Font License (see
   Mix syncs it (a paused deck is first turned down, looped where it stands and
   started in time) and asks only **Now** or **Best**. dj works out the rest:
   where the new track comes in (your cue when you set one, else the best of
-  its cue points, intro and drops), how (stems and EQ together, or EQ alone
+  its cue points, intro and drops), whether to transpose it (a track a
+  semitone off the playing key is shifted into a key that mixes, with
+  keylock), how (stems and EQ together, or EQ alone
   without stems; a cut only when the
   two can't blend), where and how long, measured as the best transition
   within the range (soon for Now, anywhere in the playing track for Best).
@@ -271,7 +277,9 @@ Fonts: Inter and JetBrains Mono, bundled under the SIL Open Font License (see
   is tried. A bar where the two fit counts fully, two full tracks in sync
   half, a clash (vocals on vocals, melodies in clashing keys) not at all, and
   each bar a little less after 16 and 32 bars; bars where neither track has
-  drums or bass count against it. So the mix is as long as the music lets
+  drums or bass count against it, and so does energy that drops or jumps
+  (from Mixed In Key's "Energy N" cues, else the track's energy and
+  loudness: level or a step up is best). So the mix is as long as the music lets
   it be, not everywhere. At least half of the new track (32 bars or more)
   plays on after the mix, and with *Best* the old track plays most of
   itself before it starts leaving. The waveform lanes mark where the
@@ -284,7 +292,8 @@ Fonts: Inter and JetBrains Mono, bundled under the SIL Open Font License (see
   over bars: the melody from the first bar, the drums later) bring it in.
   The old track leaves the same way, on its EQ or stems, and is nearly gone a
   bar before the end; only then does its volume close. Each part moves over
-  1 to 8 bars, spread through the mix. The bass swaps where a bass keeps
+  1 to 8 bars, spread through the mix; the old vocals end in a pause of the
+  singer's, not mid-line. The bass swaps where a bass keeps
   playing longest (the old one until it stops, the new one from its entry);
   the old drums leave only where the new drums play, so the beat never drops
   out; parts that enter or stop by themselves are left alone. **Techniques only when called for:** a
