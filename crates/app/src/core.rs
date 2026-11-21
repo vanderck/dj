@@ -2773,7 +2773,7 @@ mod tests {
         // The incoming track played on through the mix (0.5 s a beat), from where the plan
         // brought it in.
         assert!(c.snap.decks[1].position_secs > len * 0.5 - 0.3, "{}", c.snap.decks[1].position_secs);
-        assert_eq!(c.snap.decks[1].stem_gains[2], 0.0, "the new track's vocals stay out");
+        assert_eq!(c.snap.decks[1].stem_gains[2], 1.0, "no old vocals: the new track's are in");
         // Until another track is loaded on that deck: it starts with every stem on.
         c.load_track(1, &kick_wav("automix-c.wav", 30));
         let deadline = Instant::now() + std::time::Duration::from_secs(60);
@@ -2941,7 +2941,7 @@ mod tests {
         assert_eq!((p(0).volume, p(1).volume), (0.7, 0.6), "volumes untouched");
         assert_eq!((p(0).eq[0], p(1).eq[0]), (0.5, 0.5), "no bass swap");
         assert!(stems);
-        assert_eq!(c.snap.decks[1].stem_gains[2], 0.0, "the new track's vocals stay out");
+        assert_eq!(c.snap.decks[1].stem_gains[2], 1.0, "no old vocals: the new track's are in");
     }
 
     /// Deck 1 plays (volume 0.9); deck 2 waits silently in a loop at its cue (8 s), with a second
@@ -3024,7 +3024,6 @@ mod tests {
         let (mut before, mut after) = (false, false);
         run_mix(&mut e, &mut c, |c, p| {
             let (gi, go) = (c.snap.decks[1].stem_gains, c.snap.decks[0].stem_gains);
-            assert_eq!(gi[2], 0.0, "Now: the new vocals stay out");
             if (0.05..ps - 0.03).contains(&p) {
                 assert_eq!((gi[1], go[1]), (0.0, 1.0), "before the swap: new bass out, old bass in");
                 if p < 0.3 {
@@ -3046,7 +3045,7 @@ mod tests {
         assert_eq!((p(0).eq[0], p(1).eq[0]), (0.5, 0.5), "the bass swaps on the stems, not the EQ");
         assert_eq!((p(0).eq[2], p(1).eq[2]), (0.5, 0.5), "highs back to where they were");
         assert_eq!(c.snap.decks[0].stem_gains, [1.0; 4], "the old deck's stems back for next time");
-        assert_eq!(c.snap.decks[1].stem_gains, [1.0, 1.0, 0.0, 1.0], "Now: the new vocals stay out");
+        assert_eq!(c.snap.decks[1].stem_gains, [1.0; 4], "no old vocals: the new ones are in");
     }
 
     #[test]
@@ -3090,7 +3089,7 @@ mod tests {
         let a = c.snap.decks[0];
         assert!(a.playing && a.loop_on);
         assert_eq!(a.stem_gains, [0.0; 4], "the old deck's sound doesn't come back");
-        assert_eq!(c.snap.decks[1].stem_gains, [1.0, 1.0, 0.0, 1.0]);
+        assert_eq!(c.snap.decks[1].stem_gains, [1.0; 4], "no old vocals: the new ones are in");
         // Only a new track (or you) changes that.
         c.load_track(0, &kick_wav("style-c.wav", 30));
         let deadline = Instant::now() + std::time::Duration::from_secs(60);
@@ -3287,10 +3286,13 @@ mod tests {
         for _ in 0..60 {
             pump(&mut e, &mut c);
         }
-        // Vocals throughout the new track (the stand-in model's are too quiet to count).
-        let bins = (c.snap.decks[1].duration_secs * dj_library::waveform::BINS_PER_SEC) as usize + 1;
-        let w = crate::stems::StemWave { bins_per_sec: dj_library::waveform::BINS_PER_SEC, levels: std::array::from_fn(|_| vec![0.5; bins]) };
-        c.decks[1].stem_wave = Some(Arc::new(w));
+        // Vocals throughout both tracks (the stand-in model's are too quiet to count): the old ones
+        // play through the whole mix, so the new ones wait.
+        for d in 0..2 {
+            let bins = (c.snap.decks[d].duration_secs * dj_library::waveform::BINS_PER_SEC) as usize + 1;
+            let w = crate::stems::StemWave { bins_per_sec: dj_library::waveform::BINS_PER_SEC, levels: std::array::from_fn(|_| vec![0.5; bins]) };
+            c.decks[d].stem_wave = Some(Arc::new(w));
+        }
         let plan = c.plan_now(1, 0, crate::settings::MixStyle::Stems);
         let beat = c.snap.decks[0].beat;
         // Now: on a phrase (8 bars when that's within 4 bars, else 4 bars): at most 4 bars after
@@ -3311,7 +3313,8 @@ mod tests {
             }
         });
         assert!(checked);
-        // Now: the new vocals are out after the mix, then come back on its next vocal phrase.
+        // The old vocals sang through the whole mix: the new ones are out after it, then come back
+        // on its next vocal phrase.
         assert_eq!(c.snap.decks[1].stem_gains[2], 0.0);
         assert!(c.vocal_return.is_some(), "a vocal phrase was found ahead");
         let deadline = Instant::now() + std::time::Duration::from_secs(60);

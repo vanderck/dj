@@ -371,7 +371,8 @@ impl Core {
         let cue_bar = ((cue_secs - start_i) / inc.bar_secs).round().max(0.0) as usize;
         let first_cue = i.hot_cues.iter().flatten().copied().fold(f64::MAX, f64::min);
         let chosen = i.loop_on || (!i.playing && cue_secs > 0.1 && (cue_secs - first_cue).abs() > 0.1);
-        let vocals_out = when == MixWhen::Now && i.stems_ready;
+        // The new vocals wait only for the old ones (see `plan_blend`), Now or Best.
+        let vocals_out = false;
         let drop_secs = self.drop_cue(incoming).and_then(|c| i.hot_cues.get(c as usize).copied().flatten());
         let drop_cue_bar = drop_secs.map(|t| ((t - start_i) / inc.bar_secs).round().max(0.0) as usize);
         let lim = Limits {
@@ -558,8 +559,7 @@ impl Core {
         }
         let bar_s = 4.0 * 60.0 / o.bpm.max(1.0);
         let bars = (NOW_SECS / bar_s).floor().clamp(8.0, 16.0);
-        let vocals_out = self.snap.decks[incoming].stems_ready;
-        let blend = self.analyse(incoming, outgoing, next_bar, bars as usize, vocals_out);
+        let blend = self.analyse(incoming, outgoing, next_bar, bars as usize, false);
         MixPlan { incoming, outgoing, mode: MixWhen::Now, how, start_beat: next_bar, length_beats: bars * 4.0, reason: format!("{bars:.0} bars, {on}"), why_how, blend, lead_in, ..MixPlan::plain() }
     }
 
@@ -711,7 +711,9 @@ impl Core {
             });
         }
         let params = |c: usize| self.session.channels[c].params;
-        let vocals_out = plan.mode == MixWhen::Now && self.snap.decks[i].stems_ready;
+        // The new vocals stay out only if the old ones play through the whole mix; then they come
+        // back on the new track's next vocal phrase.
+        let vocals_out = self.snap.decks[i].stems_ready && plan.blend.as_ref().is_some_and(|b| b.in_at[VOCALS].is_some_and(|x| x >= b.bars as f64 - 0.5));
         let mix = AutoMix {
             released: false,
             swapped: false,
@@ -743,7 +745,7 @@ impl Core {
             MixHow::Stems => {
                 let si = match &mix.plan.blend {
                     Some(b) => b.levels(0.0, vocals_out).0,
-                    None => stems_at(0.0, vocals_out, mix.plan.mode == MixWhen::Best).0,
+                    None => stems_at(0.0, vocals_out, true).0,
                 };
                 self.set_stem_levels(i, si, mix.in_stems);
                 // With dj's mixer the EQ shapes it too: the new track's highs come in gradually.
@@ -761,7 +763,9 @@ impl Core {
         } else {
             format!("in {:.0} bars", ((mix.plan.start_beat - self.snap.decks[o].beat) / 4.0).max(0.0))
         };
-        self.log(format!("Mixing deck {} into deck {} ({}): {when}", i + 1, o + 1, mix.plan.how.name(external)));
+        // What dj found in the two tracks, in a few words (the full reasons go to the terminal).
+        let found = mix.plan.notes.iter().find(|n| !n.starts_with("starts it") && !n.contains("on its own")).map(|n| format!(" · {n}")).unwrap_or_default();
+        self.log(format!("Mixing deck {} into deck {} ({}): {when}, {} bars{found}", i + 1, o + 1, mix.plan.how.name(external), (mix.plan.length_beats / 4.0).round()));
         // Why this mix, for the terminal (the status line stays short).
         let p = &mix.plan;
         let why = [p.reason.as_str(), p.why_how.as_str()].into_iter().chain(p.notes.iter().map(String::as_str)).filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ");
@@ -922,7 +926,7 @@ impl Core {
         let bars_n = len / 4.0;
         let out_vol = 1.0 - smooth(bp - (bars_n - 1.0));
         let (filter, echo_at, echo_slot, out_cutoff) = (m.plan.filter, m.plan.echo_at, m.echo_slot, m.out_cutoff);
-        let (in_stems, out_stems, vocals_out, best) = (m.in_stems, m.out_stems, m.vocals_out, m.plan.mode == MixWhen::Best);
+        let (in_stems, out_stems, vocals_out) = (m.in_stems, m.out_stems, m.vocals_out);
         let vol = |c: usize| format!("Mixer/CH{}/Volume", c + 1);
         let low = |c: usize| format!("Mixer/CH{}/EQ/Low", c + 1);
         let high = |c: usize| format!("Mixer/CH{}/EQ/High", c + 1);
@@ -961,7 +965,7 @@ impl Core {
             MixHow::Stems => {
                 let (si, so) = match &blend {
                     Some(b) => b.levels(bp, vocals_out),
-                    None => stems_at(p.min(1.0), vocals_out, best),
+                    None => stems_at(p.min(1.0), vocals_out, true),
                 };
                 self.set_stem_levels(i, si, in_stems);
                 self.set_stem_levels(o, so, out_stems);
@@ -1167,6 +1171,8 @@ pub fn plan_blend(inc: &[Vec<f32>; 4], out: &[Vec<f32>; 4], bars: usize, vocals_
     // (From a fifth of the way in, so the new track has come up, to 3 bars before the end, so the
     // old one can be taken out before its volume closes; the EQ mix keeps to the same range.)
     let (lo, hi) = swap_range(bars);
+    // No old bass to swap with at the start: the new bass may come in from the first bars.
+    let lo = if !on(&out[BASS], 0) && !on(&out[BASS], 1) { 1 } else { lo };
     let sw = (lo..=hi).max_by_key(|&sw| (with_bass(sw), natural(sw), usize::MAX - sw.abs_diff(half))).unwrap_or(half);
     notes.push(if Some(sw) == e_out {
         format!("bass swaps at bar {}, where the old bass stops", sw + 1)
@@ -1195,8 +1201,13 @@ pub fn plan_blend(inc: &[Vec<f32>; 4], out: &[Vec<f32>; 4], bars: usize, vocals_
             in_ramp[s] = lead;
         }
     }
-    // New drums: there from the start → they come up from halfway to the swap, by the swap.
-    if on(&inc[DRUMS], 0) {
+    // New drums: there from the start → they come up from halfway to the swap, by the swap; with
+    // no old drums to compete with, right away.
+    if on(&inc[DRUMS], 0) && !on(&out[DRUMS], 0) && !on(&out[DRUMS], 1) {
+        in_at[DRUMS] = Some(0.0);
+        in_ramp[DRUMS] = r;
+        notes.push("new drums come in at once (no old drums)".into());
+    } else if on(&inc[DRUMS], 0) {
         let at = (swap / 2.0).floor().max(1.0).min(swap);
         in_at[DRUMS] = Some(at);
         in_ramp[DRUMS] = (swap - at).clamp(1.0, 4.0);
@@ -1405,5 +1416,21 @@ mod tests {
             assert!(*r <= 8.0, "{b:?}");
         }
         assert!(b.levels(8.0, false).0[OTHER] >= 0.99, "the new melody is in within 8 bars");
+    }
+
+    #[test]
+    fn parts_come_in_when_nothing_competes() {
+        // The old track's outro: melody only (no drums, bass or vocals). The new track's intro
+        // has drums, bass and vocals from the start.
+        let out = lvn(24, [&[], &[], &[], &[(0, 24)]]);
+        let inc = lvn(24, [&[(0, 24)], &[(0, 24)], &[(0, 24)], &[(0, 24)]]);
+        let b = plan_blend(&inc, &out, 24, false, false);
+        assert_eq!(b.in_at[DRUMS], Some(0.0), "drums at once: {:?}", b.notes);
+        assert!(b.swap <= 2.0, "the bass right away: {}", b.swap);
+        assert!(b.levels(8.0, false).0[VOCALS] >= 0.99, "vocals in (no old vocals)");
+        // With old vocals through the whole mix, the new ones wait to the end.
+        let sung = lvn(24, [&[], &[], &[(0, 24)], &[(0, 24)]]);
+        let b = plan_blend(&inc, &sung, 24, false, false);
+        assert!(b.in_at[VOCALS].unwrap() >= 23.5);
     }
 }
