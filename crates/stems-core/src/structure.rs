@@ -11,7 +11,9 @@
 use realfft::RealFftPlanner;
 
 /// Section labels, in the model's order.
-pub const LABELS: [&str; 10] = ["start", "end", "intro", "outro", "break", "bridge", "inst", "solo", "verse", "chorus"];
+pub const LABELS: [&str; 10] = [
+    "start", "end", "intro", "outro", "break", "bridge", "inst", "solo", "verse", "chorus",
+];
 
 /// The label as one of [`LABELS`] (for sections read back from a file).
 pub fn label(name: &str) -> Option<&'static str> {
@@ -50,15 +52,28 @@ pub struct Structure {
 pub fn filterbank() -> Vec<Vec<(usize, f32)>> {
     let bins = FRAME / 2;
     let bin_freq = |k: usize| k as f64 * SAMPLE_RATE as f64 / FRAME as f64;
-    let (left, right) = (((30.0f64 / 440.0).log2() * 12.0).floor(), ((17_000.0f64 / 440.0).log2() * 12.0).ceil());
-    let freqs: Vec<f64> = (left as i64..right as i64).map(|i| 440.0 * 2f64.powf(i as f64 / 12.0)).filter(|f| *f >= 30.0 && *f <= 17_000.0).collect();
+    let (left, right) = (
+        ((30.0f64 / 440.0).log2() * 12.0).floor(),
+        ((17_000.0f64 / 440.0).log2() * 12.0).ceil(),
+    );
+    let freqs: Vec<f64> = (left as i64..right as i64)
+        .map(|i| 440.0 * 2f64.powf(i as f64 / 12.0))
+        .filter(|f| *f >= 30.0 && *f <= 17_000.0)
+        .collect();
     // The FFT bin nearest each frequency (ties to the lower one), unique.
     let mut idx: Vec<usize> = freqs
         .iter()
         .map(|&f| {
-            let i = (0..bins).position(|k| bin_freq(k) >= f).unwrap_or(bins - 1).clamp(1, bins - 1);
+            let i = (0..bins)
+                .position(|k| bin_freq(k) >= f)
+                .unwrap_or(bins - 1)
+                .clamp(1, bins - 1);
             let (l, r) = (bin_freq(i - 1), bin_freq(i));
-            if f - l < r - f { i - 1 } else { i }
+            if f - l < r - f {
+                i - 1
+            } else {
+                i
+            }
         })
         .collect();
     idx.dedup();
@@ -73,7 +88,10 @@ pub fn filterbank() -> Vec<Vec<(usize, f32)>> {
             let mut data: Vec<f64> = (0..c).map(|i| i as f64 / c as f64).collect();
             data.extend((0..s - c).map(|i| 1.0 - i as f64 / (s - c) as f64));
             let sum: f64 = data.iter().sum();
-            data.iter().enumerate().map(|(i, v)| (start + i, (v / sum) as f32)).collect()
+            data.iter()
+                .enumerate()
+                .map(|(i, v)| (start + i, (v / sum) as f32))
+                .collect()
         })
         .collect()
 }
@@ -82,7 +100,9 @@ pub fn filterbank() -> Vec<Vec<(usize, f32)>> {
 pub fn spectrogram(mono: &[f32], fb: &[Vec<(usize, f32)>]) -> Vec<Vec<f32>> {
     let n = mono.len().div_ceil(HOP);
     // Hann window, symmetric (numpy's hanning).
-    let window: Vec<f32> = (0..FRAME).map(|i| (0.5 - 0.5 * (std::f64::consts::TAU * i as f64 / (FRAME - 1) as f64).cos()) as f32).collect();
+    let window: Vec<f32> = (0..FRAME)
+        .map(|i| (0.5 - 0.5 * (std::f64::consts::TAU * i as f64 / (FRAME - 1) as f64).cos()) as f32)
+        .collect();
     let fft = RealFftPlanner::<f32>::new().plan_fft_forward(FRAME);
     let mut buf = fft.make_input_vec();
     let mut spec = fft.make_output_vec();
@@ -93,13 +113,19 @@ pub fn spectrogram(mono: &[f32], fb: &[Vec<(usize, f32)>]) -> Vec<Vec<f32>> {
             let start = (t * HOP) as i64 - (FRAME / 2) as i64;
             for (i, b) in buf.iter_mut().enumerate() {
                 let j = start + i as i64;
-                *b = if j >= 0 && (j as usize) < mono.len() { mono[j as usize] * window[i] } else { 0.0 };
+                *b = if j >= 0 && (j as usize) < mono.len() {
+                    mono[j as usize] * window[i]
+                } else {
+                    0.0
+                };
             }
             let _ = fft.process(&mut buf, &mut spec);
             for (m, c) in mag.iter_mut().zip(&spec) {
                 *m = c.norm();
             }
-            fb.iter().map(|f| (f.iter().map(|(k, w)| mag[*k] * w).sum::<f32>() + 1.0).log10()).collect()
+            fb.iter()
+                .map(|f| (f.iter().map(|(k, w)| mag[*k] * w).sum::<f32>() + 1.0).log10())
+                .collect()
         })
         .collect()
 }
@@ -112,22 +138,46 @@ pub fn sections(section_logits: &[f32], function_logits: &[Vec<f32>]) -> Vec<Sec
     if n == 0 {
         return Vec::new();
     }
-    let prob: Vec<f32> = section_logits.iter().map(|x| 1.0 / (1.0 + (-x).exp())).collect();
+    let prob: Vec<f32> = section_logits
+        .iter()
+        .map(|x| 1.0 / (1.0 + (-x).exp()))
+        .collect();
     // Local maxima within ±48 frames (4 × 24 hops per beat + 1).
     let local = |v: &[f32], half: usize| -> Vec<f32> {
-        (0..v.len()).map(|i| if v[i] >= v[i.saturating_sub(half)..(i + half + 1).min(v.len())].iter().copied().fold(f32::MIN, f32::max) { v[i] } else { 0.0 }).collect()
+        (0..v.len())
+            .map(|i| {
+                if v[i]
+                    >= v[i.saturating_sub(half)..(i + half + 1).min(v.len())]
+                        .iter()
+                        .copied()
+                        .fold(f32::MIN, f32::max)
+                {
+                    v[i]
+                } else {
+                    0.0
+                }
+            })
+            .collect()
     };
     let peaks = local(&prob, 48);
     // Peak picking against the mean of the 12 s before and after.
     let w = (12.0 * FPS) as usize;
-    let at = |i: i64| if i >= 0 && (i as usize) < n { peaks[i as usize] } else { 0.0 };
+    let at = |i: i64| {
+        if i >= 0 && (i as usize) < n {
+            peaks[i as usize]
+        } else {
+            0.0
+        }
+    };
     let mut bounds: Vec<usize> = (1..n)
         .filter(|&i| {
             let v = peaks[i];
             if v <= 0.0 {
                 return false;
             }
-            let max = (i as i64 - w as i64..=i as i64 + w as i64).map(at).fold(f32::MIN, f32::max);
+            let max = (i as i64 - w as i64..=i as i64 + w as i64)
+                .map(at)
+                .fold(f32::MIN, f32::max);
             let past = (i as i64 - w as i64..i as i64).map(at).sum::<f32>() / w as f32;
             let future = (i as i64 + 1..=i as i64 + w as i64).map(at).sum::<f32>() / w as f32;
             v == max && v - (past + future) / 2.0 > 0.0
@@ -141,15 +191,27 @@ pub fn sections(section_logits: &[f32], function_logits: &[Vec<f32>]) -> Vec<Sec
             // The label whose softmax probability is highest on average over the section.
             let mut mean = [0.0f64; 10];
             for t in b[0]..b[1] {
-                let m = function_logits.iter().map(|f| f[t]).fold(f32::MIN, f32::max);
-                let e: Vec<f64> = function_logits.iter().map(|f| ((f[t] - m) as f64).exp()).collect();
+                let m = function_logits
+                    .iter()
+                    .map(|f| f[t])
+                    .fold(f32::MIN, f32::max);
+                let e: Vec<f64> = function_logits
+                    .iter()
+                    .map(|f| ((f[t] - m) as f64).exp())
+                    .collect();
                 let sum: f64 = e.iter().sum();
                 for (k, v) in e.iter().enumerate() {
                     mean[k] += v / sum;
                 }
             }
-            let best = (0..10).max_by(|a, z| mean[*a].total_cmp(&mean[*z])).unwrap_or(0);
-            Section { start: b[0] as f64 / FPS, end: b[1] as f64 / FPS, label: LABELS[best] }
+            let best = (0..10)
+                .max_by(|a, z| mean[*a].total_cmp(&mean[*z]))
+                .unwrap_or(0);
+            Section {
+                start: b[0] as f64 / FPS,
+                end: b[1] as f64 / FPS,
+                label: LABELS[best],
+            }
         })
         .collect()
 }
@@ -163,7 +225,10 @@ pub fn mono_44k(frames: impl Iterator<Item = [f32; 2]>, rate: u32) -> Vec<f32> {
         frames.map(|f| 0.5 * (f[0] + f[1])).collect()
     } else {
         let stereo: Vec<[f32; 2]> = frames.collect();
-        crate::resample(&stereo, rate, SAMPLE_RATE).iter().map(|f| 0.5 * (f[0] + f[1])).collect()
+        crate::resample(&stereo, rate, SAMPLE_RATE)
+            .iter()
+            .map(|f| 0.5 * (f[0] + f[1]))
+            .collect()
     }
 }
 
@@ -190,12 +255,17 @@ mod model {
     impl StructureModel {
         pub fn new(options: &OnnxOptions) -> Result<Self, ModelError> {
             let session = builder(options)?.commit_from_memory(MODEL).map_err(err)?;
-            Ok(Self { session: Mutex::new(session) })
+            Ok(Self {
+                session: Mutex::new(session),
+            })
         }
 
         /// Sections and beats of a track. `part(k)`: the track's stem [`PARTS`]`[k]`, mono at
         /// 44.1 kHz (see [`mono_44k`]); asked for one at a time, so only one is in memory.
-        pub fn analyze(&self, mut part: impl FnMut(usize) -> Vec<f32>) -> Result<Structure, ModelError> {
+        pub fn analyze(
+            &self,
+            mut part: impl FnMut(usize) -> Vec<f32>,
+        ) -> Result<Structure, ModelError> {
             let fb = filterbank();
             let bands = fb.len();
             let specs: Vec<Vec<Vec<f32>>> = (0..4).map(|k| spectrogram(&part(k), &fb)).collect();
@@ -218,11 +288,22 @@ mod model {
                 let (_, v) = out[name].try_extract_tensor::<f32>().map_err(err)?;
                 Ok(v.to_vec())
             };
-            let sig = |v: Vec<f32>| v.into_iter().take(frames).map(|x| 1.0 / (1.0 + (-x).exp())).collect::<Vec<f32>>();
+            let sig = |v: Vec<f32>| {
+                v.into_iter()
+                    .take(frames)
+                    .map(|x| 1.0 / (1.0 + (-x).exp()))
+                    .collect::<Vec<f32>>()
+            };
             let section = flat("section")?;
             let function = flat("function")?; // (1, 10, t)
-            let functions: Vec<Vec<f32>> = (0..LABELS.len()).map(|k| function[k * t..k * t + frames].to_vec()).collect();
-            Ok(Structure { sections: sections(&section[..frames], &functions), beat: sig(flat("beat")?), downbeat: sig(flat("downbeat")?) })
+            let functions: Vec<Vec<f32>> = (0..LABELS.len())
+                .map(|k| function[k * t..k * t + frames].to_vec())
+                .collect();
+            Ok(Structure {
+                sections: sections(&section[..frames], &functions),
+                beat: sig(flat("beat")?),
+                downbeat: sig(flat("downbeat")?),
+            })
         }
     }
 }
@@ -247,9 +328,18 @@ mod tests {
         let n = 6000;
         // (A gently falling baseline, bumps at the boundaries: real activations are never flat.)
         let bump = |i: usize, at: f32| 10.0 * (-((i as f32 - at) / 30.0).powi(2)).exp();
-        let sec: Vec<f32> = (0..n).map(|i| -6.0 - i as f32 * 1e-4 + bump(i, 2000.0) + bump(i, 4000.0)).collect();
+        let sec: Vec<f32> = (0..n)
+            .map(|i| -6.0 - i as f32 * 1e-4 + bump(i, 2000.0) + bump(i, 4000.0))
+            .collect();
         let fun: Vec<Vec<f32>> = (0..10)
-            .map(|k| (0..n).map(|i| match (k, i / 2000) { (2, 0) | (9, 1) | (3, 2) => 5.0, _ => 0.0 }).collect())
+            .map(|k| {
+                (0..n)
+                    .map(|i| match (k, i / 2000) {
+                        (2, 0) | (9, 1) | (3, 2) => 5.0,
+                        _ => 0.0,
+                    })
+                    .collect()
+            })
             .collect();
         let s = sections(&sec, &fun);
         let got: Vec<(f64, &str)> = s.iter().map(|x| (x.start, x.label)).collect();
@@ -265,11 +355,22 @@ mod check {
     #[test]
     #[ignore]
     fn dump_spectrogram() {
-        let (Ok(i), Ok(o)) = (std::env::var("SPEC_IN"), std::env::var("SPEC_OUT")) else { return };
+        let (Ok(i), Ok(o)) = (std::env::var("SPEC_IN"), std::env::var("SPEC_OUT")) else {
+            return;
+        };
         let raw = std::fs::read(i).unwrap();
-        let mono: Vec<f32> = raw.as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes(*b)).collect();
+        let mono: Vec<f32> = raw
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_le_bytes(*b))
+            .collect();
         let spec = super::spectrogram(&mono, &super::filterbank());
-        let out: Vec<u8> = spec.iter().flatten().flat_map(|v| v.to_le_bytes()).collect();
+        let out: Vec<u8> = spec
+            .iter()
+            .flatten()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
         std::fs::write(o, out).unwrap();
     }
 }
