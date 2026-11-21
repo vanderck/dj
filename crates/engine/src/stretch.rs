@@ -1,15 +1,16 @@
-//! Realtime WSOLA time-stretcher / pitch-shifter used for key lock.
+//! Realtime time-stretch and pitch-shift for key lock and transposition, with Signalsmith
+//! Stretch (a phase vocoder that keeps transients and polyphony clean; MIT).
 //!
-//! The timeline (where the deck *is*) and the read rate (how fast each grain
-//! is played back, i.e. the pitch) are independent. Each grain is a
-//! Hann-windowed slice of the source centred on the current timeline
-//! position; consecutive grains overlap by 50% and each new grain is nudged
-//! by up to ±`search` frames to maximise waveform similarity with the natural
-//! continuation of the previous grain (WSOLA), which removes the phasey
-//! artefacts of plain granular stretching.
+//! The deck owns the timeline (where it *is*) and the pitch (how fast the audio would be read at
+//! that speed); the stretcher turns the source into audio at that position and pitch. Signalsmith
+//! works in blocks and has latency (about 120 ms of analysis and synthesis), so the stretcher reads
+//! ahead in the source, which is in memory: the input it is fed runs `lead` frames ahead of the
+//! timeline, and what comes out is heard exactly at the timeline. Small drifts in speed are evened
+//! out chunk by chunk (more or less input per chunk); jumps restart it from the new place, primed
+//! with the audio before it so it sounds right at once. Loop wraps are followed without a restart:
+//! the source wraps reads past the loop end, so the read-ahead simply continues in the loop.
 
 use crate::dsp::{hermite, Frame};
-
 /// Random access into source audio (with loop wrapping handled by the
 /// implementor).
 pub trait Source {
@@ -36,143 +37,126 @@ pub trait Source {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-struct Grain {
-    start: f64,
-    rate: f64,
-    idx: usize,
-    active: bool,
-}
+
+/// Output frames rendered at a time.
+const CHUNK: usize = 128;
+/// Most input frames per chunk (8× speed, with room to catch up).
+const MAX_IN: usize = CHUNK * 16;
 
 pub struct Stretcher {
-    n: usize,
-    hop: usize,
-    window: Vec<f32>,
-    grains: [Grain; 2],
-    newest: usize,
-    countdown: usize,
-    fresh: bool,
-    search: i64,
-    corr_len: usize,
+    st: signalsmith::Stretch,
+    /// The current chunk (interleaved) and the next frame of it to play.
+    out: Vec<f32>,
+    next: usize,
+    input: Vec<f32>,
+    seek: Vec<f32>,
+    /// The source frame the next input starts at (in the timeline's units, unwrapped: past a loop
+    /// end the source wraps it).
+    fed: f64,
+    primed: bool,
+    /// Timeline and advance when the current chunk was rendered (to notice loop wraps).
+    last: (f64, f64),
 }
 
 impl Stretcher {
     pub fn new(sample_rate: f32) -> Self {
-        // ~42 ms grains at 48 kHz: good compromise for full mixes.
-        let n = if sample_rate > 70000.0 { 4096 } else { 2048 };
-        let window = (0..n)
-            .map(|i| 0.5 - 0.5 * (2.0 * std::f32::consts::PI * i as f32 / n as f32).cos())
-            .collect();
-        Self {
-            n,
-            hop: n / 2,
-            window,
-            grains: [Grain::default(); 2],
-            newest: 0,
-            countdown: 0,
-            fresh: true,
-            search: (n / 4) as i64,
-            corr_len: n / 2,
-        }
+        let st = signalsmith::Stretch::new(sample_rate);
+        let seek = vec![0.0; st.seek_frames() * 2];
+        Self { st, out: vec![0.0; CHUNK * 2], next: CHUNK, input: vec![0.0; MAX_IN * 2], seek, fed: 0.0, primed: false, last: (0.0, 0.0) }
     }
 
+    /// Start again from wherever the next tick says (after a jump).
     pub fn reset(&mut self) {
-        self.grains = [Grain::default(); 2];
-        self.countdown = 0;
-        self.fresh = true;
+        self.primed = false;
+        self.next = CHUNK;
     }
 
-    fn best_offset<S: Source + ?Sized>(&self, src: &S, ideal: f64, target: f64, rate: f64) -> f64 {
-        // Coarse search (stride 4 in offset, decimate correlation by 4), then refine.
-        let corr = |off: i64, dec: usize| -> f32 {
-            let mut dot = 0.0f32;
-            let mut energy = 1e-9f32;
-            let a0 = ideal + off as f64;
-            let mut k = 0;
-            while k < self.corr_len {
-                let pa = (a0 + k as f64 * rate) as i64;
-                let pb = (target + k as f64 * rate) as i64;
-                let a = src.mono(pa);
-                let b = src.mono(pb);
-                dot += a * b;
-                energy += a * a;
-                k += dec;
-            }
-            dot / energy.sqrt()
-        };
-        // Start from "no shift" and only move for a genuinely better match, preferring the
-        // smaller shift on ties. Otherwise silence (all scores equal) picked the most negative
-        // offset every time, which made key-locked audio lag the playhead.
-        let better = |c: f32, off: i64, best_c: f32, best: i64| c > best_c || (c == best_c && off.abs() < best.abs());
-        let mut best = 0i64;
-        let mut best_c = corr(0, 4);
-        let mut off = -self.search;
-        while off <= self.search {
-            let c = corr(off, 4);
-            if better(c, off, best_c, best) {
-                best_c = c;
-                best = off;
-            }
-            off += 4;
+    /// The source frame it has read up to (it reads ahead of the timeline).
+    pub fn read_ahead(&self) -> f64 {
+        if self.primed {
+            self.fed
+        } else {
+            f64::NEG_INFINITY
         }
-        let coarse = best;
-        best_c = corr(coarse, 2);
-        for off in (coarse - 3)..=(coarse + 3) {
-            if off == coarse {
-                continue;
-            }
-            let c = corr(off, 2);
-            if better(c, off, best_c, best) {
-                best_c = c;
-                best = off;
-            }
-        }
-        best as f64
     }
 
-    /// Render one output frame. `timeline` is the deck position in source
-    /// frames, `read_rate` the per-output-frame source increment inside a grain.
+    /// Input frames ahead of the timeline at an advance of `advance` source frames per output
+    /// frame: what goes in now is heard this much later.
+    fn lead(&self, advance: f64) -> f64 {
+        self.st.input_latency() as f64 + self.st.output_latency() as f64 * advance
+    }
+
+    fn feed<S: Source + ?Sized>(input: &mut [f32], src: &S, from: f64) {
+        let from = from.round() as i64;
+        for (k, f) in input.chunks_exact_mut(2).enumerate() {
+            let s = src.frame(from + k as i64);
+            f[0] = s[0];
+            f[1] = s[1];
+        }
+    }
+
+    /// Start at `timeline`: prime with the audio before it, then run the output latency through
+    /// (discarded) so the first chunk is real audio, heard at the timeline.
+    fn prime<S: Source + ?Sized>(&mut self, src: &S, timeline: f64, advance: f64, transpose: f32) {
+        self.st.reset();
+        self.st.set_transpose(transpose);
+        let warm = self.st.output_latency();
+        // (So that after the warm-up the input has reached `lead` past the frame before.)
+        let start = timeline + self.st.input_latency() as f64 - advance;
+        let n_seek = self.seek.len() / 2;
+        Self::feed(&mut self.seek, src, start - n_seek as f64);
+        self.st.seek(&mut self.seek, advance);
+        self.fed = start.round();
+        let mut left = warm;
+        while left > 0 {
+            let n_out = left.min(CHUNK);
+            let n_in = ((self.fed + n_out as f64 * advance) - self.fed).round().clamp(0.0, MAX_IN as f64) as usize;
+            Self::feed(&mut self.input[..n_in * 2], src, self.fed);
+            self.st.process(&mut self.input[..n_in * 2], &mut self.out[..n_out * 2]);
+            self.fed += n_in as f64;
+            left -= n_out;
+        }
+        self.primed = true;
+        self.last = (timeline - CHUNK as f64 * advance, advance);
+    }
+
+    /// Render one output frame. `timeline`: where the deck is (source frames); `advance`: how far
+    /// it moves per output frame; `transpose`: the pitch, as the source frames read per output
+    /// frame at that pitch (1 = as recorded at the output rate).
     #[inline]
-    pub fn tick<S: Source + ?Sized>(&mut self, src: &S, timeline: f64, read_rate: f64) -> Frame {
-        if self.countdown == 0 {
-            let slot = 1 - self.newest;
-            if self.fresh {
-                // Start with two perfectly aligned grains (one half-way
-                // through) so output is at full level immediately.
-                let a = timeline - self.hop as f64 * read_rate;
-                self.grains[self.newest] = Grain { start: a, rate: read_rate, idx: self.hop, active: true };
-                self.grains[slot] = Grain { start: timeline, rate: read_rate, idx: 0, active: true };
-                self.fresh = false;
-            } else {
-                // The new grain starts *at* the timeline (the previous grain, now half-way through,
-                // also reads the timeline at this moment). Starting it a hop earlier made the
-                // output lag the playhead and cue markers by a hop (~21 ms) with key lock on.
-                let ideal = timeline;
-                let prev = self.grains[self.newest];
-                let target = prev.start + (prev.idx as f64) * prev.rate;
-                let off = self.best_offset(src, ideal, target, read_rate);
-                self.grains[slot] = Grain { start: ideal + off, rate: read_rate, idx: 0, active: true };
-            }
-            self.newest = slot;
-            self.countdown = self.hop;
+    pub fn tick<S: Source + ?Sized>(&mut self, src: &S, timeline: f64, advance: f64, transpose: f64) -> Frame {
+        if self.next == CHUNK {
+            self.render(src, timeline, advance, transpose as f32);
         }
-        self.countdown -= 1;
+        let f = [self.out[2 * self.next], self.out[2 * self.next + 1]];
+        self.next += 1;
+        f
+    }
 
-        let mut out = [0.0f32; 2];
-        for g in self.grains.iter_mut() {
-            if !g.active {
-                continue;
-            }
-            let w = self.window[g.idx];
-            let s = src.at(g.start + g.idx as f64 * g.rate);
-            out[0] += s[0] * w;
-            out[1] += s[1] * w;
-            g.idx += 1;
-            if g.idx >= self.n {
-                g.active = false;
+    fn render<S: Source + ?Sized>(&mut self, src: &S, timeline: f64, advance: f64, transpose: f32) {
+        self.next = 0;
+        if self.primed {
+            // A loop wrap (the timeline jumped back by whole loops): the read-ahead carries on in
+            // the loop, at the same distance.
+            let expected = self.last.0 + CHUNK as f64 * self.last.1;
+            let jump = timeline - expected;
+            if jump.abs() > 16.0 {
+                self.fed += jump;
             }
         }
-        out
+        // Where the input should have reached once this chunk's last frame is out.
+        let target = timeline + (CHUNK - 1) as f64 * advance + self.lead(advance);
+        let n_in = (target - self.fed).round();
+        if !self.primed || !(0.0..=MAX_IN as f64).contains(&n_in) {
+            self.prime(src, timeline, advance, transpose);
+            return self.render(src, timeline, advance, transpose);
+        }
+        let n_in = n_in as usize;
+        self.st.set_transpose(transpose);
+        Self::feed(&mut self.input[..n_in * 2], src, self.fed);
+        self.st.process(&mut self.input[..n_in * 2], &mut self.out);
+        self.fed += n_in as f64;
+        self.last = (timeline, advance);
     }
 }
 
@@ -217,7 +201,7 @@ mod tests {
         let mut pos = 0.0f64;
         let mut out = Vec::new();
         for _ in 0..(sr as usize * 2) {
-            out.push(st.tick(&src, pos, 1.0)[0]);
+            out.push(st.tick(&src, pos, 1.25, 1.0)[0]);
             pos += 1.25;
         }
         let tail = &out[out.len() / 2..];
@@ -244,7 +228,7 @@ mod tests {
         let mut pos = 0.0f64;
         let mut out = Vec::new();
         for _ in 0..(sr as usize) {
-            out.push(st.tick(&src, pos, 2.0)[0]);
+            out.push(st.tick(&src, pos, 1.0, 2.0)[0]);
             pos += 1.0;
         }
         let f = zero_crossing_freq(&out[out.len() / 2..], sr);

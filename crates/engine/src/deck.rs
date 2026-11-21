@@ -268,6 +268,8 @@ pub struct Deck {
     backspin_held: bool,
     stretcher: Stretcher,
     stretch_active: bool,
+    /// The loop the stretcher read ahead with (see the render loop).
+    stretch_loop: Option<LoopRegion>,
     xfade: u32,
     resync_requested: bool,
     last_speed: f64,
@@ -328,6 +330,7 @@ impl Deck {
             backspin_held: false,
             stretcher: Stretcher::new(out_rate as f32),
             stretch_active: false,
+            stretch_loop: None,
             xfade: 0,
             resync_requested: false,
             last_speed: 1.0,
@@ -1299,11 +1302,22 @@ impl Deck {
                 self.stretcher.reset();
                 self.xfade = XFADE_FRAMES;
             }
+            // The stretcher reads ahead: a loop set, moved or left where it has already read
+            // changes what it should have read, so it starts again from here.
+            if reader.looping != self.stretch_loop {
+                let ahead = self.stretcher.read_ahead();
+                let read_past = |l: Option<LoopRegion>| l.is_some_and(|l| ahead >= l.end);
+                if self.stretch_active && (read_past(self.stretch_loop) || read_past(reader.looping)) {
+                    self.stretcher.reset();
+                    self.xfade = XFADE_FRAMES;
+                }
+                self.stretch_loop = reader.looping;
+            }
 
             let vari = reader.at(self.pos);
             let sample = if self.stretch_active {
                 let read_rate = self.step * if self.keylock { 1.0 } else { v } * semis_ratio;
-                let s = self.stretcher.tick(&reader, self.pos, read_rate);
+                let s = self.stretcher.tick(&reader, self.pos, self.step * v, read_rate);
                 if self.xfade > 0 {
                     let t = self.xfade as f32 / XFADE_FRAMES as f32;
                     self.xfade -= 1;

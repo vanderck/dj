@@ -49,6 +49,7 @@ folder.
 
 | Crate | What it does |
 |---|---|
+| `crates/signalsmith` | Signalsmith Stretch (C++, MIT) built with `cc`, wrapped for the decks. |
 | `crates/engine` | Realtime audio engine: decks, key-lock time-stretch, mixer, insert FX chain, native effects, sampler, clock, limiter. No allocation or locking on the audio thread. |
 | `crates/vst3host` | VST3 effect host (bundle loading, parameters, state, latency, process context). |
 | `crates/library` | Decoding (symphonia), tag reading (ID3, FLAC/Ogg, MP4, Serato markers), waveforms, folder scanning, analysis of untagged tracks (BPM, grid, energy, cue points). |
@@ -240,8 +241,14 @@ Fonts: Inter and JetBrains Mono, bundled under the SIL Open Font License (see
 
 ## Other features
 
-- **Decks**: 4 decks (or 2). Key lock with a WSOLA time-stretcher and
-  independent transpose. Tempo ranges ±6/10/16/50 % or ±12 semitones. Sync with
+- **Decks**: 4 decks (or 2). Key lock and transpose with
+  [Signalsmith Stretch](https://signalsmith-audio.co.uk/code/stretch/) (MIT, vendored in
+  `crates/signalsmith`): a phase vocoder that keeps drums tight and chords clean where a
+  grain-based stretcher smears and wobbles. It reads ahead of the playhead to cover its own
+  latency (about 120 ms), so what you hear stays on the waveform and cue markers (within
+  half a millisecond); jumps, cues and loop changes restart it, primed with the audio just
+  before, so it sounds right at once. About 2 % of one core per key-locked deck (Apple's
+  vDSP FFT on macOS). Tempo ranges ±6/10/16/50 % or ±12 semitones. Sync with
   continuous phase lock; the tempo master is always a playing deck, picked
   automatically (handoff when it stops or is ejected). A synced deck's tempo
   fader sets the tempo of the mix (the master moves, everything synced

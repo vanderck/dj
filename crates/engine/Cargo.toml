@@ -7,5 +7,6 @@ license.workspace = true
 description = "Realtime-safe DJ / live-performance audio engine"
 
 [dependencies]
+signalsmith.workspace = true
 serde.workspace = true
 rtrb.workspace = true

@@ -1,0 +1,12 @@
+[package]
+name = "signalsmith"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Signalsmith Stretch (MIT, vendored C++) for dj's key lock and pitch shift"
+publish = false
+links = "signalsmith-stretch"
+
+[build-dependencies]
+cc = "1"
