@@ -88,7 +88,8 @@ pub struct Settings {
     pub default_loop_beats: f64,
     pub skip_beats: f64,
     pub load_at_first_cue: bool,
-    pub use_replaygain: bool,
+    /// Bring every track to the same loudness (measured at load), so a mix doesn't jump.
+    pub match_loudness: bool,
     pub osc_enabled: bool,
     pub osc_port: u16,
     /// Address root. Set to "/Syndicate/" to reuse controller layouts made
@@ -186,7 +187,7 @@ impl Default for Settings {
             default_loop_beats: 4.0,
             skip_beats: 16.0,
             load_at_first_cue: true,
-            use_replaygain: false,
+            match_loudness: true,
             osc_enabled: true,
             osc_port: 9090,
             osc_root: "/dj/".into(),

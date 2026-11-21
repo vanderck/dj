@@ -30,6 +30,8 @@ pub struct Bars {
     /// Low, mid, high band and peak loudness per bar (from the waveform).
     pub bands: [Vec<f32>; 3],
     pub loud: Vec<f32>,
+    /// The bar (0–7) the track's 8-bar phrases start on (see [`phrase_offset`]).
+    pub phrase: usize,
     /// Sections, worked out once (see [`Bars::finished`]).
     drop_bars: Vec<usize>,
     intro: usize,
@@ -132,9 +134,36 @@ impl Bars {
         self.outro
     }
 
+    /// With the phrases starting on bar `phrase` (from its cues).
+    pub fn with_phrase(mut self, phrase: usize) -> Self {
+        self.phrase = phrase % 8;
+        self
+    }
+
+    /// Bar `k` starts a 4-bar phrase line / an 8-bar phrase.
+    pub fn line4(&self, k: usize) -> bool {
+        (k + 8 - self.phrase % 4).is_multiple_of(4)
+    }
+
+    pub fn line8(&self, k: usize) -> bool {
+        (k + 8 - self.phrase).is_multiple_of(8)
+    }
+
     /// Bar `k` is in a break: no bass, between bars with bass.
     pub fn in_break(&self, k: usize) -> bool {
         !self.on(BASS, k) && k >= self.intro_end() && k < self.outro_start()
+    }
+}
+
+/// The bar (0–7) a track's 8-bar phrases start on, from its cue points (in bars of its grid):
+/// Mixed In Key puts them on phrase starts, which needn't be the grid's first bar (a pickup, an
+/// intro of 3 bars). 0 when most cues don't agree.
+pub fn phrase_offset(cue_bars: &[f64]) -> usize {
+    let on: Vec<usize> = cue_bars.iter().filter(|b| **b >= 0.5 && (*b - b.round()).abs() < 0.1).map(|b| (b.round() as usize) % 8).collect();
+    let best = (0..8).max_by_key(|k| (on.iter().filter(|b| *b == k).count(), usize::MAX - k));
+    match best {
+        Some(k) if on.iter().filter(|b| **b == k).count() * 2 > on.len() && on.len() >= 2 => k,
+        _ => 0,
     }
 }
 
@@ -173,6 +202,8 @@ pub struct Limits {
     pub cue_bar: Option<usize>,
     /// The bar of its drop cue (a hot cue named "Drop"), to cut in on.
     pub drop_cue_bar: Option<usize>,
+    /// The bars of its other cue points (phrase starts): places it can come in.
+    pub in_cues: Vec<usize>,
     pub blend: bool,
     pub cut: bool,
     /// Keys clash, the new vocals stay out (Now), stems on both decks.
@@ -211,11 +242,13 @@ pub fn score(out: &Bars, inc: &Bars, c: &Candidate, lim: &Limits) -> (f32, Vec<S
             s += 2.0;
         }
         // Cutting while the old track is full is abrupt unless it's at its phrase end.
-        if out.on(BASS, ob(0)) && !c.out_bar.is_multiple_of(8) {
+        if out.on(BASS, ob(0)) && !out.line8(c.out_bar) {
             s -= 2.0;
         }
     }
-    let (mut vox, mut mel, mut fit) = (0, 0, 0);
+    let (mut vox, mut mel) = (0, 0);
+    let mut good = 0.0f32;
+    let mut holes = 0usize;
     let (mut out_room, mut in_room) = (0usize, 0usize);
     if c.technique == Technique::Blend {
         for k in 0..playing {
@@ -229,8 +262,15 @@ pub fn score(out: &Bars, inc: &Bars, c: &Candidate, lim: &Limits) -> (f32, Vec<S
             // Both full is fine (in sync, the EQ and stems shape it); only clashes sound wrong.
             let full = out.fullness(o) >= 3 && inc.fullness(i) >= 3;
             let clash_here = (out.on(VOCALS, o) && inc.on(VOCALS, i) && !lim.vocals_out) || (lim.keys_clash && out.on(OTHER, o) && inc.on(OTHER, i));
-            if !full && !clash_here {
-                fit += 1;
+            // Length counts only where it sounds right: a bar where the two fit counts fully, two
+            // full tracks in sync half, a clash not at all; less after 16 and 32 bars, so a mix is
+            // long where the songs allow it, not everywhere.
+            let value = if clash_here { 0.0 } else if full { 0.5 } else { 1.0 };
+            let weight = if k < 16 { 0.5 } else if k < 32 { 0.3 } else { 0.15 };
+            good += value * weight;
+            // A hole: neither track has drums or bass here (an outro's tail on an intro's gap).
+            if !(out.on(DRUMS, o) || inc.on(DRUMS, i)) && !(out.on(BASS, o) || inc.on(BASS, i)) {
+                holes += 1;
             }
             // The old track in its outro or a break, the new one in its intro: they leave room.
             if o >= out.outro_start() || out.in_break(o) {
@@ -244,9 +284,7 @@ pub fn score(out: &Bars, inc: &Bars, c: &Candidate, lim: &Limits) -> (f32, Vec<S
         // with the EQ alone.
         let (wv, wm) = if lim.stems { (0.6, 0.4) } else { (2.0, 1.5) };
         s -= wv * vox as f32 + wm * mel as f32;
-        // The longer the better: every bar of the blend counts, more where the two fit together;
-        // clashes and crowding count against it, so it's as long as the music lets it be.
-        s += 0.25 * playing as f32 + 0.5 * fit as f32;
+        s += good - 0.6 * holes as f32;
         // Bars where the old track leaves room (outro, break) or the new one is still sparse
         // (intro) fit best.
         s += 0.15 * (out_room + in_room) as f32;
@@ -264,14 +302,23 @@ pub fn score(out: &Bars, inc: &Bars, c: &Candidate, lim: &Limits) -> (f32, Vec<S
         }
     }
     // Phrases: start and end on the old track's phrase lines; the new track from a phrase line.
-    if c.out_bar.is_multiple_of(8) {
+    if out.line8(c.out_bar) {
         s += 1.0;
     }
-    if (c.out_bar + c.bars).is_multiple_of(8) {
+    if out.line8(c.out_bar + c.bars) {
         s += 0.5;
     }
-    if c.in_bar.is_multiple_of(8) || Some(c.in_bar) == lim.cue_bar {
+    if inc.line8(c.in_bar) || Some(c.in_bar) == lim.cue_bar {
         s += 0.5;
+    }
+    // The new track from its start (intro) rather than skipping into it (unless you cued it there).
+    if Some(c.in_bar) != lim.cue_bar {
+        s -= 0.04 * c.in_bar as f32;
+    }
+    // Best: the old track plays most of itself before it starts leaving.
+    if !lim.hurry {
+        let early = (n_out * 55 / 100).saturating_sub(c.out_bar);
+        s -= 0.2 * early as f32;
     }
     // Your cue: a starting point, a small preference (the music decides where it comes in).
     let cut_on_drop_cue = c.technique == Technique::Cut && lim.drop_cue_bar.is_some();
@@ -302,6 +349,7 @@ pub fn search(out: &Bars, inc: &Bars, lim: &Limits) -> Vec<Candidate> {
     let mut entries: Vec<usize> = Vec::new();
     entries.extend(lim.cue_bar);
     entries.extend(lim.drop_cue_bar);
+    entries.extend(lim.in_cues.iter().copied());
     entries.push(0);
     for d in inc.drops().iter().copied().chain([inc.intro_end()]) {
         for back in [0, 4, 8, 16] {
@@ -312,33 +360,41 @@ pub fn search(out: &Bars, inc: &Bars, lim: &Limits) -> Vec<Candidate> {
     }
     entries.sort_unstable();
     entries.dedup();
+    // Most of the new track plays on after the mix (half of it, at least 32 bars); with a track
+    // too short for that, at least 8 bars.
+    let rest = |strict: bool| if strict { (n_in / 2).max(32) } else { 8 };
     let mut found = Vec::new();
-    for out_bar in lim.earliest..=lim.latest.min(n_out.saturating_sub(1)) {
-        // Phrase lines only (4 bars).
-        if !out_bar.is_multiple_of(4) {
-            continue;
-        }
-        for &in_bar in &entries {
-            for (tech, lengths) in [(Technique::Blend, lim.lengths.clone()), (Technique::Cut, vec![1])] {
-                if (tech == Technique::Blend && !lim.blend) || (tech == Technique::Cut && !lim.cut) {
-                    continue;
-                }
-                for &bars in &lengths {
-                    if in_bar + bars + 8 > n_in {
-                        continue; // the new track must play on after the mix
-                    }
-                    // The old track may end (and fade on its own) during the mix, up to a phrase
-                    // before the mix does; it plays at least 2 bars of it.
-                    if out_bar + bars > n_out + 4 || out_bar + 2 > n_out {
+    for strict in [true, false] {
+        for out_bar in lim.earliest..=lim.latest.min(n_out.saturating_sub(1)) {
+            // On the old track's phrase lines (every 4 bars, from its cues' phrase start).
+            if !out.line4(out_bar) {
+                continue;
+            }
+            for &in_bar in &entries {
+                for (tech, lengths) in [(Technique::Blend, lim.lengths.clone()), (Technique::Cut, vec![1])] {
+                    if (tech == Technique::Blend && !lim.blend) || (tech == Technique::Cut && !lim.cut) {
                         continue;
                     }
-                    let mut c = Candidate { out_bar, in_bar, bars, technique: tech, score: 0.0, notes: Vec::new() };
-                    let (s, notes) = score(out, inc, &c, lim);
-                    c.score = s;
-                    c.notes = notes;
-                    found.push(c);
+                    for &bars in &lengths {
+                        if in_bar + bars + rest(strict) > n_in {
+                            continue;
+                        }
+                        // The old track may end (and fade on its own) during the mix, up to a
+                        // phrase before the mix does; it plays at least 2 bars of it.
+                        if out_bar + bars > n_out + 4 || out_bar + 2 > n_out {
+                            continue;
+                        }
+                        let mut c = Candidate { out_bar, in_bar, bars, technique: tech, score: 0.0, notes: Vec::new() };
+                        let (s, notes) = score(out, inc, &c, lim);
+                        c.score = s;
+                        c.notes = notes;
+                        found.push(c);
+                    }
                 }
             }
+        }
+        if !found.is_empty() {
+            break;
         }
     }
     found.sort_by(|a, b| b.score.total_cmp(&a.score));
@@ -375,6 +431,7 @@ mod tests {
             lengths: (2..=16).map(|k| 4 * k).collect(),
             cue_bar: None,
             drop_cue_bar: None,
+            in_cues: vec![],
             blend: true,
             cut: true,
             keys_clash: false,
@@ -421,6 +478,7 @@ mod tests {
         let mut lim = limits(20, 28);
         lim.hurry = true;
         lim.cue_bar = Some(32);
+        lim.cut = false;
         lim.lengths = vec![4];
         let b = &search(&out, &inc, &lim)[0];
         assert_eq!(b.out_bar, 20);
@@ -462,5 +520,40 @@ mod tests {
         let inc = track(96, [&[(0, 96)], &[(32, 96)], &[(40, 80)], &[(0, 96)]]);
         let b = &search(&out, &inc, &lim)[0];
         assert!(b.bars >= 32, "{b:?}");
+    }
+
+    #[test]
+    fn phrases_come_from_the_cues() {
+        // Too Good's cues (bars of its grid): phrases start 3 bars in.
+        assert_eq!(phrase_offset(&[-0.95, 7.0, 35.0, 43.0, 75.0, 91.0, 99.0, 107.0]), 3);
+        // Push's: on the grid's bars.
+        assert_eq!(phrase_offset(&[0.0, 16.0, 24.0, 84.0, 92.0, 136.0, 144.0]), 0);
+        assert_eq!(phrase_offset(&[]), 0);
+        let t = track(32, [&[(0, 32)]; 4]).with_phrase(3);
+        assert!(t.line4(7) && t.line4(3) && !t.line4(4) && t.line8(11) && !t.line8(7));
+    }
+
+    #[test]
+    fn the_new_track_keeps_most_of_itself_and_best_waits_for_the_old_ones_end() {
+        // Two sparse tracks that fit anywhere: no reason to mix early or to use up the new one.
+        let out = track(128, [&[(0, 128)], &[(0, 100)], &[], &[(0, 128)]]);
+        let inc = track(128, [&[(0, 128)], &[(16, 128)], &[], &[(0, 128)]]);
+        let mut lim = limits(8, 127);
+        lim.cut = false;
+        let b = &search(&out, &inc, &lim)[0];
+        assert!(b.in_bar + b.bars + 64 <= 128, "half of the new track left: {b:?}");
+        assert!(b.out_bar >= 64, "the old track plays most of itself first: {b:?}");
+    }
+
+    #[test]
+    fn gaps_in_both_tracks_are_not_lined_up() {
+        // The old track's drums and bass stop at bar 60; the new intro has a 4-bar gap at 8-12.
+        let out = track(96, [&[(0, 60)], &[(0, 60)], &[], &[(0, 96)]]);
+        let inc = track(96, [&[(0, 8), (12, 96)], &[(12, 96)], &[], &[(0, 96)]]);
+        let lim = limits(40, 60);
+        let at = |out_bar| score(&out, &inc, &Candidate { out_bar, in_bar: 0, bars: 16, technique: Technique::Blend, score: 0.0, notes: vec![] }, &lim).0;
+        // From bar 52 the gap lands on the old track's silence (4 bars with neither drums nor
+        // bass); from 48 the old drums fill it.
+        assert!(at(48) > at(52), "{} {}", at(48), at(52));
     }
 }

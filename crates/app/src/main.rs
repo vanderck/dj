@@ -107,7 +107,15 @@ fn main() {
                 std::process::exit(2);
             };
             match dj_library::tags::read(&PathBuf::from(p)) {
-                Ok(t) => println!("{}", serde_json::to_string_pretty(&t).unwrap_or_default()),
+                Ok(t) => {
+                    // Tags, plus the loudness dj measures (what loudness matching evens out).
+                    let mut v = serde_json::to_value(&t).unwrap_or_default();
+                    let lufs = dj_library::decode(&PathBuf::from(p)).ok().and_then(|a| dj_library::loudness::integrated(&a));
+                    if let Some(o) = v.as_object_mut() {
+                        o.insert("loudness_lufs".into(), lufs.map(|l| (l * 10.0).round() / 10.0).into());
+                    }
+                    println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default())
+                }
                 Err(e) => {
                     eprintln!("{e}");
                     std::process::exit(1);

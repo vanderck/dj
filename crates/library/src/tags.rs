@@ -162,6 +162,12 @@ fn be32(b: &[u8]) -> u32 {
     u32::from_be_bytes([b[0], b[1], b[2], b[3]])
 }
 
+/// A Serato position (milliseconds) in seconds. Taggers write a cue just before the first audio
+/// frame as a small negative number (−55 ms is 0xFFFFFFC9): read it signed, from the start.
+fn serato_ms(b: &[u8]) -> f64 {
+    (be32(b) as i32).max(0) as f64 / 1000.0
+}
+
 fn le32(b: &[u8]) -> u32 {
     u32::from_le_bytes([b[0], b[1], b[2], b[3]])
 }
@@ -415,16 +421,16 @@ pub fn serato_markers2(payload: &[u8], tags: &mut Tags) {
         match name.as_str() {
             "CUE" if d.len() >= 13 => {
                 let idx = d[1];
-                let ms = be32(&d[2..6]);
+                let ms = serato_ms(&d[2..6]);
                 let color = parse_serato_rgb(&d[7..10]);
                 let label_end = d[12..].iter().position(|&c| c == 0).unwrap_or(d.len() - 12);
                 let label = String::from_utf8_lossy(&d[12..12 + label_end]).into_owned();
-                cues.push((idx, Cue { kind: CueKind::Hot, secs: ms as f64 / 1000.0, end_secs: None, name: label, color }));
+                cues.push((idx, Cue { kind: CueKind::Hot, secs: ms, end_secs: None, name: label, color }));
             }
             "LOOP" if d.len() >= 20 => {
                 let idx = d[1];
-                let s = be32(&d[2..6]);
-                let e = be32(&d[6..10]);
+                let s = serato_ms(&d[2..6]);
+                let e = serato_ms(&d[6..10]);
                 let color = parse_serato_rgb(&d[15..18]);
                 // Layout: 0, idx, start, end, 0xFFFFFFFF, 0x00 RGB, locked, name\0
                 let label_end = d[19..].iter().position(|&c| c == 0).unwrap_or(d.len() - 19);
@@ -432,7 +438,7 @@ pub fn serato_markers2(payload: &[u8], tags: &mut Tags) {
                 // Loops occupy their own bank in Serato; place after hot cues.
                 cues.push((
                     100 + idx,
-                    Cue { kind: CueKind::Loop, secs: s as f64 / 1000.0, end_secs: Some(e as f64 / 1000.0), name: label, color },
+                    Cue { kind: CueKind::Loop, secs: s, end_secs: Some(e), name: label, color },
                 ));
             }
             _ => {}
@@ -746,6 +752,19 @@ pub(crate) mod tests {
         assert_eq!(t.cues[2].kind, CueKind::Loop);
         assert_eq!(t.cues[2].end_secs, Some(34.0));
         assert_eq!(t.grid, Some(BeatGrid { bpm: 124.0, anchor_secs: 0.125 }));
+    }
+
+    #[test]
+    fn a_cue_just_before_the_first_frame_is_at_the_start() {
+        // Mixed In Key writes −55 ms as 0xFFFFFFC9: not 49 days in.
+        let mut geob = vec![0u8];
+        geob.extend_from_slice(b"application/octet-stream\0\0Serato Markers2\0");
+        geob.extend_from_slice(&markers2(&[(0, (-55i32) as u32, "Energy 6"), (1, 16_190, "")], &[]));
+        let mut t = Tags::default();
+        parse_id3(&id3_tag(&[id3_frame_bytes(b"GEOB", &geob)]), &mut t);
+        t.finish();
+        assert_eq!(t.cues[0].secs, 0.0);
+        assert_eq!(t.cues[1].secs, 16.19);
     }
 
     #[test]

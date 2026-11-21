@@ -184,7 +184,8 @@ fn settings(ui: &mut Ui, core: &mut Core, st: &mut UiState) {
             .small()
             .weak(),
     );
-    ui.checkbox(&mut core.settings.use_replaygain, "Apply ReplayGain from tags");
+    ui.checkbox(&mut core.settings.match_loudness, "Match loudness")
+        .on_hover_text("Measure each track's loudness when it loads and bring it to the same level, so a mix doesn't jump. Applies to tracks loaded after the change.");
     ui.horizontal(|ui| {
         ui.label("Tape stop");
         changed_engine |= ui.add(egui::DragValue::new(&mut core.settings.tape_stop_ms).range(0.0..=3000.0).suffix(" ms")).changed();

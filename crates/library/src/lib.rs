@@ -6,6 +6,7 @@
 
 pub mod analysis;
 pub mod key;
+pub mod loudness;
 pub mod scan;
 pub mod tags;
 pub mod waveform;
@@ -148,6 +149,34 @@ pub fn serato_timing(tags: &mut Tags, path: &Path, sample_rate: u32) {
     }
 }
 
+/// Mixed In Key puts its cues on phrase starts, so on downbeats. When most hot cues sit the same
+/// whole number of beats into the grid's bars, the grid's first beat isn't a downbeat (a Serato
+/// grid can start on any beat): move it there so the bars are the track's. Returns the beats moved.
+pub fn downbeat_from_cues(grid: &mut BeatGrid, cues: &[Option<Cue>]) -> Option<f64> {
+    if grid.bpm <= 0.0 {
+        return None;
+    }
+    let spb = 60.0 / grid.bpm;
+    // (A cue at the very start may be one moved there from just before it.)
+    let beats: Vec<f64> = cues
+        .iter()
+        .flatten()
+        .filter(|c| c.kind == CueKind::Hot && c.secs > 0.1)
+        .filter_map(|c| {
+            let b = (c.secs - grid.anchor_secs) / spb;
+            let r = b.round();
+            ((b - r).abs() < 0.15).then(|| r.rem_euclid(4.0))
+        })
+        .collect();
+    let best = (1..4).map(|k| k as f64).max_by_key(|k| beats.iter().filter(|b| *b == k).count())?;
+    let agree = beats.iter().filter(|b| **b == best).count();
+    if agree < 2 || agree * 2 <= beats.len() {
+        return None;
+    }
+    grid.anchor_secs += best * spb;
+    Some(best)
+}
+
 /// Choose a beat grid from tags, never estimating the tempo itself.
 pub fn grid_for(tags: &Tags, audio: &AudioData) -> Option<(BeatGrid, GridSource)> {
     if let Some(g) = tags.grid {
@@ -168,7 +197,12 @@ pub struct LoadedTrack {
     pub grid_source: Option<GridSource>,
     pub waveform: Arc<Waveform>,
     pub detected: Detected,
+    /// Integrated loudness (LUFS), measured at load.
+    pub loudness: Option<f64>,
 }
+
+/// Loudness matching brings every track to this (LUFS), within ±12 dB.
+pub const LOUDNESS_TARGET: f64 = -12.0;
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -212,7 +246,7 @@ pub struct Detected {
 }
 
 /// Decode + read tags + build waveform. Runs on a worker thread.
-pub fn load(path: &Path, overrides: Option<&TrackOverrides>, use_replaygain: bool, detect: DetectOptions) -> Result<LoadedTrack> {
+pub fn load(path: &Path, overrides: Option<&TrackOverrides>, match_loudness: bool, detect: DetectOptions) -> Result<LoadedTrack> {
     let audio = decode(path)?;
     let mut tags = tags::read(path).unwrap_or_default();
     serato_timing(&mut tags, path, audio.sample_rate);
@@ -265,6 +299,11 @@ pub fn load(path: &Path, overrides: Option<&TrackOverrides>, use_replaygain: boo
         }
     }
 
+    // A tag grid whose first beat isn't a downbeat: the cues say where the bars start.
+    if let (Some(g), Some(GridSource::Tag | GridSource::FirstCue)) = (grid.as_mut(), source) {
+        downbeat_from_cues(g, &cues);
+    }
+
     // Detection for what the tags (and saved values) do not give.
     let user_cues = overrides.is_some_and(|o| o.cues.is_some());
     let want_cues = !user_cues && (detect.prefer_detected_cues || cues.iter().all(|c| c.is_none()));
@@ -299,9 +338,13 @@ pub fn load(path: &Path, overrides: Option<&TrackOverrides>, use_replaygain: boo
         }
     }
     let waveform = Arc::new(Waveform::build(&audio));
-    let gain = if use_replaygain { tags.replaygain_db.map(db_to_gain).unwrap_or(1.0) } else { 1.0 };
+    let loudness = loudness::integrated(&audio);
+    let gain = match loudness {
+        Some(l) if match_loudness => db_to_gain(((LOUDNESS_TARGET - l).clamp(-12.0, 12.0)) as f32),
+        _ => 1.0,
+    };
     let track = Arc::new(Track { id: next_track_id(), audio, grid, gain, cues });
-    Ok(LoadedTrack { path: path.to_path_buf(), track, tags, grid_source: source, waveform, detected })
+    Ok(LoadedTrack { path: path.to_path_buf(), track, tags, grid_source: source, waveform, detected, loudness })
 }
 
 /// Decode a short sample for a sampler lane (max 15 s, like the original).
@@ -406,6 +449,35 @@ mod tests {
         assert_eq!(again.grid_source, Some(GridSource::Detected));
         assert!(!again.detected.grid && again.detected.energy.is_none() && !again.detected.cues_pending);
         let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[cfg(test)]
+mod downbeat_tests {
+    use super::*;
+
+    fn hot(secs: f64) -> Option<Cue> {
+        Some(Cue { kind: CueKind::Hot, secs, end_secs: None, name: String::new(), color: [0; 3] })
+    }
+
+    #[test]
+    fn cues_two_beats_into_the_bars_move_the_downbeat() {
+        // Too Good: a Serato grid starting on beat 3; Mixed In Key's cues on the real downbeats.
+        let mut g = BeatGrid { bpm: 118.0, anchor_secs: 0.910 };
+        let spb = 60.0 / 118.0;
+        let cues = [hot(0.0), hot(16.16), hot(73.11), hot(89.38), hot(154.47), hot(187.01), hot(203.28), hot(219.55)];
+        assert_eq!(downbeat_from_cues(&mut g, &cues), Some(2.0));
+        assert!((g.anchor_secs - (0.910 + 2.0 * spb)).abs() < 1e-9);
+        for c in cues.iter().flatten().skip(1) {
+            let bar = (c.secs - g.anchor_secs) / (4.0 * spb);
+            assert!((bar - bar.round()).abs() < 0.03, "{} is on a bar line now ({bar})", c.secs);
+        }
+        // Cues already on bar lines (or not agreeing) leave the grid alone.
+        let mut g = BeatGrid { bpm: 122.0, anchor_secs: 0.38 };
+        let on_bars = [hot(0.38), hot(31.86), hot(47.6), hot(165.65)];
+        assert_eq!(downbeat_from_cues(&mut g, &on_bars), None);
+        let mut g = BeatGrid { bpm: 120.0, anchor_secs: 0.0 };
+        assert_eq!(downbeat_from_cues(&mut g, &[hot(2.5), hot(4.0), hot(9.0)]), None, "no majority");
     }
 }
 
