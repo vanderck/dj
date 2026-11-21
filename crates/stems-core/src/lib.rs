@@ -9,6 +9,7 @@ pub mod offline;
 #[cfg(any(feature = "onnx", feature = "onnx-dynamic"))]
 mod onnx;
 mod resample;
+pub mod structure;
 
 pub use offline::ModelError;
 #[cfg(any(feature = "onnx", feature = "onnx-dynamic"))]

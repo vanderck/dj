@@ -67,6 +67,7 @@ fn draw_lane(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, lane: Rec
     let names: Vec<String> = info.unwrap().cues.iter().map(|c| c.as_ref().map(|c| c.name.clone()).unwrap_or_default()).collect();
     let zones = energy_zones(&v.hot_cues, &names, v.duration_secs);
     let stem_wave = core.decks[d].stem_wave.clone();
+    let sections = core.decks[d].sections.clone();
 
     // Common scale: pixels per beat is the same for every deck, so synced
     // decks line up beat for beat.
@@ -262,7 +263,18 @@ fn draw_lane(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, lane: Rec
         let Some(t) = c else { continue };
         p.rect_filled(Rect::from_center_size(Pos2::new(px(*t), prog.center().y), Vec2::new(3.0, prog.height() + 2.0)), CornerRadius::ZERO, CUE[i]);
     }
-    let pr = ui.allocate_rect(prog.expand2(Vec2::new(0.0, 2.0)), Sense::click_and_drag());
+    // The song's sections: a notch where each starts; hover for its name.
+    for s in sections.iter().flat_map(|s| s.iter()).skip(1) {
+        p.rect_filled(Rect::from_center_size(Pos2::new(px(s.start), prog.center().y), Vec2::new(1.5, prog.height() + 2.0)), CornerRadius::ZERO, Color32::from_black_alpha(220));
+    }
+    let mut pr = ui.allocate_rect(prog.expand2(Vec2::new(0.0, 2.0)), Sense::click_and_drag());
+    if let (Some(pos), Some(list)) = (pr.hover_pos(), sections.as_deref()) {
+        let t = ((pos.x - prog.left()) / prog.width()).clamp(0.0, 1.0) as f64 * dur;
+        if let Some(s) = list.iter().find(|s| s.start <= t && t < s.end) {
+            let mmss = |x: f64| format!("{}:{:02}", (x / 60.0) as u32, (x % 60.0) as u32);
+            pr = pr.on_hover_text(format!("{} {}–{}", s.label, mmss(s.start), mmss(s.end)));
+        }
+    }
     if pr.clicked() || pr.dragged() {
         if let Some(pos) = pr.interact_pointer_pos() {
             act_f(core, &format!("Deck/{}/WaveformSeek", d + 1), ((pos.x - prog.left()) / prog.width()).clamp(0.0, 1.0));
