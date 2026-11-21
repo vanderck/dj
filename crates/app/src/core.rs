@@ -2680,7 +2680,6 @@ mod tests {
         assert_eq!(c.snap.clock.owner, ClockOwner::Deck(1));
         assert_eq!(c.mix_target(1), Some(0));
         assert_eq!(c.mix_target(0), None, "the playing deck is not a candidate");
-        assert!(!c.mix_is_urgent(0));
 
         // Best: searched over the whole track: on a 4-bar line, ahead, whole phrases long.
         let best = c.plan_best(1, 0, crate::settings::MixStyle::Eq);
@@ -3289,7 +3288,33 @@ mod tests {
     }
 
     #[test]
-    fn mix_techniques_filter_echo_and_outro_loop() {
+    fn the_old_track_may_end_during_a_mix() {
+        let (mut e, mut c, _config) = core();
+        mix_setup(&mut e, &mut c);
+        let plan = c.plan_now(1, 0, crate::settings::MixStyle::Eq);
+        let start = plan.start_beat;
+        c.start_mix(plan);
+        // Once the mix is under way, the old track runs out (it fades on its own): no rush, the
+        // mix goes on and finishes bringing the new one in.
+        let mut blocks = 0;
+        while c.mix_beat() < start + 4.0 {
+            pump(&mut e, &mut c);
+            blocks += 1;
+            assert!(blocks < 48000 / 512 * 120, "mix never started");
+        }
+        assert!(c.automix.is_some());
+        c.deck_cmd(0, DeckCmd::SeekFraction(0.999));
+        run_mix(&mut e, &mut c, |_, _| {});
+        assert!(!c.snap.decks[0].playing, "the old track ended");
+        assert!(!c.status.iter().any(|(_, m)| m.contains("cancelled")), "{:?}", c.status);
+        assert!(c.status.iter().any(|(_, m)| m.starts_with("Mixed into")), "{:?}", c.status);
+        assert!(c.snap.decks[1].playing);
+        assert!((c.session.channels[1].params.volume - 1.0).abs() < 1e-6);
+        assert!((c.session.channels[1].params.eq[0] - 0.5).abs() < 1e-6, "the new bass in");
+    }
+
+    #[test]
+    fn mix_techniques_filter_and_echo() {
         let (mut e, mut c, _config) = core();
         mix_setup(&mut e, &mut c);
         let mut plan = c.plan_now(1, 0, crate::settings::MixStyle::Eq);
@@ -3297,9 +3322,8 @@ mod tests {
         // Force every technique on this one.
         plan.filter = Some((0.0, bars));
         plan.echo_at = Some(bars - 1.0);
-        plan.loop_out = Some((plan.start_beat, 8.0));
         c.start_mix(plan);
-        let (mut swept, mut echoed, mut looped) = (false, false, false);
+        let (mut swept, mut echoed) = (false, false);
         run_mix(&mut e, &mut c, |c, _| {
             if c.session.channels[0].params.cutoff > 0.6 {
                 swept = true;
@@ -3307,13 +3331,9 @@ mod tests {
             if c.session.channels[0].fx.slots.iter().flatten().any(|s| s.name == "Echo") {
                 echoed = true;
             }
-            if c.snap.decks[0].loop_on {
-                looped = true;
-            }
         });
         assert!(swept, "high-pass sweep on the old track");
         assert!(echoed, "echo inserted on the old track");
-        assert!(looped, "the old track looped");
         assert_eq!(c.session.channels[0].params.cutoff, 0.5, "filter back");
         // The echo goes once its tail has rung out (2 bars).
         assert!(!c.echo_cleanup.is_empty());

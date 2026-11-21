@@ -227,9 +227,9 @@ Fonts: Inter and JetBrains Mono, bundled under the SIL Open Font License (see
   within the range (soon for Now, anywhere in the playing track for Best).
   - **When**: **Now** starts on the playing track's next phrase lines, with
     the new track's vocals (stems) out; they come back on its next phrase
-    that has vocals. **Best** looks over the whole playing track.
-    With less than a minute of the playing track left, Mix mixes now without
-    asking.
+    that has vocals. **Best** looks over the whole playing track. No rush
+    near the end: a mix may run past the playing track's end, which then
+    fades out on its own under the new one.
 
   **Each mix is found, not scripted.** dj reads both tracks bar by bar: the
   level of drums, bass, vocals and other (from the stems; without stems, an
@@ -244,10 +244,11 @@ Fonts: Inter and JetBrains Mono, bundled under the SIL Open Font License (see
   each other, both tracks full at once, the old outro/break meeting the new
   intro; plus the new drop landing as the old track leaves, a natural bass
   swap, phrase lines, the loudness jump after the mix, and waiting.
-  **How long comes from the songs:** every phrase length up to 64 bars is
-  tried and every bar the two play well together counts, so the mix lasts as
-  long as the music lets it (a long outro under a long intro: a long mix; two
-  full tracks with vocals: a short one). The waveform lanes mark where the
+  **How long comes from the songs:** every phrase length from 8 to 64 bars is
+  tried; every bar of the blend counts, more where the two fit together, and
+  clashes count against it, so the mix is as long and gradual as the music
+  lets it be (with stems even two full tracks get a long blend, the parts
+  taken apart; vocals on vocals without stems: a short one). The waveform lanes mark where the
   mix starts, ends and where the basses swap, and the reasons are printed
   in the terminal.
 
@@ -261,7 +262,7 @@ Fonts: Inter and JetBrains Mono, bundled under the SIL Open Font License (see
   or stop by themselves left alone). **Techniques only when called for:** a
   high-pass sweep when the old track is still full as it has to go (EQ), an
   echo-out when it leaves mid-phrase with vocals or is cut while its bass
-  plays, a loop of the old outro when it would end before the mix does.
+  plays.
 
   The new track always starts on its own bar line: if its cue isn't on a
   downbeat, it starts a few beats early so its bars fall on the playing

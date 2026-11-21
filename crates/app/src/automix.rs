@@ -36,12 +36,11 @@ pub use crate::settings::MixStyle;
 pub const BEST_BEATS: f64 = 64.0;
 /// A drop: one bar.
 const DROP_BEATS: f64 = 4.0;
-/// Without analysis (no beat grid or waveform), a Now mix lasts about this long (4–8 bars).
-const NOW_SECS: f64 = 16.0;
-/// The longest mix the search tries, in bars.
+/// Without analysis (no beat grid or waveform), a Now mix lasts about this long (8–16 bars).
+const NOW_SECS: f64 = 32.0;
+/// The shortest and longest blend the search tries, in bars.
+const MIN_MIX_BARS: usize = 8;
 const MAX_MIX_BARS: usize = 64;
-/// Below this much outgoing time left, Mix always mixes now.
-const LAST_MINUTE_SECS: f64 = 60.0;
 /// Stem order: drums, bass, vocals, other.
 use crate::transition::{BASS, DRUMS, OTHER, PRESENT, VOCALS};
 /// The echo an echo-out inserts.
@@ -98,9 +97,6 @@ pub struct MixPlan {
     pub filter: Option<(f64, f64)>,
     /// An echo-out on the old track from this bar (it has to leave mid-phrase).
     pub echo_at: Option<f64>,
-    /// The old track loops from this beat (outgoing beats) for this many beats: it would end
-    /// before the mix does.
-    pub loop_out: Option<(f64, f64)>,
     /// What the plan follows in the two tracks, printed when the mix starts.
     pub notes: Vec<String>,
 }
@@ -122,7 +118,6 @@ impl MixPlan {
             entry_secs: None,
             filter: None,
             echo_at: None,
-            loop_out: None,
             notes: Vec::new(),
         }
     }
@@ -152,11 +147,9 @@ pub struct AutoMix {
     /// The outgoing deck's beat minus the master clock's when the mix started. The mix runs on
     /// the clock (+ this), which keeps counting while the outgoing deck loops.
     beat_offset: f64,
-    /// The old channel's filter before the mix (a sweep puts it back), the echo inserted on it,
-    /// and whether its outro loop is on.
+    /// The old channel's filter before the mix (a sweep puts it back) and the echo inserted on it.
     out_cutoff: f32,
     echo_slot: Option<usize>,
-    looped: bool,
 }
 
 /// After a Now mix: bring the new track's vocals back where its next vocal phrase starts.
@@ -244,12 +237,6 @@ impl Core {
                 self.session.channels[a].params.volume.total_cmp(&self.session.channels[b].params.volume)
             }),
         }
-    }
-
-    /// Whether Mix should skip the popup (the outgoing track ends within a minute).
-    pub fn mix_is_urgent(&self, outgoing: usize) -> bool {
-        let v = &self.snap.decks[outgoing];
-        (v.duration_secs - v.position_secs) / v.speed.max(0.01) < LAST_MINUTE_SECS
     }
 
     /// The incoming deck's drop cue (a hot cue named "Drop…"), if any.
@@ -374,9 +361,9 @@ impl Core {
         let lead = if i.playing { 0.5 } else { 4.5 } + 3.0;
         let earliest = ((o.beat + lead) / 4.0).ceil().max(0.0) as usize;
         let latest = if when == MixWhen::Now { earliest + 4 } else { out.len() };
-        // Every phrase length (4 bars) up to 64: how long is up to the two songs (the search
-        // scores each bar of the overlap; the longer they play well together, the better).
-        let lengths: Vec<usize> = (1..=MAX_MIX_BARS / 4).map(|k| 4 * k).collect();
+        // Every phrase length (4 bars) from 8 up to 64: how long is up to the two songs (the
+        // search scores each bar of the overlap; the longer they play well together, the better).
+        let lengths: Vec<usize> = (MIN_MIX_BARS / 4..=MAX_MIX_BARS / 4).map(|k| 4 * k).collect();
         // Your cue (or where a paused deck stands) as a bar of the new track.
         let cue_secs = if i.loop_on { i.loop_start_secs } else { i.position_secs };
         let cue_bar = ((cue_secs - start_i) / inc.bar_secs).round().max(0.0) as usize;
@@ -396,7 +383,6 @@ impl Core {
             stems,
             hurry: when == MixWhen::Now,
         };
-        let n_out = out.len();
         tr::search(&out, &inc, &lim)
             .into_iter()
             .map(|c| {
@@ -412,7 +398,7 @@ impl Core {
                 } else {
                     (Some(inc.secs(c.in_bar as f64)), 0.0)
                 };
-                let ob = |k: usize| tr::out_bar(c.out_bar, k, c.loop_from, n_out);
+                let ob = |k: usize| c.out_bar + k;
                 let inc_w: [Vec<f32>; 4] = std::array::from_fn(|p| (0..bars).map(|k| inc.level(p, c.in_bar + k)).collect());
                 let out_w: [Vec<f32>; 4] = std::array::from_fn(|p| (0..bars).map(|k| out.level(p, ob(k))).collect());
                 let blend = (how != MixHow::Drop).then(|| plan_blend(&inc_w, &out_w, bars, vocals_out, clash));
@@ -429,7 +415,6 @@ impl Core {
                     MixHow::Eq | MixHow::Stems if mid_phrase && out.on(tr::VOCALS, ob(bars - 1)) => Some((bars - 1) as f64),
                     _ => None,
                 };
-                let loop_out = c.loop_from.map(|l| (l as f64 * 4.0, (n_out.saturating_sub(l)).max(1) as f64 * 4.0));
                 let mut notes = c.notes.clone();
                 if let Some(b) = &blend {
                     notes.extend(b.notes.iter().take(2).cloned());
@@ -470,7 +455,6 @@ impl Core {
                     entry_secs,
                     filter,
                     echo_at,
-                    loop_out,
                     notes,
                 }
             })
@@ -502,7 +486,7 @@ impl Core {
             return MixPlan { incoming, outgoing, mode: MixWhen::Now, how, start_beat, length_beats: DROP_BEATS, reason: reason.into(), why_how, blend: None, lead_in, ..MixPlan::plain() };
         }
         let bar_s = 4.0 * 60.0 / o.bpm.max(1.0);
-        let bars = (NOW_SECS / bar_s).floor().clamp(4.0, 8.0);
+        let bars = (NOW_SECS / bar_s).floor().clamp(8.0, 16.0);
         let vocals_out = self.snap.decks[incoming].stems_ready;
         let blend = self.analyse(incoming, outgoing, next_bar, bars as usize, vocals_out);
         MixPlan { incoming, outgoing, mode: MixWhen::Now, how, start_beat: next_bar, length_beats: bars * 4.0, reason: format!("{bars:.0} bars, {on}"), why_how, blend, lead_in, ..MixPlan::plain() }
@@ -671,7 +655,6 @@ impl Core {
             beat_offset: self.snap.decks[o].beat - self.snap.clock.beat,
             out_cutoff: params(o).cutoff,
             echo_slot: None,
-            looped: false,
             plan,
         };
         match mix.plan.how {
@@ -813,8 +796,10 @@ impl Core {
         let (i, o, start, len) = (m.plan.incoming, m.plan.outgoing, m.plan.start_beat, m.plan.length_beats);
         let (vi, vo) = (self.snap.decks[i], self.snap.decks[o]);
         // Another track loaded on either deck, or a deck stopped or ejected: give up (and put the
-        // EQ and stems back).
-        if (vi.track_id, vo.track_id) != m.tracks || !vi.loaded || !vo.loaded || !vo.playing || !(vi.playing || vi.play_pending) {
+        // EQ and stems back). The old track reaching its end is fine: it fades on its own, and the
+        // mix carries on bringing the new one in.
+        let old_ended = vo.loaded && !vo.playing && vo.duration_secs > 0.0 && vo.position_secs >= vo.duration_secs - 0.5;
+        if (vi.track_id, vo.track_id) != m.tracks || !vi.loaded || !vo.loaded || !(vo.playing || old_ended) || !(vi.playing || vi.play_pending) {
             self.cancel_mix();
             return;
         }
@@ -845,14 +830,6 @@ impl Core {
                 self.mix_set(&format!("Mixer/CH{}/Volume", i + 1), 1.0);
             }
             return;
-        }
-        // The old track loops its last bars when it would end before the mix does.
-        if let Some((lb, lbeats)) = m.plan.loop_out {
-            if !m.looped && beat >= lb + 0.05 {
-                self.automix.as_mut().unwrap().looped = true;
-                self.deck_cmd(o, DeckCmd::LoopBeats(lbeats));
-                return;
-            }
         }
         if beat < start {
             return;
@@ -965,8 +942,12 @@ impl Core {
                 if how == MixHow::Stems && vo.stems_ready {
                     self.set_stem_levels(o, [0.0; 4], out_stems);
                 }
-                self.deck_cmd(o, DeckCmd::LoopBeats(self.loop_size[o]));
-                self.log(format!("Deck {} is in, deck {} loops until you fade it out", i + 1, o + 1));
+                if old_ended {
+                    self.log(format!("Deck {} is in, deck {} has ended", i + 1, o + 1));
+                } else {
+                    self.deck_cmd(o, DeckCmd::LoopBeats(self.loop_size[o]));
+                    self.log(format!("Deck {} is in, deck {} loops until you fade it out", i + 1, o + 1));
+                }
             } else {
                 // Stop the old track: volume stays down; its bass and stems back for next time.
                 self.deck_cmd(o, DeckCmd::Pause);
