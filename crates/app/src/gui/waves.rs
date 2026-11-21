@@ -1,6 +1,7 @@
 //! Stacked, beat-aligned waveform lanes for all decks.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use eframe::egui::{self, Align2, Color32, CornerRadius, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 
@@ -111,7 +112,12 @@ fn draw_lane(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, lane: Rec
         }
     }
 
-    // Bars-style waveform.
+    // Bars-style waveform, scaled to the track's own loud parts (they reach ~85 % of the lane,
+    // the rest in proportion), so breaks, quiet intros and silence stand out.
+    let ref_mix = loud_ref(ui.ctx(), (Arc::as_ptr(&wf) as usize, wf.len()), || wf.low.iter().zip(&wf.mid).zip(&wf.high).map(|((l, m), h)| mix_level(*l, *m, *h)).collect());
+    let ref_stems = stem_wave.as_ref().map(|sw| {
+        loud_ref(ui.ctx(), (Arc::as_ptr(sw) as usize, sw.levels[0].len()), || (0..sw.levels[0].len()).map(|i| (0..4).map(|k| sw.levels[k][i]).fold(0.0, f32::max)).collect())
+    });
     let bar_w = if lane.height() > 50.0 { 3.0 } else { 2.0 };
     let step = bar_w + 1.0;
     let mid = lane.center().y;
@@ -130,7 +136,8 @@ fn draw_lane(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, lane: Rec
             let n = sw.levels[0].len() as i64;
             if b > 0 && a < n {
                 let (a, b) = (a.max(0) as usize, b.min(n) as usize);
-                let mut bars: [(f32, usize); 4] = std::array::from_fn(|k| (sw.levels[k][a..b].iter().cloned().fold(0.0, f32::max), k));
+                let r = ref_stems.unwrap_or(1.0);
+                let mut bars: [(f32, usize); 4] = std::array::from_fn(|k| (shape(sw.levels[k][a..b].iter().cloned().fold(0.0, f32::max), r), k));
                 bars.sort_by(|p, q| q.0.total_cmp(&p.0));
                 for (amp, k) in bars {
                     if amp <= 0.002 {
@@ -149,8 +156,9 @@ fn draw_lane(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, lane: Rec
             let (a, b) = (a.max(0) as usize, (b.min(nb)) as usize);
             let mut amp = 0.0f32;
             for i in a..b {
-                amp = amp.max((wf.low[i] * 0.9 + wf.mid[i] + wf.high[i] * 0.7).min(1.0));
+                amp = amp.max(mix_level(wf.low[i], wf.mid[i], wf.high[i]));
             }
+            let amp = shape(amp, ref_mix);
             let h = (amp * hh).max(1.0);
             let c = if played { dim(color, 0.42) } else { color };
             p.rect_filled(Rect::from_min_max(Pos2::new(x, mid - h), Pos2::new(x + bar_w, mid + h)), CornerRadius::ZERO, c);
@@ -314,4 +322,34 @@ mod tests {
         let got: Vec<(f64, f64, u8)> = z.iter().map(|z| (z.start, z.end, z.level)).collect();
         assert_eq!(got, vec![(0.5, 20.0, 2), (20.0, 56.0, 4), (56.0, 190.0, 8)]);
     }
+}
+
+/// One waveform bin's level from its bands.
+fn mix_level(low: f32, mid: f32, high: f32) -> f32 {
+    low * 0.9 + mid + high * 0.7
+}
+
+/// Displayed height (0..1 of the half lane) of `level`, for a track whose loud parts are at
+/// `loud`: those reach 85 % and the rest is in proportion (a section at half the loudness shows
+/// at half that), so quiet parts read as quiet and silence as flat.
+fn shape(level: f32, loud: f32) -> f32 {
+    (level / loud.max(1e-6)).clamp(0.0, 1.0) * 0.85
+}
+
+/// The loud level of a track's waveform (its 95th percentile, ignoring silence), worked out once
+/// per waveform (`key`: its address and length) and kept in egui's memory.
+fn loud_ref(ctx: &egui::Context, key: (usize, usize), levels: impl FnOnce() -> Vec<f32>) -> f32 {
+    let id = egui::Id::unique(("wave-loud-ref", key));
+    if let Some(r) = ctx.memory(|m| m.data.get_temp::<f32>(id)) {
+        return r;
+    }
+    let mut v: Vec<f32> = levels().into_iter().filter(|x| *x > 1e-4).collect();
+    let r = if v.is_empty() {
+        1.0
+    } else {
+        let k = ((v.len() as f32 * 0.95) as usize).min(v.len() - 1);
+        *v.select_nth_unstable_by(k, |a, b| a.total_cmp(b)).1
+    };
+    ctx.memory_mut(|m| m.data.insert_temp(id, r));
+    r
 }

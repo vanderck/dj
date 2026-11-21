@@ -2643,18 +2643,17 @@ mod tests {
         assert_eq!(c.mix_target(0), None, "the playing deck is not a candidate");
         assert!(!c.mix_is_urgent(0));
 
-        // Best: searched over the whole track: on a 4-bar line, ahead, 8/16/32 bars.
+        // Best: searched over the whole track: on a 4-bar line, ahead, whole phrases long.
         let best = c.plan_best(1, 0, crate::settings::MixStyle::Eq);
         let beat = c.snap.decks[0].beat;
         assert_eq!(best.mode, automix::MixWhen::Best);
-        assert!([32.0, 64.0, 128.0].contains(&best.length_beats), "{best:?}");
+        assert!(best.length_beats >= 16.0 && best.length_beats % 16.0 == 0.0, "{best:?}");
         assert_eq!(best.start_beat % 16.0, 0.0);
         assert!(best.start_beat > beat, "{best:?}");
-        assert!(!best.gains.is_empty(), "volume from loudness, not a preset fade");
 
         let plan = c.plan_now(1, 0, crate::settings::MixStyle::Eq);
-        // Now: on the next 4-bar line or so, as long as the music allows (at most ~10 s).
-        assert!([8.0, 16.0, 20.0].contains(&plan.length_beats), "{plan:?}");
+        // Now: on the next 4-bar line or so, as long as the music allows.
+        assert!(plan.length_beats >= 16.0 && plan.length_beats % 16.0 == 0.0, "{plan:?}");
         assert_eq!(plan.start_beat % 16.0, 0.0);
         assert!(plan.start_beat > c.snap.decks[0].beat);
         let start = plan.start_beat;
@@ -2674,7 +2673,7 @@ mod tests {
         while c.automix.is_some() {
             pump(&mut e, &mut c);
             blocks += 4;
-            assert!(blocks < 48000 / 512 * 40, "mix never finished");
+            assert!(blocks < 48000 / 512 * 300, "mix never finished");
             let b = c.snap.decks[0].beat;
             let p = (b - start) / len;
             if c.snap.decks[0].playing && p > 0.05 && p < ps - 0.05 {
@@ -2701,8 +2700,9 @@ mod tests {
         assert!(!c.session.channels[1].params.mute);
         assert!((low(&c, 0) - 0.5).abs() < 1e-6 && (low(&c, 1) - 0.5).abs() < 1e-6);
         assert_eq!((c.session.channels[0].params.eq[1], c.session.channels[0].params.eq[2]), (0.5, 0.5), "old mids and highs back");
-        // The incoming track played on from its cue (8 s) through the mix (0.5 s a beat).
-        assert!(c.snap.decks[1].position_secs > 8.0 + len * 0.5 - 0.3, "{}", c.snap.decks[1].position_secs);
+        // The incoming track played on through the mix (0.5 s a beat), from where the plan
+        // brought it in.
+        assert!(c.snap.decks[1].position_secs > len * 0.5 - 0.3, "{}", c.snap.decks[1].position_secs);
         assert_eq!(c.snap.decks[1].stem_gains[2], 0.0, "the new track's vocals stay out");
         // Until another track is loaded on that deck: it starts with every stem on.
         c.load_track(1, &kick_wav("automix-c.wav", 30));
@@ -2861,7 +2861,7 @@ mod tests {
         while c.automix.is_some() {
             pump(&mut e, &mut c);
             blocks += 4;
-            assert!(blocks < 48000 / 512 * 40, "mix never finished");
+            assert!(blocks < 48000 / 512 * 300, "mix never finished");
         }
         pump(&mut e, &mut c);
         let (a, b) = (c.snap.decks[0], c.snap.decks[1]);
@@ -2916,7 +2916,7 @@ mod tests {
         while c.automix.is_some() {
             pump(e, c);
             blocks += 4;
-            assert!(blocks < 48000 / 512 * 60, "mix never finished");
+            assert!(blocks < 48000 / 512 * 300, "mix never finished");
             if c.snap.decks[0].playing {
                 each(c, (c.snap.decks[0].beat - start) / len);
             }
