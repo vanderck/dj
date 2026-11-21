@@ -108,11 +108,18 @@ fn main() {
             };
             match dj_library::tags::read(&PathBuf::from(p)) {
                 Ok(t) => {
-                    // Tags, plus the loudness dj measures (what loudness matching evens out).
+                    // Tags, plus what dj makes of the track when it loads it: the beat grid it plays
+                    // by (checked against the audio) and the loudness it measures.
                     let mut v = serde_json::to_value(&t).unwrap_or_default();
-                    let lufs = dj_library::decode(&PathBuf::from(p)).ok().and_then(|a| dj_library::loudness::integrated(&a));
-                    if let Some(o) = v.as_object_mut() {
-                        o.insert("loudness_lufs".into(), lufs.map(|l| (l * 10.0).round() / 10.0).into());
+                    let loaded = dj_library::load(&PathBuf::from(p), None, false, dj_library::DetectOptions::default()).ok();
+                    if let (Some(o), Some(l)) = (v.as_object_mut(), loaded) {
+                        o.insert("loudness_lufs".into(), l.loudness.map(|x| (x * 10.0).round() / 10.0).into());
+                        if let Some(g) = l.track.grid {
+                            o.insert("dj_grid".into(), serde_json::json!({ "bpm": g.bpm, "anchor_secs": g.anchor_secs, "source": format!("{:?}", l.grid_source) }));
+                        }
+                        if let Some((ms, bpm)) = l.detected.grid_fix {
+                            o.insert("dj_grid_fix".into(), serde_json::json!({ "moved_ms": (ms * 10.0).round() / 10.0, "bpm_change": bpm }));
+                        }
                     }
                     println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default())
                 }

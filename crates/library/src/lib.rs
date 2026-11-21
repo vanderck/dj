@@ -177,6 +177,25 @@ pub fn downbeat_from_cues(grid: &mut BeatGrid, cues: &[Option<Cue>]) -> Option<f
     Some(best)
 }
 
+/// Cues sitting on a beat of `old` move to that beat of `new` (a corrected grid): they were set
+/// on the tagger's beats, which the correction moved; cues between beats stay.
+pub fn follow_grid(cues: &mut [Option<Cue>], old: &BeatGrid, new: &BeatGrid) {
+    let moved = |t: f64| {
+        let b = old.beat_at(t);
+        if (b - b.round()).abs() < 0.06 {
+            new.secs_at_beat(b.round()).max(0.0)
+        } else {
+            t
+        }
+    };
+    for c in cues.iter_mut().flatten() {
+        c.secs = moved(c.secs);
+        if let Some(e) = c.end_secs.as_mut() {
+            *e = moved(*e);
+        }
+    }
+}
+
 /// Choose a beat grid from tags, never estimating the tempo itself.
 pub fn grid_for(tags: &Tags, audio: &AudioData) -> Option<(BeatGrid, GridSource)> {
     if let Some(g) = tags.grid {
@@ -243,6 +262,8 @@ pub struct Detected {
     pub cues: bool,
     /// Cue points are wanted but were not detected yet (do it once stems are ready).
     pub cues_pending: bool,
+    /// The tag grid was off the audio and corrected: (ms moved, BPM change).
+    pub grid_fix: Option<(f64, f64)>,
 }
 
 /// Decode + read tags + build waveform. Runs on a worker thread.
@@ -307,8 +328,17 @@ pub fn load(path: &Path, overrides: Option<&TrackOverrides>, match_loudness: boo
     // Detection for what the tags (and saved values) do not give.
     let user_cues = overrides.is_some_and(|o| o.cues.is_some());
     let want_cues = !user_cues && (detect.prefer_detected_cues || cues.iter().all(|c| c.is_none()));
-    let need = grid.is_none() || tags.energy.is_none() || (want_cues && detect.cues_from_mix);
+    // A grid from tags (or anchored by dj on a tagged tempo) is checked against the audio.
+    let check_grid = grid.is_some() && matches!(source, Some(GridSource::Tag | GridSource::FirstCue | GridSource::Aligned));
+    let need = check_grid || grid.is_none() || tags.energy.is_none() || (want_cues && detect.cues_from_mix);
     let env = need.then(|| analysis::Envelope::compute(&audio));
+    if let (true, Some(g), Some(env)) = (check_grid, grid, &env) {
+        if let Some(fixed) = analysis::refine_grid(env, &g) {
+            follow_grid(&mut cues, &g, &fixed);
+            detected.grid_fix = Some(((fixed.anchor_secs - g.anchor_secs) * 1000.0, fixed.bpm - g.bpm));
+            grid = Some(fixed);
+        }
+    }
     if let (None, Some(env)) = (grid, &env) {
         if let Some(t) = analysis::detect_grid(env) {
             grid = Some(t.grid);

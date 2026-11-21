@@ -113,7 +113,12 @@ dj reads, from MP3, WAV, AIFF, FLAC, Ogg/Opus and M4A files:
   on any beat of a bar; when most hot cues sit the same number of beats into
   dj's bars, the bars move onto them (Mixed In Key's cues are on downbeats),
   so phrases line up in a mix. Cues written just before the first audio
-  frame start at 0:00.
+  frame start at 0:00. Every tag grid is then checked against the audio
+  (where the kicks land, every 8 bars) and corrected when it's audibly off: a
+  grid a fraction of a beat early or late, or a hair off in tempo, would
+  otherwise lock two tracks together with their kicks apart, drifting further
+  over minutes. Cues on the old grid's beats move with it. `dj --info FILE`
+  shows the grid dj plays by and the correction.
 - **Loudness**: measured when a track loads (EBU R128 / BS.1770, the same
   reading as ffmpeg's) and, with Settings → *Match loudness* (on), every
   track is brought to −12 LUFS (within ±12 dB), so a mix doesn't jump in
@@ -225,15 +230,20 @@ Fonts: Inter and JetBrains Mono, bundled under the SIL Open Font License (see
 - **Decks**: 4 decks (or 2). Key lock with a WSOLA time-stretcher and
   independent transpose. Tempo ranges ±6/10/16/50 % or ±12 semitones. Sync with
   continuous phase lock; the tempo master is always a playing deck, picked
-  automatically (handoff when it stops or is ejected). Quantized launches (global or per deck), 8 hot cues
+  automatically (handoff when it stops or is ejected). A synced deck's tempo
+  fader sets the tempo of the mix (the master moves, everything synced
+  follows); its reset puts that track at its own tempo (0 %). Quantized launches (global or per deck), 8 hot cues
   (momentary, cue-to-next-cue loops), loops (in/out, halve/double, move,
   free-loop), slip mode, slip loops (with dotted/triplet), beat/bar skip,
   reverse, backspin, tape stop, half/double speed, phase nudge.
-- **Mix**: while another deck plays, a deck that is paused (at its cue) or
-  looping at a cue with its volume down gets a **Mix** button next to Sync.
+- **Mix**: while another deck plays, a deck with its volume down gets a
+  **Mix** button next to Sync, whether it's paused, looping at a cue or
+  playing in your headphones (with an external mixer: paused or looping).
   Mix syncs it (a paused deck is first turned down, looped where it stands and
   started in time) and asks only **Now** or **Best**. dj works out the rest:
-  how (stems and EQ together, or EQ alone without stems; a cut only when the
+  where the new track comes in (your cue when you set one, else the best of
+  its cue points, intro and drops), how (stems and EQ together, or EQ alone
+  without stems; a cut only when the
   two can't blend), where and how long, measured as the best transition
   within the range (soon for Now, anywhere in the playing track for Best).
   - **When**: **Now** starts on the playing track's next phrase lines, with

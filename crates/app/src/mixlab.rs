@@ -110,6 +110,14 @@ fn mixlab() {
     for _ in 0..20 {
         pump(&mut e, &mut c, None);
     }
+    // MIX_AT: the old track plays from here when you press Mix (seconds).
+    if let Ok(at) = std::env::var("MIX_AT") {
+        let at: f64 = at.parse().unwrap();
+        c.deck_cmd(0, DeckCmd::SeekFraction(at / c.snap.decks[0].duration_secs));
+        for _ in 0..10 {
+            pump(&mut e, &mut c, None);
+        }
+    }
     assert_eq!(c.mix_target(1), Some(0), "deck 2 should be mixable into deck 1");
 
     // ---- The analysis dj works from.
@@ -137,7 +145,7 @@ fn mixlab() {
         blend: true,
         cut: false,
         keys_clash: clash,
-        vocals_out: mode == MixWhen::Now,
+        vocals_out: false,
         stems: true,
         hurry: false,
     };
@@ -178,7 +186,7 @@ fn mixlab() {
         let (so, si) = (cues_o.iter().find(|c| c.0 + 1 == v[0]).unwrap().2, cues_i.iter().find(|c| c.0 + 1 == v[1]).unwrap().2);
         let (ob, ib, bars) = (bar_of(so, &outb), bar_of(si, &inc), v[2]);
         let w = |b: &Bars, from: usize| -> [Vec<f32>; 4] { std::array::from_fn(|p| (0..bars).map(|k| b.level(p, from + k)).collect()) };
-        let blend = automix::plan_blend(&w(&inc, ib), &w(&outb, ob), bars, mode == MixWhen::Now, clash);
+        let blend = automix::plan_blend(&w(&inc, ib), &w(&outb, ob), bars, false, clash);
         let mut p = plan.clone();
         p.how = automix::MixHow::Stems;
         p.start_beat = ob as f64 * 4.0;
@@ -209,7 +217,7 @@ fn mixlab() {
 
     // ---- Render: from 16 bars before the mix to 16 bars after it.
     let pre = 64.0;
-    let from_beat = (plan.start_beat - plan.lead_in - pre).max(0.0);
+    let from_beat = (plan.start_beat - plan.lead_in - pre).max(0.0).max(if std::env::var("MIX_AT").is_ok() { c.snap.decks[0].beat - 1.0 } else { 0.0 });
     let from_secs = start_o + from_beat * spb_o;
     c.deck_cmd(0, DeckCmd::SeekFraction(from_secs / vo.duration_secs));
     for _ in 0..4 {

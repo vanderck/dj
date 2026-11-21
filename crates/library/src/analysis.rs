@@ -200,6 +200,89 @@ fn detrend(mut flux: Vec<f32>) -> Vec<f32> {
     out
 }
 
+/// A grid from tags checked against the audio: for every 8 bars, where the beats (kicks first)
+/// really land within ±0.3 beat of the grid's; a line through those gives how far the grid is off
+/// and how fast it drifts. Taggers' grids can be a fraction of a beat early or late, or a hair off
+/// in tempo (Push The Feeling On: 6 ms a minute), and two tracks locked by such grids flam.
+/// Returns the corrected grid when it's audibly off (8 ms or more anywhere in the track) and the
+/// measurement is clear; `None` when the grid fits or the beat isn't clear enough to tell.
+pub fn refine_grid(env: &Envelope, grid: &BeatGrid) -> Option<BeatGrid> {
+    let spb = grid.seconds_per_beat();
+    if !(spb > 0.0) || env.duration < 30.0 {
+        return None;
+    }
+    const WIN: usize = 32; // beats
+    let step = 0.002;
+    let reach = (0.3 * spb / step) as i64;
+    let offsets: Vec<f64> = (-reach..=reach).map(|i| i as f64 * step).collect();
+    // The beat lands on the kicks: measure on the low band when it has a clear pulse (offbeat
+    // hats and claps are as strong as the beat in the full band), else on the full band.
+    let measure = |env_band: &[f32]| -> (Vec<(f64, f64, f64)>, usize) {
+        let mut pts: Vec<(f64, f64, f64)> = Vec::new(); // (time, offset, weight)
+        let mut windows = 0usize;
+        let mut b = (-grid.anchor_secs / spb).ceil();
+        loop {
+            let t0 = grid.secs_at_beat(b);
+            if t0 + WIN as f64 * spb > env.duration {
+                break;
+            }
+            windows += 1;
+            let scores: Vec<f32> = offsets.iter().map(|d| (0..WIN).map(|k| env.at(env_band, t0 + k as f64 * spb + d)).sum::<f32>() / WIN as f32).collect();
+            let mean = scores.iter().sum::<f32>() / scores.len() as f32;
+            let (i, best) = scores.iter().copied().enumerate().fold((0, f32::MIN), |a, c| if c.1 > a.1 { c } else { a });
+            let clarity = best / mean.max(1e-6);
+            if clarity > 1.4 {
+                // Between the 2 ms steps: the peak of a parabola through the best one and its
+                // neighbours.
+                let frac = match (i.checked_sub(1).map(|j| scores[j]), scores.get(i + 1)) {
+                    (Some(a), Some(&c)) => {
+                        let den = a - 2.0 * best + c;
+                        if den < 0.0 { (0.5 * (a - c) / den) as f64 } else { 0.0 }
+                    }
+                    _ => 0.0,
+                };
+                pts.push((t0 + WIN as f64 * spb / 2.0, offsets[i] + frac.clamp(-0.5, 0.5) * step - ENVELOPE_LAG, clarity as f64));
+            }
+            b += WIN as f64;
+        }
+        (pts, windows)
+    };
+    let (low, windows) = measure(&env.low_onset);
+    let (pts, windows) = if low.len() * 2 >= windows && low.iter().map(|p| p.2).sum::<f64>() / low.len().max(1) as f64 > 1.8 { (low, windows) } else { measure(&env.onset) };
+    if pts.len() < 6 || pts.len() * 2 < windows {
+        return None;
+    }
+    // Weighted line fit; again without the windows far off the line (breaks, fills).
+    let fit = |pts: &[(f64, f64, f64)]| -> (f64, f64, f64) {
+        let w: f64 = pts.iter().map(|p| p.2).sum();
+        let tm = pts.iter().map(|p| p.0 * p.2).sum::<f64>() / w;
+        let om = pts.iter().map(|p| p.1 * p.2).sum::<f64>() / w;
+        let var = pts.iter().map(|p| p.2 * (p.0 - tm).powi(2)).sum::<f64>();
+        let k = if var > 0.0 { pts.iter().map(|p| p.2 * (p.0 - tm) * (p.1 - om)).sum::<f64>() / var } else { 0.0 };
+        (tm, om, k)
+    };
+    let (tm, om, k) = fit(&pts);
+    let kept: Vec<_> = pts.iter().copied().filter(|p| (p.1 - (om + k * (p.0 - tm))).abs() < 0.025).collect();
+    if kept.len() < 6 || kept.len() * 3 < pts.len() * 2 {
+        return None;
+    }
+    let (tm, om, k) = fit(&kept);
+    if k.abs() > 0.003 {
+        return None; // not a tempo a tagger gets this wrong: something else is going on
+    }
+    let off = |t: f64| om + k * (t - tm);
+    let worst = off(0.0).abs().max(off(env.duration).abs());
+    if worst < 0.008 {
+        return None;
+    }
+    // Beat n moves to where it really is: anchor + n·spb + off(anchor + n·spb).
+    Some(BeatGrid { bpm: grid.bpm / (1.0 + k), anchor_secs: grid.anchor_secs + off(grid.anchor_secs) })
+}
+
+/// How much later than a sound's start [`Envelope`]'s onsets appear (its frames are centred on
+/// a 46 ms window), measured on clean kicks (see `refine_grid_measures_kicks` below).
+const ENVELOPE_LAG: f64 = -0.0097;
+
 /// Detected tempo and beat grid.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TempoGrid {
@@ -658,5 +741,28 @@ pub(crate) mod tests {
         let e_quiet = estimate_energy(&quiet, &Envelope::compute(&quiet), Some(128.0));
         assert!((1..=10).contains(&e_loud) && (1..=10).contains(&e_quiet));
         assert!(e_loud > e_quiet, "{e_loud} vs {e_quiet}");
+    }
+
+    #[test]
+    fn refine_grid_measures_kicks() {
+        // 48 bars of kicks, hats, bass at 124 BPM, the first beat at 0.5 s.
+        let audio = track(124.0, 0.5, &[(true, true, true, false); 48]);
+        let env = Envelope::compute(&audio);
+        let spb = 60.0 / 124.0;
+        let true_grid = BeatGrid { bpm: 124.0, anchor_secs: 0.5 };
+        // A tagger's grid 60 ms late: moved onto the kicks.
+        let late = refine_grid(&env, &BeatGrid { bpm: 124.0, anchor_secs: 0.56 }).expect("off by 60 ms");
+        eprintln!("late -> {:?}", late);
+        assert!((late.anchor_secs - 0.5).abs() < 0.003, "{late:?}");
+        assert!((late.bpm - 124.0).abs() < 0.002, "{late:?}");
+        // A grid a hair slow in tempo (drifting 30 ms over the track): its tempo is corrected.
+        let n = 48.0 * 4.0;
+        let slow = BeatGrid { bpm: 124.0 * (1.0 - 0.03 / (n * spb)), anchor_secs: 0.5 };
+        let fixed = refine_grid(&env, &slow).expect("drifts 30 ms");
+        eprintln!("slow -> {:?}", fixed);
+        assert!((fixed.bpm - 124.0).abs() < 0.003, "{fixed:?}");
+        assert!((fixed.secs_at_beat(n - 4.0) - true_grid.secs_at_beat(n - 4.0)).abs() < 0.004, "{fixed:?}");
+        // The right grid stays.
+        assert_eq!(refine_grid(&env, &true_grid), None);
     }
 }

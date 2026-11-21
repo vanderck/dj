@@ -1430,6 +1430,31 @@ impl Core {
         true
     }
 
+    /// A deck's tempo fader moved to `fader` (−1..1). A synced deck that isn't the master plays at
+    /// the clock's tempo, so its fader sets the clock: the master (or the header tempo) moves so
+    /// this deck plays at the speed the fader asks for, and every synced deck follows. Its reset
+    /// (0) is this track at its own tempo.
+    fn tempo_cmd(&mut self, d: usize, fader: f64) -> Option<DeckCmd> {
+        let v = self.snap.decks[d];
+        let follower = v.sync && self.snap.clock.owner != ClockOwner::Deck(d as u8) && v.has_grid && v.track_bpm > 0.0;
+        if !follower {
+            return Some(DeckCmd::Tempo(fader));
+        }
+        let bpm = v.track_bpm * v.tempo_range.speed(fader) * v.speed_mult;
+        match self.snap.clock.owner {
+            ClockOwner::Deck(m) => {
+                let mv = self.snap.decks[m as usize];
+                if mv.track_bpm > 0.0 {
+                    let mf = mv.tempo_range.fader_for_speed(bpm / (mv.track_bpm * mv.speed_mult.max(0.01)));
+                    self.deck_cmd(m as usize, DeckCmd::Tempo(mf.clamp(-1.0, 1.0)));
+                }
+            }
+            ClockOwner::Header => self.send(Command::SetBpm(bpm)),
+        }
+        // Its own fader goes along, so it reads the same once it leads or leaves sync.
+        Some(DeckCmd::Tempo(fader))
+    }
+
     fn route_deck(&mut self, d: usize, rest: &[&str], f: Option<f32>, on: Option<bool>, trig: bool, ints: &[i32], args: &[OscType]) -> bool {
         let pressed = on.unwrap_or(true);
         let skip = self.settings.skip_beats;
@@ -1488,8 +1513,8 @@ impl Core {
             ["temposync"] if trig => Some(DeckCmd::ToggleSync),
             ["sync"] => on.map(DeckCmd::Sync),
             ["tempomaster"] if trig => Some(DeckCmd::ToggleMaster),
-            ["temposlider"] => f.map(|v| DeckCmd::Tempo(v.clamp(-1.0, 1.0) as f64)),
-            ["tempo"] => f.map(|v| DeckCmd::Tempo((v.clamp(0.0, 1.0) * 2.0 - 1.0) as f64)),
+            ["temposlider"] => f.and_then(|v| self.tempo_cmd(d, v.clamp(-1.0, 1.0) as f64)),
+            ["tempo"] => f.and_then(|v| self.tempo_cmd(d, (v.clamp(0.0, 1.0) * 2.0 - 1.0) as f64)),
             ["temporange"] => ints.first().map(|i| {
                 let r = TempoRange::ALL[(*i).clamp(0, 4) as usize];
                 self.session.decks[d].tempo_range = r;
@@ -2748,7 +2773,7 @@ mod tests {
         // The incoming track played on through the mix (0.5 s a beat), from where the plan
         // brought it in.
         assert!(c.snap.decks[1].position_secs > len * 0.5 - 0.3, "{}", c.snap.decks[1].position_secs);
-        assert_eq!(c.snap.decks[1].stem_gains[2], 0.0, "the new track's vocals stay out");
+        assert_eq!(c.snap.decks[1].stem_gains[2], 1.0, "no old vocals: the new track's are in");
         // Until another track is loaded on that deck: it starts with every stem on.
         c.load_track(1, &kick_wav("automix-c.wav", 30));
         let deadline = Instant::now() + std::time::Duration::from_secs(60);
@@ -2916,7 +2941,7 @@ mod tests {
         assert_eq!((p(0).volume, p(1).volume), (0.7, 0.6), "volumes untouched");
         assert_eq!((p(0).eq[0], p(1).eq[0]), (0.5, 0.5), "no bass swap");
         assert!(stems);
-        assert_eq!(c.snap.decks[1].stem_gains[2], 0.0, "the new track's vocals stay out");
+        assert_eq!(c.snap.decks[1].stem_gains[2], 1.0, "no old vocals: the new track's are in");
     }
 
     /// Deck 1 plays (volume 0.9); deck 2 waits silently in a loop at its cue (8 s), with a second
@@ -2999,7 +3024,6 @@ mod tests {
         let (mut before, mut after) = (false, false);
         run_mix(&mut e, &mut c, |c, p| {
             let (gi, go) = (c.snap.decks[1].stem_gains, c.snap.decks[0].stem_gains);
-            assert_eq!(gi[2], 0.0, "Now: the new vocals stay out");
             if (0.05..ps - 0.03).contains(&p) {
                 assert_eq!((gi[1], go[1]), (0.0, 1.0), "before the swap: new bass out, old bass in");
                 if p < 0.3 {
@@ -3021,7 +3045,7 @@ mod tests {
         assert_eq!((p(0).eq[0], p(1).eq[0]), (0.5, 0.5), "the bass swaps on the stems, not the EQ");
         assert_eq!((p(0).eq[2], p(1).eq[2]), (0.5, 0.5), "highs back to where they were");
         assert_eq!(c.snap.decks[0].stem_gains, [1.0; 4], "the old deck's stems back for next time");
-        assert_eq!(c.snap.decks[1].stem_gains, [1.0, 1.0, 0.0, 1.0], "Now: the new vocals stay out");
+        assert_eq!(c.snap.decks[1].stem_gains, [1.0; 4], "no old vocals: the new ones are in");
     }
 
     #[test]
@@ -3065,7 +3089,7 @@ mod tests {
         let a = c.snap.decks[0];
         assert!(a.playing && a.loop_on);
         assert_eq!(a.stem_gains, [0.0; 4], "the old deck's sound doesn't come back");
-        assert_eq!(c.snap.decks[1].stem_gains, [1.0, 1.0, 0.0, 1.0]);
+        assert_eq!(c.snap.decks[1].stem_gains, [1.0; 4], "no old vocals: the new ones are in");
         // Only a new track (or you) changes that.
         c.load_track(0, &kick_wav("style-c.wav", 30));
         let deadline = Instant::now() + std::time::Duration::from_secs(60);
@@ -3262,10 +3286,13 @@ mod tests {
         for _ in 0..60 {
             pump(&mut e, &mut c);
         }
-        // Vocals throughout the new track (the stand-in model's are too quiet to count).
-        let bins = (c.snap.decks[1].duration_secs * dj_library::waveform::BINS_PER_SEC) as usize + 1;
-        let w = crate::stems::StemWave { bins_per_sec: dj_library::waveform::BINS_PER_SEC, levels: std::array::from_fn(|_| vec![0.5; bins]) };
-        c.decks[1].stem_wave = Some(Arc::new(w));
+        // Vocals throughout both tracks (the stand-in model's are too quiet to count): the old ones
+        // play through the whole mix, so the new ones wait.
+        for d in 0..2 {
+            let bins = (c.snap.decks[d].duration_secs * dj_library::waveform::BINS_PER_SEC) as usize + 1;
+            let w = crate::stems::StemWave { bins_per_sec: dj_library::waveform::BINS_PER_SEC, levels: std::array::from_fn(|_| vec![0.5; bins]) };
+            c.decks[d].stem_wave = Some(Arc::new(w));
+        }
         let plan = c.plan_now(1, 0, crate::settings::MixStyle::Stems);
         let beat = c.snap.decks[0].beat;
         // Now: on a phrase (8 bars when that's within 4 bars, else 4 bars): at most 4 bars after
@@ -3286,7 +3313,8 @@ mod tests {
             }
         });
         assert!(checked);
-        // Now: the new vocals are out after the mix, then come back on its next vocal phrase.
+        // The old vocals sang through the whole mix: the new ones are out after it, then come back
+        // on its next vocal phrase.
         assert_eq!(c.snap.decks[1].stem_gains[2], 0.0);
         assert!(c.vocal_return.is_some(), "a vocal phrase was found ahead");
         let deadline = Instant::now() + std::time::Duration::from_secs(60);
@@ -3500,5 +3528,61 @@ mod tests {
         let full: [Option<Cue>; NUM_HOT_CUES] = std::array::from_fn(|i| Some(cue(i as f64 * 10.0, "x")));
         let (_, r, a, d) = merge_cues(&full, vec![cue(5.0, "y"), cue(200.0, "z")], 2.0);
         assert_eq!((r, a, d), (0, 0, 2));
+    }
+
+    #[test]
+    fn a_synced_decks_tempo_fader_sets_the_mix_tempo() {
+        let (mut e, mut c, _config) = core();
+        mix_setup(&mut e, &mut c);
+        // Deck 2's track is at 124 BPM, synced to deck 1 (the master, 120 BPM).
+        c.deck_cmd(1, DeckCmd::SetGrid(Some(dj_engine::track::BeatGrid { bpm: 124.0, anchor_secs: 0.0 })));
+        c.deck_cmd(1, DeckCmd::Sync(true));
+        c.deck_cmd(1, DeckCmd::Play);
+        for _ in 0..40 {
+            pump(&mut e, &mut c);
+        }
+        assert_eq!(c.snap.clock.owner, ClockOwner::Deck(0));
+        assert!((c.snap.decks[1].speed - 120.0 / 124.0).abs() < 0.01, "following 120 BPM");
+        // Reset (0 %) on the synced deck: its track at its own tempo, the master follows.
+        assert!(c.route("Deck/2/TempoSlider", &[OscType::Float(0.0)]));
+        for _ in 0..40 {
+            pump(&mut e, &mut c);
+        }
+        assert!((c.snap.decks[1].speed - 1.0).abs() < 0.005, "deck 2 at 0 %: {}", c.snap.decks[1].speed);
+        assert!((c.snap.clock.bpm - 124.0).abs() < 0.2, "the mix at 124: {}", c.snap.clock.bpm);
+        // Its fader moves the mix: +2 % on deck 2 (a 10 % range: fader 0.2).
+        c.route("Deck/2/TempoRange", &[OscType::Int(1)]);
+        c.route("Deck/2/TempoSlider", &[OscType::Float(0.2)]);
+        for _ in 0..40 {
+            pump(&mut e, &mut c);
+        }
+        assert!((c.snap.decks[1].speed - 1.02).abs() < 0.005, "{}", c.snap.decks[1].speed);
+        assert!((c.snap.clock.bpm - 124.0 * 1.02).abs() < 0.3, "{}", c.snap.clock.bpm);
+    }
+
+    #[test]
+    fn volume_down_is_enough_for_mix() {
+        let (mut e, mut c, _config) = core();
+        mix_setup(&mut e, &mut c);
+        // Deck 2 playing in your headphones (not looping), its fader down: Mix is offered.
+        c.deck_cmd(1, DeckCmd::LoopExit);
+        c.deck_cmd(1, DeckCmd::Play);
+        for _ in 0..20 {
+            pump(&mut e, &mut c);
+        }
+        assert!(c.snap.decks[1].playing && !c.snap.decks[1].loop_on);
+        assert_eq!(c.mix_target(1), Some(0));
+        // Fader up: you're mixing it yourself.
+        c.route("Mixer/CH2/Volume", &[OscType::Float(0.6)]);
+        assert_eq!(c.mix_target(1), None);
+        c.route("Mixer/CH2/Volume", &[OscType::Float(0.0)]);
+        // Mix: it waits in a silent loop where it is, then comes in where dj finds best.
+        let plan = c.plan_best(1, 0, crate::settings::MixStyle::Auto);
+        c.start_mix(plan);
+        for _ in 0..5 {
+            pump(&mut e, &mut c);
+        }
+        assert!(c.snap.decks[1].loop_on, "waiting in a loop");
+        assert!(c.automix.is_some());
     }
 }
