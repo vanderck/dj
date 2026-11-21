@@ -7,8 +7,8 @@
 //! where the new track can come in (its cue, its start, the phrases before its drops, its drops)
 //! and how long the overlap lasts, scores each on what would be heard (clashes, fullness, how the
 //! sections fit, a drop landing as the old track ends, phrase alignment, waiting), and returns the
-//! best ones. [`gains`] turns a chosen transition into volume per bar by matching loudness: the
-//! new track comes up as far as the room the old one leaves, never along a preset curve.
+//! best ones. The new track's volume is up from the start and its stems or EQ bring it in; the
+//! old one leaves on its stems or EQ, its volume closing only at the end.
 
 /// Stems in this order: drums, bass, vocals, other.
 pub const DRUMS: usize = 0;
@@ -156,8 +156,6 @@ pub struct Candidate {
     pub in_bar: usize,
     pub bars: usize,
     pub technique: Technique,
-    /// The old track loops its last phrase from this bar (it would end before the mix does).
-    pub loop_from: Option<usize>,
     pub score: f32,
     /// Why (printed when the mix starts).
     pub notes: Vec<String>,
@@ -169,7 +167,7 @@ pub struct Limits {
     /// The old track's first bar a mix can start at (bars of its grid), and its last one.
     pub earliest: usize,
     pub latest: usize,
-    /// Overlap lengths to try, in bars.
+    /// Overlap lengths to try, in bars (every phrase length that could fit: the songs decide).
     pub lengths: Vec<usize>,
     /// The bar of the new track at its cue (where it waits), if it's on a bar line.
     pub cue_bar: Option<usize>,
@@ -185,22 +183,15 @@ pub struct Limits {
     pub hurry: bool,
 }
 
-/// The old track's bar playing `k` bars into a transition starting at `start`, with its last
-/// phrase looping from `loop_from` (if it would run out).
-pub fn out_bar(start: usize, k: usize, loop_from: Option<usize>, n: usize) -> usize {
-    let b = start + k;
-    match loop_from {
-        Some(l) if b >= n && n > l => l + (b - l) % (n - l),
-        _ => b,
-    }
-}
-
 /// Score one transition. Higher is better.
 pub fn score(out: &Bars, inc: &Bars, c: &Candidate, lim: &Limits) -> (f32, Vec<String>) {
     let mut s = 0.0f32;
     let mut notes = Vec::new();
     let n_out = out.len();
-    let ob = |k: usize| out_bar(c.out_bar, k, c.loop_from, n_out);
+    let ob = |k: usize| c.out_bar + k;
+    // Bars of the mix the old track still plays (it may end, and fade on its own, before the mix
+    // does: no rush).
+    let playing = c.bars.min(n_out.saturating_sub(c.out_bar));
     let end_in = c.in_bar + c.bars;
     // A drop of the new track right as the old one has gone: the strongest fit.
     let drops = inc.drops();
@@ -210,7 +201,8 @@ pub fn score(out: &Bars, inc: &Bars, c: &Candidate, lim: &Limits) -> (f32, Vec<S
     }
     if c.technique == Technique::Cut {
         if Some(c.in_bar) == lim.drop_cue_bar {
-            s += 6.0;
+            // Your drop cue, for a cut: as strong as your cue is for a blend.
+            s += 12.0;
             notes.push("cuts in on its drop cue".into());
         } else if drops.contains(&c.in_bar) {
             s += 5.0;
@@ -223,10 +215,10 @@ pub fn score(out: &Bars, inc: &Bars, c: &Candidate, lim: &Limits) -> (f32, Vec<S
             s -= 2.0;
         }
     }
-    let (mut vox, mut mel, mut busy, mut fit) = (0, 0, 0, 0);
+    let (mut vox, mut mel, mut fit) = (0, 0, 0);
     let (mut out_room, mut in_room) = (0usize, 0usize);
     if c.technique == Technique::Blend {
-        for k in 0..c.bars {
+        for k in 0..playing {
             let (o, i) = (ob(k), c.in_bar + k);
             if out.on(VOCALS, o) && inc.on(VOCALS, i) && !lim.vocals_out {
                 vox += 1;
@@ -234,10 +226,8 @@ pub fn score(out: &Bars, inc: &Bars, c: &Candidate, lim: &Limits) -> (f32, Vec<S
             if lim.keys_clash && out.on(OTHER, o) && inc.on(OTHER, i) {
                 mel += 1;
             }
+            // Both full is fine (in sync, the EQ and stems shape it); only clashes sound wrong.
             let full = out.fullness(o) >= 3 && inc.fullness(i) >= 3;
-            if full {
-                busy += 1;
-            }
             let clash_here = (out.on(VOCALS, o) && inc.on(VOCALS, i) && !lim.vocals_out) || (lim.keys_clash && out.on(OTHER, o) && inc.on(OTHER, i));
             if !full && !clash_here {
                 fit += 1;
@@ -250,14 +240,17 @@ pub fn score(out: &Bars, inc: &Bars, c: &Candidate, lim: &Limits) -> (f32, Vec<S
                 in_room += 1;
             }
         }
-        // Stems can keep vocals and melodies apart (switching at the swap): a smaller cost.
+        // Stems keep vocals and melodies apart (each part moves on its own): a smaller cost than
+        // with the EQ alone.
         let (wv, wm) = if lim.stems { (0.6, 0.4) } else { (2.0, 1.5) };
-        s -= wv * vox as f32 + wm * mel as f32 + 0.5 * busy as f32;
-        // Bars where the two fit together: a longer blend where the music allows it.
-        s += 0.25 * fit as f32;
-        // How much of the overlap fits (a share, not a count: longer isn't better by itself).
-        let (fo, fi) = (out_room as f32 / c.bars as f32, in_room as f32 / c.bars as f32);
-        s += 3.0 * fo + 3.0 * fi;
+        s -= wv * vox as f32 + wm * mel as f32;
+        // The longer the better: every bar of the blend counts, more where the two fit together;
+        // clashes and crowding count against it, so it's as long as the music lets it be.
+        s += 0.25 * playing as f32 + 0.5 * fit as f32;
+        // Bars where the old track leaves room (outro, break) or the new one is still sparse
+        // (intro) fit best.
+        s += 0.15 * (out_room + in_room) as f32;
+        let (fo, fi) = (out_room as f32 / playing.max(1) as f32, in_room as f32 / playing.max(1) as f32);
         if vox == 0 && (0..c.bars).any(|k| inc.on(VOCALS, c.in_bar + k) || out.on(VOCALS, ob(k))) {
             notes.push("no vocals on top of each other".into());
         }
@@ -280,8 +273,9 @@ pub fn score(out: &Bars, inc: &Bars, c: &Candidate, lim: &Limits) -> (f32, Vec<S
     if c.in_bar.is_multiple_of(8) || Some(c.in_bar) == lim.cue_bar {
         s += 0.5;
     }
-    // Your cue: where you chose to start it.
-    if Some(c.in_bar) == lim.cue_bar {
+    // Your cue: a starting point, a small preference (the music decides where it comes in).
+    let cut_on_drop_cue = c.technique == Technique::Cut && lim.drop_cue_bar.is_some();
+    if Some(c.in_bar) == lim.cue_bar && !cut_on_drop_cue {
         s += 2.5;
     } else if c.in_bar != 0 {
         notes.push(format!("starts it at bar {}", c.in_bar + 1));
@@ -290,13 +284,11 @@ pub fn score(out: &Bars, inc: &Bars, c: &Candidate, lim: &Limits) -> (f32, Vec<S
     let before = out.loud.get(c.out_bar.saturating_sub(1)).copied().unwrap_or(0.0);
     let after = inc.loud.get(end_in.min(inc.len().saturating_sub(1))).copied().unwrap_or(0.0);
     s -= 1.5 * (before - after).abs();
-    // Waiting, and looping the old track to wait.
+    // Waiting.
     let wait = c.out_bar.saturating_sub(lim.earliest) as f32;
     s -= if lim.hurry { 2.5 } else { 0.03 } * wait;
-    if let Some(l) = c.loop_from {
-        let looped = (c.out_bar + c.bars).saturating_sub(n_out.max(l));
-        s -= 0.25 * looped as f32;
-        notes.push("loops the old outro to wait".into());
+    if c.out_bar + c.bars > n_out {
+        notes.push("the old track ends on its own during the mix".into());
     }
     (s, notes)
 }
@@ -320,8 +312,6 @@ pub fn search(out: &Bars, inc: &Bars, lim: &Limits) -> Vec<Candidate> {
     }
     entries.sort_unstable();
     entries.dedup();
-    // The old track's last phrase (8 bars) to loop if it would end mid-mix.
-    let last_phrase = (n_out / 8).saturating_sub(1) * 8;
     let mut found = Vec::new();
     for out_bar in lim.earliest..=lim.latest.min(n_out.saturating_sub(1)) {
         // Phrase lines only (4 bars).
@@ -337,13 +327,12 @@ pub fn search(out: &Bars, inc: &Bars, lim: &Limits) -> Vec<Candidate> {
                     if in_bar + bars + 8 > n_in {
                         continue; // the new track must play on after the mix
                     }
-                    // It would end mid-mix: it loops from the mix's start to its end (its last
-                    // phrase or less).
-                    let loop_from = (out_bar + bars > n_out).then_some(out_bar);
-                    if loop_from.is_some() && (out_bar < last_phrase || n_out < 8 || n_out - out_bar < 2) {
+                    // The old track may end (and fade on its own) during the mix, up to a phrase
+                    // before the mix does; it plays at least 2 bars of it.
+                    if out_bar + bars > n_out + 4 || out_bar + 2 > n_out {
                         continue;
                     }
-                    let mut c = Candidate { out_bar, in_bar, bars, technique: tech, loop_from, score: 0.0, notes: Vec::new() };
+                    let mut c = Candidate { out_bar, in_bar, bars, technique: tech, score: 0.0, notes: Vec::new() };
                     let (s, notes) = score(out, inc, &c, lim);
                     c.score = s;
                     c.notes = notes;
@@ -367,33 +356,6 @@ pub fn search(out: &Bars, inc: &Bars, lim: &Limits) -> Vec<Candidate> {
     best
 }
 
-/// Volume per bar line (`bars + 1` values) for the new and the old track, from loudness: the
-/// two together stay near the old track's level before the mix (a little room above it), the new
-/// track filling what the old one leaves as its parts go (`out_left[k]`: the share of its sound
-/// still playing in bar `k`, after the stem/EQ moves). The new volume only rises; the old one
-/// closes only once little of it is left.
-pub fn gains(out: &Bars, inc: &Bars, c: &Candidate, out_left: &[f32]) -> Vec<(f32, f32)> {
-    let n_out = out.len();
-    let ob = |k: usize| out_bar(c.out_bar, k, c.loop_from, n_out);
-    let before = out.loud.get(c.out_bar.saturating_sub(1)).copied().unwrap_or(0.5).max(0.05);
-    let after = inc.loud.get(c.in_bar + c.bars).copied().unwrap_or(before).max(0.05);
-    let target = 1.2 * before.max(after);
-    let mut v = Vec::with_capacity(c.bars + 1);
-    let mut g_in = 0.0f32;
-    for k in 0..=c.bars {
-        let lo = if k < c.bars { out.loud.get(ob(k)).copied().unwrap_or(0.0) * out_left.get(k).copied().unwrap_or(1.0) } else { 0.0 };
-        let li = inc.loud.get(c.in_bar + k).copied().unwrap_or(after).max(0.02);
-        g_in = g_in.max(((target - lo) / li).clamp(0.0, 1.0));
-        if k == c.bars {
-            g_in = 1.0;
-        }
-        // The old track closes when little of it is left (or at the end).
-        let g_out = if k == c.bars { 0.0 } else { (lo / (0.25 * before)).clamp(0.0, 1.0).max(if k + 1 < c.bars { 1.0 } else { 0.0 }) };
-        v.push((g_in, g_out));
-    }
-    v
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -410,7 +372,7 @@ mod tests {
         Limits {
             earliest,
             latest,
-            lengths: vec![8, 16, 32],
+            lengths: (2..=16).map(|k| 4 * k).collect(),
             cue_bar: None,
             drop_cue_bar: None,
             blend: true,
@@ -433,7 +395,7 @@ mod tests {
     }
 
     #[test]
-    fn the_search_lands_the_new_drop_as_the_old_track_ends() {
+    fn the_old_outro_rides_under_the_new_intro() {
         // Old: full until bar 64, then an outro (drums and other) to 96.
         let out = track(96, [&[(0, 96)], &[(0, 64)], &[(16, 56)], &[(0, 96)]]);
         // New: a 16-bar intro (drums and other), its drop at bar 16, vocals from 24.
@@ -441,10 +403,9 @@ mod tests {
         let best = search(&out, &inc, &limits(40, 80));
         let b = &best[0];
         assert_eq!(b.technique, Technique::Blend);
-        assert_eq!(b.in_bar + b.bars, 16, "its drop right after the mix: {b:?}");
-        // It reaches the old outro (where the old bass stops by itself: a natural swap).
+        // As long as the two fit: the old outro (no bass, no vocals) under the new intro.
+        assert!(b.bars >= 16, "{b:?}");
         assert!(b.out_bar + b.bars > 64, "reaches the old outro: {b:?}");
-        assert!(b.notes.iter().any(|n| n.contains("drop lands")), "{:?}", b.notes);
         assert!(best.len() > 1, "alternatives");
         for (k, a) in best.iter().enumerate() {
             for b in &best[k + 1..] {
@@ -467,34 +428,39 @@ mod tests {
     }
 
     #[test]
-    fn the_old_track_loops_when_it_would_end_mid_mix() {
+    fn the_old_track_may_end_during_the_mix() {
         let out = track(40, [&[(0, 40)], &[(0, 40)], &[], &[(0, 40)]]);
         let inc = track(96, [&[(0, 96)], &[(16, 96)], &[], &[(0, 96)]]);
-        let mut lim = limits(32, 39);
-        lim.lengths = vec![16];
+        let mut lim = limits(36, 36);
+        lim.lengths = vec![8];
         lim.cut = false;
         let b = &search(&out, &inc, &lim)[0];
-        assert_eq!(b.loop_from, Some(32), "{b:?}");
-        assert!(b.notes.iter().any(|n| n.contains("loops")));
+        assert_eq!((b.out_bar, b.bars), (36, 8), "{b:?}");
+        assert!(b.notes.iter().any(|n| n.contains("ends on its own")), "{:?}", b.notes);
+        // But not far past its end.
+        lim.lengths = vec![16];
+        assert!(search(&out, &inc, &lim).is_empty());
     }
 
     #[test]
-    fn volume_follows_the_room_the_old_track_leaves() {
-        let out = track(64, [&[(0, 64)]; 4]);
-        // New intro: drums only (quiet) for 8 bars.
-        let inc = track(64, [&[(0, 64)], &[(8, 64)], &[(8, 64)], &[(8, 64)]]);
-        let c = Candidate { out_bar: 32, in_bar: 0, bars: 8, technique: Technique::Blend, loop_from: None, score: 0.0, notes: vec![] };
-        // The old track thins out over the mix.
-        let left: Vec<f32> = (0..8).map(|k| 1.0 - k as f32 / 8.0).collect();
-        let g = gains(&out, &inc, &c, &left);
-        assert_eq!(g.len(), 9);
-        assert!(g.windows(2).all(|w| w[1].0 >= w[0].0), "the new volume only rises");
-        assert!(g[0].0 > 0.0, "a quiet intro comes up from the start");
-        assert_eq!(g[8], (1.0, 0.0));
-        assert_eq!(g[1].1, 1.0, "the old track keeps its volume while its parts leave");
-        // A full new track comes in lower than a sparse one.
-        let full = track(64, [&[(0, 64)]; 4]);
-        let g2 = gains(&out, &full, &c, &left);
-        assert!(g2[1].0 < g[1].0);
+    fn how_long_comes_from_the_songs() {
+        // Two full tracks with vocals all the way, EQ only: vocals on vocals, so the shortest.
+        let full = track(96, [&[(0, 96)]; 4]);
+        let mut lim = limits(40, 48);
+        lim.cut = false;
+        lim.stems = false;
+        let b = &search(&full, &full, &lim)[0];
+        assert_eq!(b.bars, 8, "{b:?}");
+        // The same with stems and the new vocals out (Now): the stems take them apart, so long.
+        lim.stems = true;
+        lim.vocals_out = true;
+        let b = &search(&full, &full, &lim)[0];
+        assert!(b.bars >= 16, "{b:?}");
+        lim.vocals_out = false;
+        // A long sparse outro and a long sparse intro: a long mix.
+        let out = track(96, [&[(0, 96)], &[(0, 40)], &[(0, 40)], &[(0, 96)]]);
+        let inc = track(96, [&[(0, 96)], &[(32, 96)], &[(40, 80)], &[(0, 96)]]);
+        let b = &search(&out, &inc, &lim)[0];
+        assert!(b.bars >= 32, "{b:?}");
     }
 }

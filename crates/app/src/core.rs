@@ -509,7 +509,8 @@ impl Core {
         });
     }
 
-    /// Detect this deck's cue points again (from its stems), replacing the current ones.
+    /// Detect this deck's cue points again (from its stems), merged into the current ones (see
+    /// [`merge_cues`]).
     pub fn redetect_cues(&mut self, d: usize) {
         let Some(info) = self.decks[d].info.as_mut() else { return };
         info.cues_pending = true;
@@ -538,18 +539,26 @@ impl Core {
     }
 
     /// Detected cue points arrived: use them unless cues were edited in the meantime.
+    /// Put detected cue points on a deck's pads (see [`merge_cues`]): close to a cue it has (within
+    /// a bar), the detected one replaces it; the others go on free pads; the rest stay.
     fn apply_detected_cues(&mut self, d: usize, found: Vec<Cue>) {
         let Some(info) = self.decks[d].info.as_mut() else { return };
         if !std::mem::take(&mut info.cues_pending) || found.is_empty() {
             return;
         }
-        let mut found = found.into_iter();
+        let bpm = self.snap.decks[d].track_bpm;
+        let close = if bpm > 0.0 { 4.0 * 60.0 / bpm } else { 2.0 };
+        let old = info.cues.clone();
+        let (new, replaced, added, dropped) = merge_cues(&old, found, close);
         for i in 0..NUM_HOT_CUES {
-            let cue = found.next();
-            self.deck_cmd(d, DeckCmd::SetCue { idx: i as u8, secs: cue.as_ref().map(|c| c.secs), end_secs: None });
-            self.persist_cue(d, i as u8, cue);
+            if new[i] != old[i] {
+                let c = &new[i];
+                self.deck_cmd(d, DeckCmd::SetCue { idx: i as u8, secs: c.as_ref().map(|c| c.secs), end_secs: c.as_ref().and_then(|c| c.end_secs) });
+                self.persist_cue(d, i as u8, new[i].clone());
+            }
         }
-        self.log(format!("Deck {}: cue points detected", d + 1));
+        let full = if dropped > 0 { format!(", {dropped} left out: pads full") } else { String::new() };
+        self.log(format!("Deck {}: cue points detected ({replaced} replaced, {added} added{full})", d + 1));
     }
 
     pub fn eject(&mut self, d: usize) {
@@ -2459,6 +2468,36 @@ fn drop_garbage(g: Garbage) {
     drop(g);
 }
 
+/// Merge detected cue points into a track's pads: a detected cue within `close` seconds of a cue
+/// already there replaces it (on the same pad); the others go on free pads, earliest first; cues
+/// with nothing detected near them stay. Returns the pads and how many were replaced, added and
+/// left out (no free pad).
+pub fn merge_cues(old: &[Option<Cue>; NUM_HOT_CUES], mut found: Vec<Cue>, close: f64) -> ([Option<Cue>; NUM_HOT_CUES], usize, usize, usize) {
+    found.sort_by(|a, b| a.secs.total_cmp(&b.secs));
+    let mut pads = old.clone();
+    let mut touched = [false; NUM_HOT_CUES];
+    let (mut replaced, mut added, mut dropped) = (0, 0, 0);
+    let near = |pads: &[Option<Cue>; NUM_HOT_CUES], i: usize, t: f64| pads[i].as_ref().map(|c| (c.secs - t).abs()).filter(|x| *x <= close);
+    for c in found {
+        // The nearest cue already there that nothing replaced yet.
+        let nearest = (0..NUM_HOT_CUES).filter(|&i| !touched[i]).filter_map(|i| near(&pads, i, c.secs).map(|x| (i, x))).min_by(|a, b| a.1.total_cmp(&b.1));
+        if let Some((i, _)) = nearest {
+            pads[i] = Some(c);
+            touched[i] = true;
+            replaced += 1;
+        } else if (0..NUM_HOT_CUES).any(|i| touched[i] && near(&pads, i, c.secs).is_some()) {
+            // Next to one this detection just set: the same section.
+        } else if let Some(i) = (0..NUM_HOT_CUES).find(|&i| pads[i].is_none()) {
+            pads[i] = Some(c);
+            touched[i] = true;
+            added += 1;
+        } else {
+            dropped += 1;
+        }
+    }
+    (pads, replaced, added, dropped)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2643,18 +2682,17 @@ mod tests {
         assert_eq!(c.mix_target(0), None, "the playing deck is not a candidate");
         assert!(!c.mix_is_urgent(0));
 
-        // Best: searched over the whole track: on a 4-bar line, ahead, 8/16/32 bars.
+        // Best: searched over the whole track: on a 4-bar line, ahead, whole phrases long.
         let best = c.plan_best(1, 0, crate::settings::MixStyle::Eq);
         let beat = c.snap.decks[0].beat;
         assert_eq!(best.mode, automix::MixWhen::Best);
-        assert!([32.0, 64.0, 128.0].contains(&best.length_beats), "{best:?}");
+        assert!(best.length_beats >= 16.0 && best.length_beats % 16.0 == 0.0, "{best:?}");
         assert_eq!(best.start_beat % 16.0, 0.0);
         assert!(best.start_beat > beat, "{best:?}");
-        assert!(!best.gains.is_empty(), "volume from loudness, not a preset fade");
 
         let plan = c.plan_now(1, 0, crate::settings::MixStyle::Eq);
-        // Now: on the next 4-bar line or so, as long as the music allows (at most ~10 s).
-        assert!([8.0, 16.0, 20.0].contains(&plan.length_beats), "{plan:?}");
+        // Now: on the next 4-bar line or so, as long as the music allows.
+        assert!(plan.length_beats >= 16.0 && plan.length_beats % 16.0 == 0.0, "{plan:?}");
         assert_eq!(plan.start_beat % 16.0, 0.0);
         assert!(plan.start_beat > c.snap.decks[0].beat);
         let start = plan.start_beat;
@@ -2674,7 +2712,7 @@ mod tests {
         while c.automix.is_some() {
             pump(&mut e, &mut c);
             blocks += 4;
-            assert!(blocks < 48000 / 512 * 40, "mix never finished");
+            assert!(blocks < 48000 / 512 * 300, "mix never finished");
             let b = c.snap.decks[0].beat;
             let p = (b - start) / len;
             if c.snap.decks[0].playing && p > 0.05 && p < ps - 0.05 {
@@ -2701,8 +2739,9 @@ mod tests {
         assert!(!c.session.channels[1].params.mute);
         assert!((low(&c, 0) - 0.5).abs() < 1e-6 && (low(&c, 1) - 0.5).abs() < 1e-6);
         assert_eq!((c.session.channels[0].params.eq[1], c.session.channels[0].params.eq[2]), (0.5, 0.5), "old mids and highs back");
-        // The incoming track played on from its cue (8 s) through the mix (0.5 s a beat).
-        assert!(c.snap.decks[1].position_secs > 8.0 + len * 0.5 - 0.3, "{}", c.snap.decks[1].position_secs);
+        // The incoming track played on through the mix (0.5 s a beat), from where the plan
+        // brought it in.
+        assert!(c.snap.decks[1].position_secs > len * 0.5 - 0.3, "{}", c.snap.decks[1].position_secs);
         assert_eq!(c.snap.decks[1].stem_gains[2], 0.0, "the new track's vocals stay out");
         // Until another track is loaded on that deck: it starts with every stem on.
         c.load_track(1, &kick_wav("automix-c.wav", 30));
@@ -2861,7 +2900,7 @@ mod tests {
         while c.automix.is_some() {
             pump(&mut e, &mut c);
             blocks += 4;
-            assert!(blocks < 48000 / 512 * 40, "mix never finished");
+            assert!(blocks < 48000 / 512 * 300, "mix never finished");
         }
         pump(&mut e, &mut c);
         let (a, b) = (c.snap.decks[0], c.snap.decks[1]);
@@ -2916,7 +2955,7 @@ mod tests {
         while c.automix.is_some() {
             pump(e, c);
             blocks += 4;
-            assert!(blocks < 48000 / 512 * 60, "mix never finished");
+            assert!(blocks < 48000 / 512 * 300, "mix never finished");
             if c.snap.decks[0].playing {
                 each(c, (c.snap.decks[0].beat - start) / len);
             }
@@ -3226,8 +3265,11 @@ mod tests {
         // Now: on a phrase (8 bars when that's within 4 bars, else 4 bars): at most 4 bars after
         // the new track's lead-in.
         assert_eq!(plan.start_beat % 16.0, 0.0, "{plan:?}");
-        assert!(plan.start_beat - plan.lead_in > beat + 0.5 && plan.start_beat - beat <= 16.0 + 0.5 + plan.lead_in, "{} {}", plan.start_beat, beat);
-        assert_eq!(plan.lead_in, 3.0);
+        // (Ahead by the time it takes to start and its lead-in, then the next 4-bar line.)
+        assert!(plan.start_beat - plan.lead_in > beat + 0.5 && plan.start_beat - beat <= 16.0 + 8.0, "{} {}", plan.start_beat, beat);
+        // Coming in at the cue (a beat into its bar): 3 beats early; elsewhere it's on a bar line.
+        let at_cue = plan.entry_secs.is_some_and(|t| (t - 8.5).abs() < 0.01);
+        assert_eq!(plan.lead_in, if at_cue { 3.0 } else { 0.0 }, "{plan:?}");
         c.start_mix(plan);
         let mut checked = false;
         run_mix(&mut e, &mut c, |c, p| {
@@ -3250,7 +3292,33 @@ mod tests {
     }
 
     #[test]
-    fn mix_techniques_filter_echo_and_outro_loop() {
+    fn the_old_track_may_end_during_a_mix() {
+        let (mut e, mut c, _config) = core();
+        mix_setup(&mut e, &mut c);
+        let plan = c.plan_now(1, 0, crate::settings::MixStyle::Eq);
+        let start = plan.start_beat;
+        c.start_mix(plan);
+        // Once the mix is under way, the old track runs out (it fades on its own): no rush, the
+        // mix goes on and finishes bringing the new one in.
+        let mut blocks = 0;
+        while c.mix_beat() < start + 4.0 {
+            pump(&mut e, &mut c);
+            blocks += 1;
+            assert!(blocks < 48000 / 512 * 120, "mix never started");
+        }
+        assert!(c.automix.is_some());
+        c.deck_cmd(0, DeckCmd::SeekFraction(0.999));
+        run_mix(&mut e, &mut c, |_, _| {});
+        assert!(!c.snap.decks[0].playing, "the old track ended");
+        assert!(!c.status.iter().any(|(_, m)| m.contains("cancelled")), "{:?}", c.status);
+        assert!(c.status.iter().any(|(_, m)| m.starts_with("Mixed into")), "{:?}", c.status);
+        assert!(c.snap.decks[1].playing);
+        assert!((c.session.channels[1].params.volume - 1.0).abs() < 1e-6);
+        assert!((c.session.channels[1].params.eq[0] - 0.5).abs() < 1e-6, "the new bass in");
+    }
+
+    #[test]
+    fn mix_techniques_filter_and_echo() {
         let (mut e, mut c, _config) = core();
         mix_setup(&mut e, &mut c);
         let mut plan = c.plan_now(1, 0, crate::settings::MixStyle::Eq);
@@ -3258,9 +3326,8 @@ mod tests {
         // Force every technique on this one.
         plan.filter = Some((0.0, bars));
         plan.echo_at = Some(bars - 1.0);
-        plan.loop_out = Some((plan.start_beat, 8.0));
         c.start_mix(plan);
-        let (mut swept, mut echoed, mut looped) = (false, false, false);
+        let (mut swept, mut echoed) = (false, false);
         run_mix(&mut e, &mut c, |c, _| {
             if c.session.channels[0].params.cutoff > 0.6 {
                 swept = true;
@@ -3268,13 +3335,9 @@ mod tests {
             if c.session.channels[0].fx.slots.iter().flatten().any(|s| s.name == "Echo") {
                 echoed = true;
             }
-            if c.snap.decks[0].loop_on {
-                looped = true;
-            }
         });
         assert!(swept, "high-pass sweep on the old track");
         assert!(echoed, "echo inserted on the old track");
-        assert!(looped, "the old track looped");
         assert_eq!(c.session.channels[0].params.cutoff, 0.5, "filter back");
         // The echo goes once its tail has rung out (2 bars).
         assert!(!c.echo_cleanup.is_empty());
@@ -3409,5 +3472,27 @@ mod tests {
         assert_eq!(addr_kind("Deck/1/BeatSkip"), Kind::Step);
         assert_eq!(addr_kind("Mixer/CH1/Mute"), Kind::Switch);
         assert_eq!(addr_kind("Mixer/CH1/FX/Macro/2"), Kind::Value);
+    }
+
+    #[test]
+    fn detected_cues_replace_close_ones_and_fill_free_pads() {
+        let cue = |secs: f64, name: &str| Cue { kind: CueKind::Hot, secs, end_secs: None, name: name.into(), color: [0; 3] };
+        let mut old: [Option<Cue>; NUM_HOT_CUES] = Default::default();
+        old[0] = Some(cue(0.5, "Start"));
+        old[2] = Some(cue(60.0, "Mine"));
+        old[5] = Some(cue(120.0, "Outro"));
+        // Bar = 2 s: Intro at 1.0 is close to pad 1; Drop at 30 is new; Outro at 121 is close to pad 6.
+        let found = vec![cue(121.0, "Outro"), cue(30.0, "Drop"), cue(1.0, "Intro"), cue(31.0, "Drop again")];
+        let (pads, replaced, added, dropped) = merge_cues(&old, found, 2.0);
+        assert_eq!((replaced, added, dropped), (2, 1, 0));
+        assert_eq!(pads[0].as_ref().unwrap().name, "Intro", "replaced on the same pad");
+        assert_eq!(pads[5].as_ref().unwrap().secs, 121.0);
+        assert_eq!(pads[2].as_ref().unwrap().name, "Mine", "nothing detected near it: kept");
+        assert_eq!(pads[1].as_ref().unwrap().name, "Drop", "new ones on free pads");
+        assert_eq!(pads.iter().flatten().count(), 4, "a second cue next to a new one isn't added");
+        // Full pads: the rest are left out.
+        let full: [Option<Cue>; NUM_HOT_CUES] = std::array::from_fn(|i| Some(cue(i as f64 * 10.0, "x")));
+        let (_, r, a, d) = merge_cues(&full, vec![cue(5.0, "y"), cue(200.0, "z")], 2.0);
+        assert_eq!((r, a, d), (0, 0, 2));
     }
 }

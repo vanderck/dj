@@ -85,7 +85,7 @@ fn badge_menu(ui: &mut Ui, core: &mut Core, d: usize, rect: Rect, size: f32) {
                 core.set_track_locked(d, !locked);
                 ui.close();
             }
-            if core.settings.stems_enabled && ui.button("Detect cue points").on_hover_text("Find this track's sections (Intro, Drop, Break, Vocal, Outro) from its stems, replacing its cue points").clicked() {
+            if core.settings.stems_enabled && ui.button("Detect cue points").on_hover_text("Find this track's sections (Intro, Drop, Break, Vocal, Outro) from its stems: one within a bar of a cue it has replaces that cue, the others go on free pads").clicked() {
                 core.redetect_cues(d);
                 ui.close();
             }
@@ -851,9 +851,10 @@ fn mix_button(ui: &mut Ui, core: &mut Core, d: usize, rect: Rect, font: egui::Fo
     // dj measures both tracks and picks how to mix (stems and EQ together, or a cut).
     let style = crate::settings::MixStyle::Auto;
     if core.mix_is_urgent(out) {
-        // Less than a minute of the playing track left: no question, mix now.
+        // The playing track's last minute: no question, the best moment left (no rush: the mix
+        // may run past its end, which fades on its own).
         if resp.clicked() && !core.learn {
-            let plan = core.plan_now(d, out, style);
+            let plan = core.plan_best(d, out, style);
             core.start_mix(plan);
         }
         return;

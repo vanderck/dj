@@ -36,7 +36,12 @@ pub use crate::settings::MixStyle;
 pub const BEST_BEATS: f64 = 64.0;
 /// A drop: one bar.
 const DROP_BEATS: f64 = 4.0;
-/// Below this much outgoing time left, Mix always mixes now.
+/// Without analysis (no beat grid or waveform), a Now mix lasts about this long (8–16 bars).
+const NOW_SECS: f64 = 32.0;
+/// The shortest and longest blend the search tries, in bars.
+const MIN_MIX_BARS: usize = 8;
+const MAX_MIX_BARS: usize = 128;
+/// In the playing track's last minute, Mix doesn't ask: it mixes at the best moment left.
 const LAST_MINUTE_SECS: f64 = 60.0;
 /// Stem order: drums, bass, vocals, other.
 use crate::transition::{BASS, DRUMS, OTHER, PRESENT, VOCALS};
@@ -90,15 +95,10 @@ pub struct MixPlan {
     pub lead_in: f64,
     /// Where the incoming track starts (track seconds); `None` = its loop start (or drop cue).
     pub entry_secs: Option<f64>,
-    /// Volume per bar line (new, old) from loudness matching; empty = the fixed script.
-    pub gains: Vec<(f32, f32)>,
     /// A high-pass sweep on the old track over these bars of the mix (it's still full there).
     pub filter: Option<(f64, f64)>,
     /// An echo-out on the old track from this bar (it has to leave mid-phrase).
     pub echo_at: Option<f64>,
-    /// The old track loops from this beat (outgoing beats) for this many beats: it would end
-    /// before the mix does.
-    pub loop_out: Option<(f64, f64)>,
     /// What the plan follows in the two tracks, printed when the mix starts.
     pub notes: Vec<String>,
 }
@@ -118,23 +118,10 @@ impl MixPlan {
             blend: None,
             lead_in: 0.0,
             entry_secs: None,
-            gains: Vec::new(),
             filter: None,
             echo_at: None,
-            loop_out: None,
             notes: Vec::new(),
         }
-    }
-
-    /// Volume (new, old) at bar position `bp` of the mix, between the planned bar lines.
-    fn gain_at(&self, bp: f64) -> Option<(f32, f32)> {
-        if self.gains.is_empty() {
-            return None;
-        }
-        let k = (bp.max(0.0).floor() as usize).min(self.gains.len() - 1);
-        let (a, b) = (self.gains[k], self.gains[(k + 1).min(self.gains.len() - 1)]);
-        let t = (bp - k as f64).clamp(0.0, 1.0) as f32;
-        Some((a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t))
     }
 }
 
@@ -162,11 +149,9 @@ pub struct AutoMix {
     /// The outgoing deck's beat minus the master clock's when the mix started. The mix runs on
     /// the clock (+ this), which keeps counting while the outgoing deck loops.
     beat_offset: f64,
-    /// The old channel's filter before the mix (a sweep puts it back), the echo inserted on it,
-    /// and whether its outro loop is on.
+    /// The old channel's filter before the mix (a sweep puts it back) and the echo inserted on it.
     out_cutoff: f32,
     echo_slot: Option<usize>,
-    looped: bool,
 }
 
 /// After a Now mix: bring the new track's vocals back where its next vocal phrase starts.
@@ -190,16 +175,18 @@ fn smooth(x: f64) -> f32 {
 fn stems_at(p: f64, vocals_out: bool, best: bool) -> ([f32; 4], [f32; 4]) {
     let mut i = [1.0, 0.0, 1.0, 1.0];
     let mut o = [1.0; 4];
-    // The incoming melody (other) is there from the start; its drums come in next.
-    i[DRUMS] = smooth((p - 0.15) / 0.2);
+    // The incoming melody (other) rises from the start; its drums come in next.
+    i[OTHER] = smooth(p / 0.4);
+    i[DRUMS] = smooth((p - 0.15) / 0.3);
     if p >= 0.5 {
         // Midpoint: the basses swap.
         i[BASS] = 1.0;
         o[BASS] = 0.0;
     }
-    // Then the outgoing drums go, then its vocals and other.
-    o[DRUMS] = 1.0 - smooth((p - 0.5) / 0.25);
-    let tail = 1.0 - smooth((p - 0.75) / 0.25);
+    // Then the outgoing drums go, then its vocals and other: out by three quarters (its volume
+    // closes after that).
+    o[DRUMS] = 1.0 - smooth((p - 0.5) / 0.15);
+    let tail = 1.0 - smooth((p - 0.5) / 0.25);
     o[VOCALS] = tail;
     o[OTHER] = tail;
     // Incoming vocals: out for Now; for Best they come in as the outgoing ones leave.
@@ -254,7 +241,7 @@ impl Core {
         }
     }
 
-    /// Whether Mix should skip the popup (the outgoing track ends within a minute).
+    /// Whether Mix should skip the popup (the playing track ends within a minute).
     pub fn mix_is_urgent(&self, outgoing: usize) -> bool {
         let v = &self.snap.decks[outgoing];
         (v.duration_secs - v.position_secs) / v.speed.max(0.01) < LAST_MINUTE_SECS
@@ -370,9 +357,10 @@ impl Core {
         let clash = self.keys_clash(incoming, outgoing);
         let stretch = (i.track_bpm / o.bpm.max(1.0) - 1.0).abs() > 0.08;
         // What the style allows: Auto blends unless the keys clash without stems or the tempos
-        // are far apart, and may also cut.
+        // are far apart; only then it cuts.
+        let can_blend = !stretch && (stems || !clash);
         let (blend, cut) = match style {
-            MixStyle::Auto => (!stretch && (stems || !clash), true),
+            MixStyle::Auto => (can_blend, !can_blend),
             MixStyle::Stems | MixStyle::Eq => (true, false),
             MixStyle::Drop => (false, true),
         };
@@ -381,15 +369,9 @@ impl Core {
         let lead = if i.playing { 0.5 } else { 4.5 } + 3.0;
         let earliest = ((o.beat + lead) / 4.0).ceil().max(0.0) as usize;
         let latest = if when == MixWhen::Now { earliest + 4 } else { out.len() };
-        let lengths = if when == MixWhen::Now {
-            let max = (10.0 / (4.0 * 60.0 / o.bpm.max(1.0))).floor().clamp(2.0, 8.0) as usize;
-            let mut l = vec![2, 4, max];
-            l.retain(|&b| b <= max);
-            l.dedup();
-            l
-        } else {
-            vec![8, 16, 32]
-        };
+        // Every phrase length (4 bars) from 8 up to 128: how long is up to the two songs (the
+        // search scores each bar of the overlap; the longer they play well together, the better).
+        let lengths: Vec<usize> = (MIN_MIX_BARS / 4..=MAX_MIX_BARS / 4).map(|k| 4 * k).collect();
         // Your cue (or where a paused deck stands) as a bar of the new track.
         let cue_secs = if i.loop_on { i.loop_start_secs } else { i.position_secs };
         let cue_bar = ((cue_secs - start_i) / inc.bar_secs).round().max(0.0) as usize;
@@ -409,7 +391,6 @@ impl Core {
             stems,
             hurry: when == MixWhen::Now,
         };
-        let n_out = out.len();
         tr::search(&out, &inc, &lim)
             .into_iter()
             .map(|c| {
@@ -425,33 +406,23 @@ impl Core {
                 } else {
                     (Some(inc.secs(c.in_bar as f64)), 0.0)
                 };
-                let ob = |k: usize| tr::out_bar(c.out_bar, k, c.loop_from, n_out);
+                let ob = |k: usize| c.out_bar + k;
                 let inc_w: [Vec<f32>; 4] = std::array::from_fn(|p| (0..bars).map(|k| inc.level(p, c.in_bar + k)).collect());
                 let out_w: [Vec<f32>; 4] = std::array::from_fn(|p| (0..bars).map(|k| out.level(p, ob(k))).collect());
                 let blend = (how != MixHow::Drop).then(|| plan_blend(&inc_w, &out_w, bars, vocals_out, clash));
-                // The share of the old track still sounding in each bar, after the planned moves.
-                let out_left: Vec<f32> = (0..bars)
-                    .map(|k| {
-                        let o_frac = blend.as_ref().map_or([1.0; 4], |b| b.levels(k as f64 + 0.5, vocals_out).1);
-                        let total: f32 = (0..4).map(|p| out_w[p][k]).sum();
-                        if total <= 0.0 { 1.0 } else { (0..4).map(|p| out_w[p][k] * o_frac[p]).sum::<f32>() / total }
-                    })
-                    .collect();
-                let cand = tr::Candidate { bars, ..c.clone() };
-                let gains = if how == MixHow::Drop { Vec::new() } else { tr::gains(&out, &inc, &cand, &out_left) };
                 // Techniques, only when the music calls for them:
                 // a high-pass sweep when the old track is still full as it has to go (EQ: no stems
                 // to take it apart); an echo-out when it leaves mid-phrase with vocals, or is cut
                 // while its bass plays.
                 let last_full = (bars.saturating_sub(2)..bars).all(|k| out.fullness(ob(k)) >= 3);
-                let filter = (how == MixHow::Eq && bars >= 4 && last_full).then(|| ((bars - 2) as f64, bars as f64));
+                // (Done a bar before the end, like the EQ: the volume closes last.)
+                let filter = (how == MixHow::Eq && bars >= 4 && last_full).then(|| ((bars - 3) as f64, (bars - 1) as f64));
                 let mid_phrase = !(c.out_bar + bars).is_multiple_of(8);
                 let echo_at = match how {
                     MixHow::Drop if out.on(tr::BASS, ob(0)) => Some(0.0),
                     MixHow::Eq | MixHow::Stems if mid_phrase && out.on(tr::VOCALS, ob(bars - 1)) => Some((bars - 1) as f64),
                     _ => None,
                 };
-                let loop_out = c.loop_from.map(|l| (l as f64 * 4.0, (n_out.saturating_sub(l)).max(1) as f64 * 4.0));
                 let mut notes = c.notes.clone();
                 if let Some(b) = &blend {
                     notes.extend(b.notes.iter().take(2).cloned());
@@ -490,10 +461,8 @@ impl Core {
                     blend,
                     lead_in,
                     entry_secs,
-                    gains,
                     filter,
                     echo_at,
-                    loop_out,
                     notes,
                 }
             })
@@ -525,7 +494,7 @@ impl Core {
             return MixPlan { incoming, outgoing, mode: MixWhen::Now, how, start_beat, length_beats: DROP_BEATS, reason: reason.into(), why_how, blend: None, lead_in, ..MixPlan::plain() };
         }
         let bar_s = 4.0 * 60.0 / o.bpm.max(1.0);
-        let bars = (10.0 / bar_s).floor().clamp(2.0, 8.0);
+        let bars = (NOW_SECS / bar_s).floor().clamp(8.0, 16.0);
         let vocals_out = self.snap.decks[incoming].stems_ready;
         let blend = self.analyse(incoming, outgoing, next_bar, bars as usize, vocals_out);
         MixPlan { incoming, outgoing, mode: MixWhen::Now, how, start_beat: next_bar, length_beats: bars * 4.0, reason: format!("{bars:.0} bars, {on}"), why_how, blend, lead_in, ..MixPlan::plain() }
@@ -694,7 +663,6 @@ impl Core {
             beat_offset: self.snap.decks[o].beat - self.snap.clock.beat,
             out_cutoff: params(o).cutoff,
             echo_slot: None,
-            looped: false,
             plan,
         };
         match mix.plan.how {
@@ -836,8 +804,10 @@ impl Core {
         let (i, o, start, len) = (m.plan.incoming, m.plan.outgoing, m.plan.start_beat, m.plan.length_beats);
         let (vi, vo) = (self.snap.decks[i], self.snap.decks[o]);
         // Another track loaded on either deck, or a deck stopped or ejected: give up (and put the
-        // EQ and stems back).
-        if (vi.track_id, vo.track_id) != m.tracks || !vi.loaded || !vo.loaded || !vo.playing || !(vi.playing || vi.play_pending) {
+        // EQ and stems back). The old track reaching its end is fine: it fades on its own, and the
+        // mix carries on bringing the new one in.
+        let old_ended = vo.loaded && !vo.playing && vo.duration_secs > 0.0 && vo.position_secs >= vo.duration_secs - 0.5;
+        if (vi.track_id, vo.track_id) != m.tracks || !vi.loaded || !vo.loaded || !(vo.playing || old_ended) || !(vi.playing || vi.play_pending) {
             self.cancel_mix();
             return;
         }
@@ -860,17 +830,14 @@ impl Core {
             // A drop starts from the incoming track's drop cue.
             let to_cue = if m.plan.how == MixHow::Drop && m.plan.entry_secs.is_none() { self.drop_cue(i) } else { None };
             let entry = m.plan.entry_secs;
+            let external = m.external;
             self.automix.as_mut().unwrap().released = true;
             self.deck_cmd(i, DeckCmd::ReleaseLoop { to_cue, to_secs: entry });
-            return;
-        }
-        // The old track loops its last bars when it would end before the mix does.
-        if let Some((lb, lbeats)) = m.plan.loop_out {
-            if !m.looped && beat >= lb + 0.05 {
-                self.automix.as_mut().unwrap().looped = true;
-                self.deck_cmd(o, DeckCmd::LoopBeats(lbeats));
-                return;
+            // Its volume fully up as it starts: its stems or EQ (still closed) bring it in.
+            if !external {
+                self.mix_set(&format!("Mixer/CH{}/Volume", i + 1), 1.0);
             }
+            return;
         }
         if beat < start {
             return;
@@ -879,12 +846,13 @@ impl Core {
         let (how, external, swapped) = (m.plan.how, m.external, m.swapped);
         let (out_volume, in_low, out_low, in_high, out_high, out_mid, in_mid) =
             (m.out_volume, m.in_low, m.out_low, m.in_high, m.out_high, m.out_mid, m.in_mid);
-        // Volume only opens the start (and closes the end): the EQ or stems do the blending.
-        let open = smooth(p / 0.15);
+        // The new track's volume is up from the start; the EQ or stems do the blending.
         let blend = m.plan.blend.clone();
         let bp = p.min(1.0) * len / 4.0; // bar position in the mix
-        // Volume from the plan's loudness matching (else the fixed script below).
-        let gain = m.plan.gain_at(bp);
+        // The old track's volume closes only over the last bar, once its EQ or stems have taken
+        // it out.
+        let bars_n = len / 4.0;
+        let out_vol = 1.0 - smooth(bp - (bars_n - 1.0));
         let (filter, echo_at, echo_slot, out_cutoff) = (m.plan.filter, m.plan.echo_at, m.echo_slot, m.out_cutoff);
         let (in_stems, out_stems, vocals_out, best) = (m.in_stems, m.out_stems, m.vocals_out, m.plan.mode == MixWhen::Best);
         let vol = |c: usize| format!("Mixer/CH{}/Volume", c + 1);
@@ -894,15 +862,16 @@ impl Core {
         match how {
             MixHow::Eq if external => {} // you fade on the mixer
             MixHow::Eq => {
-                // In: volume opens, then highs, then mids; the bass swap (where the plan puts it:
-                // where the new bass comes in or the old one stops, else halfway). Out: mids, then
-                // highs; its volume only closes the last part.
-                let ps = blend.as_ref().map_or(0.5, |b| b.swap_fraction()).clamp(0.2, 0.85);
-                let after = 1.0 - ps;
-                self.mix_set(&vol(i), gain.map_or(open, |g| g.0));
+                // In (volume already up): the highs rise from the start, then the mids; the bass
+                // swap (where the plan puts it: where the new bass comes in or the old one stops,
+                // else halfway). Out: mids, then highs; its volume only closes the last part.
+                // The old track's EQ is done a bar before the end (then its volume closes).
+                let done = ((bars_n - 1.0) / bars_n).max(0.5);
+                let ps = blend.as_ref().map_or(0.5, |b| b.swap_fraction()).clamp(0.2, (done - 0.1).max(0.2));
+                let after = (done - ps).max(0.05);
                 if p < ps {
-                    self.mix_set(&high(i), in_high * smooth((p - 0.2 * ps) / (0.5 * ps)));
-                    self.mix_set(&mid(i), in_mid * smooth((p - 0.5 * ps) / (0.5 * ps)));
+                    self.mix_set(&high(i), in_high * smooth(p / (0.7 * ps)));
+                    self.mix_set(&mid(i), in_mid * smooth((p - 0.3 * ps) / (0.7 * ps)));
                 }
                 if p >= ps && !swapped {
                     self.automix.as_mut().unwrap().swapped = true;
@@ -913,10 +882,7 @@ impl Core {
                 }
                 if p >= ps {
                     self.mix_set(&mid(o), out_mid * (1.0 - smooth((p - ps) / (0.6 * after))));
-                    self.mix_set(&high(o), out_high * (1.0 - smooth((p - ps - 0.2 * after) / (0.6 * after))));
-                    if gain.is_none() {
-                        self.mix_set(&vol(o), out_volume * (1.0 - smooth((p - 0.85) / 0.15)));
-                    }
+                    self.mix_set(&high(o), out_high * (1.0 - smooth((p - ps - 0.3 * after) / (0.7 * after))));
                 }
             }
             MixHow::Stems => {
@@ -928,7 +894,6 @@ impl Core {
                 self.set_stem_levels(o, so, out_stems);
                 if !external {
                     // The outgoing track leaves on its stems; its volume stays up (it's at 0 at the end).
-                    self.mix_set(&vol(i), gain.map_or(open, |g| g.0));
                     // The EQ smooths the stem swaps: the new highs rise until its drums are in, the
                     // old highs roll off as its drums leave (from the plan).
                     let (d_in, d_out) = match &blend {
@@ -953,9 +918,7 @@ impl Core {
             }
         }
         if !external && how != MixHow::Drop {
-            if let Some(g) = gain {
-                self.mix_set(&vol(o), out_volume * g.1);
-            }
+            self.mix_set(&vol(o), out_volume * out_vol);
             // A high-pass sweep on the old track where the plan puts one.
             if let Some((a, b)) = filter {
                 let x = smooth((bp - a) / (b - a).max(0.5));
@@ -987,8 +950,12 @@ impl Core {
                 if how == MixHow::Stems && vo.stems_ready {
                     self.set_stem_levels(o, [0.0; 4], out_stems);
                 }
-                self.deck_cmd(o, DeckCmd::LoopBeats(self.loop_size[o]));
-                self.log(format!("Deck {} is in, deck {} loops until you fade it out", i + 1, o + 1));
+                if old_ended {
+                    self.log(format!("Deck {} is in, deck {} has ended", i + 1, o + 1));
+                } else {
+                    self.deck_cmd(o, DeckCmd::LoopBeats(self.loop_size[o]));
+                    self.log(format!("Deck {} is in, deck {} loops until you fade it out", i + 1, o + 1));
+                }
             } else {
                 // Stop the old track: volume stays down; its bass and stems back for next time.
                 self.deck_cmd(o, DeckCmd::Pause);
@@ -1032,10 +999,12 @@ pub struct Blend {
     /// Mix bar where each incoming stem comes in (a one-bar ramp from there); `None` = left as the
     /// track plays (it's silent until it comes in on its own, or there from the start).
     pub in_at: [Option<f64>; 4],
+    /// Bars each incoming stem takes to come up from its `in_at`.
+    pub in_ramp: [f64; 4],
     /// Mix bar by which each outgoing stem has left (a ramp over `out_ramp` bars before it);
     /// `None` = left alone (it stops on its own, or isn't there).
     pub out_at: [Option<f64>; 4],
-    pub out_ramp: f64,
+    pub out_ramp: [f64; 4],
     /// Bar where the basses swap.
     pub swap: f64,
     /// What the plan follows ("bass swaps at bar 9, where its bass comes in").
@@ -1049,10 +1018,10 @@ impl Blend {
         let mut o = [1.0f32; 4];
         for s in 0..4 {
             if let Some(b) = self.in_at[s] {
-                i[s] = if s == BASS { (bp >= b) as u8 as f32 } else { smooth(bp - b) };
+                i[s] = if s == BASS { (bp >= b) as u8 as f32 } else { smooth((bp - b) / self.in_ramp[s].max(0.5)) };
             }
             if let Some(b) = self.out_at[s] {
-                o[s] = if s == BASS { (bp < b) as u8 as f32 } else { 1.0 - smooth((bp - (b - self.out_ramp)) / self.out_ramp) };
+                o[s] = if s == BASS { (bp < b) as u8 as f32 } else { 1.0 - smooth((bp - (b - self.out_ramp[s])) / self.out_ramp[s].max(0.5)) };
             }
         }
         if vocals_out {
@@ -1125,12 +1094,26 @@ pub fn plan_blend(inc: &[Vec<f32>; 4], out: &[Vec<f32>; 4], bars: usize, vocals_
     } as f64;
 
     let mut in_at = [None; 4];
+    let mut in_ramp = [1.0; 4];
     let mut out_at = [None; 4];
     in_at[BASS] = Some(swap);
     out_at[BASS] = Some(swap);
-    // New drums: there from the start → bring them in halfway to the swap.
+    let r = if bars >= 8 { 2.0 } else { 1.0 };
+    let mut out_ramp = [r; 4];
+    // A gentle lead: the new melody (and vocals, when the old track has none) there from the start
+    // rises from nothing over most of the way to the swap.
+    let lead = (0.75 * swap).max(1.0);
+    for s in [OTHER, VOCALS] {
+        if on(&inc[s], 0) {
+            in_at[s] = Some(0.0);
+            in_ramp[s] = lead;
+        }
+    }
+    // New drums: there from the start → they come up from halfway to the swap, by the swap.
     if on(&inc[DRUMS], 0) {
-        in_at[DRUMS] = Some((swap / 2.0).floor().max(1.0).min(swap));
+        let at = (swap / 2.0).floor().max(1.0).min(swap);
+        in_at[DRUMS] = Some(at);
+        in_ramp[DRUMS] = (swap - at).max(1.0);
     } else if enters(&inc[DRUMS]).is_some() {
         notes.push("new drums come in on their own".into());
     }
@@ -1139,13 +1122,15 @@ pub fn plan_blend(inc: &[Vec<f32>; 4], out: &[Vec<f32>; 4], bars: usize, vocals_
         let old_last = (0..bars).rev().find(|&k| on(&out[VOCALS], k)).unwrap_or(0);
         let wait = (old_last + 1).min(bars) as f64;
         in_at[VOCALS] = Some(wait);
+        in_ramp[VOCALS] = r;
         notes.push(format!("new vocals wait for bar {}", wait as usize + 1));
     }
-    let out_ramp = if bars >= 8 { 2.0 } else { 1.0 };
-    let rest = bars as f64 - swap;
+    // The old track is out on its stems a bar before the end (its volume closes over that bar).
+    let done = (bars as f64 - 1.0).max(swap);
+    let rest = done - swap;
     // Old drums: after the swap, unless they stop on their own.
     if present(&out[DRUMS]) && stops(&out[DRUMS]).is_none_or(|x| x as f64 > swap + rest / 2.0) {
-        out_at[DRUMS] = Some((swap + (rest / 2.0).ceil()).min(bars as f64));
+        out_at[DRUMS] = Some((swap + (rest / 2.0).ceil()).min(done));
     } else if present(&out[DRUMS]) {
         notes.push("old drums stop on their own".into());
     }
@@ -1157,23 +1142,31 @@ pub fn plan_blend(inc: &[Vec<f32>; 4], out: &[Vec<f32>; 4], bars: usize, vocals_
             continue;
         }
         match stops(&out[s]) {
-            Some(x) if x as f64 <= bars as f64 => {
+            Some(x) if x as f64 <= done => {
                 if s == VOCALS {
                     notes.push(format!("old vocals end at bar {}", x + 1));
                 }
             }
-            _ => out_at[s] = Some(bars as f64),
+            // Fading from the swap until they're out.
+            _ => {
+                out_at[s] = Some(done);
+                out_ramp[s] = rest.max(r);
+            }
         }
     }
     if clash {
         // Keys clash: the melodies and vocals never play together; they switch at the swap.
         in_at[OTHER] = Some(swap);
         in_at[VOCALS] = Some(in_at[VOCALS].unwrap_or(swap).max(swap));
+        in_ramp[OTHER] = r;
+        in_ramp[VOCALS] = r;
         out_at[OTHER] = Some(swap);
         out_at[VOCALS] = Some(swap);
+        out_ramp[OTHER] = r;
+        out_ramp[VOCALS] = r;
         notes.insert(1.min(notes.len()), format!("keys clash: melodies switch at bar {}", swap as usize + 1));
     }
-    Blend { bars, in_at, out_at, out_ramp, swap, notes }
+    Blend { bars, in_at, in_ramp, out_at, out_ramp, swap, notes }
 }
 
 #[cfg(test)]
@@ -1192,13 +1185,15 @@ mod tests {
     #[test]
     fn stems_blend_swaps_bass_then_drums_then_the_rest() {
         let (i, o) = stems_at(0.0, true, false);
-        assert_eq!((i, o), ([0.0, 0.0, 0.0, 1.0], [1.0; 4]), "start: incoming melody (other) only");
-        assert_eq!(stems_at(0.35, true, false).0[0], 1.0, "then its drums");
+        assert_eq!((i, o), ([0.0; 4], [1.0; 4]), "start: nothing of the new track yet");
+        assert!(stems_at(0.2, true, false).0[3] > 0.0, "its melody (other) rises first");
+        assert_eq!(stems_at(0.45, true, false).0[0], 1.0, "then its drums");
         let (i, o) = stems_at(0.5, true, false);
         assert_eq!((i[1], o[1]), (1.0, 0.0), "midpoint: the basses swap");
         assert_eq!(o[0], 1.0);
-        let (_, o) = stems_at(0.75, true, false);
-        assert_eq!((o[0], o[2], o[3]), (0.0, 1.0, 1.0), "outgoing drums gone, then vocals and other");
+        let (_, o) = stems_at(0.65, true, false);
+        assert!(o[0] == 0.0 && o[2] > 0.0 && o[3] > 0.0, "outgoing drums gone, then vocals and other");
+        assert_eq!(stems_at(0.75, true, false).1, [0.0; 4], "all out before its volume closes");
         let (i, o) = stems_at(1.0, true, false);
         assert_eq!(o, [0.0; 4]);
         assert_eq!(i, [1.0, 1.0, 0.0, 1.0], "Now: vocals stay out");
@@ -1243,7 +1238,9 @@ mod tests {
         let b = plan_blend(&lv([ALL, ALL, NONE, ALL]), &lv([ALL, ALL, NONE, ALL]), 16, true, false);
         assert_eq!(b.in_at[DRUMS], Some(4.0));
         assert_eq!(b.out_at[DRUMS], Some(12.0));
-        assert_eq!(b.out_at[OTHER], Some(16.0));
+        assert_eq!(b.out_at[OTHER], Some(15.0), "out a bar before the end (then the volume closes)");
+        assert_eq!(b.in_at[OTHER], Some(0.0), "the new melody rises from the start");
+        assert!(b.levels(0.0, true).0[OTHER] == 0.0 && b.levels(3.0, true).0[OTHER] < 1.0, "gently");
     }
 
     #[test]
@@ -1259,7 +1256,7 @@ mod tests {
         let (i, o) = b.levels(8.0, false);
         assert_eq!((i[BASS], o[BASS]), (1.0, 0.0));
         assert_eq!(b.levels(10.0, false).0[VOCALS], 0.0);
-        assert_eq!(b.levels(12.0, false).0[VOCALS], 1.0);
+        assert_eq!(b.levels(13.0, false).0[VOCALS], 1.0);
         assert_eq!(b.levels(12.0, true).0[VOCALS], 0.0, "Now: vocals stay out");
     }
 
