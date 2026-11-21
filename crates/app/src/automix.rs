@@ -434,6 +434,11 @@ impl Core {
                 if let (Some(b), Some(w)) = (blend.as_mut(), self.decks[outgoing].stem_wave.as_deref()) {
                     breathe_out(b, w, out.secs(c.out_bar as f64), out.bar_secs / 4.0);
                 }
+                // The new vocals start with a line, not in the middle of one.
+                if let (Some(b), Some(w)) = (blend.as_mut(), self.decks[incoming].stem_wave.as_deref()) {
+                    let spb_i = inc.bar_secs / 4.0;
+                    breathe_in(b, w, entry_secs.unwrap_or(inc.secs(c.in_bar as f64)) + lead_in * spb_i, spb_i);
+                }
                 // Techniques, only when the music calls for them:
                 // a high-pass sweep when the old track is still full as it has to go (EQ: no stems
                 // to take it apart); an echo-out when it leaves mid-phrase with vocals, or is cut
@@ -1219,6 +1224,40 @@ pub fn breathe_out(b: &mut Blend, w: &crate::stems::StemWave, start: f64, spb: f
     }
 }
 
+/// Bring the new vocals in at the start of a line: from where the plan lets them in, the next
+/// beat (within 2 bars) where the vocal stem starts singing after a pause; they fade in during
+/// that pause, so the first word is there. `start` is the new track's time at the mix's first
+/// bar, `spb` its seconds per beat. Unchanged when no line starts that soon.
+pub fn breathe_in(b: &mut Blend, w: &crate::stems::StemWave, start: f64, spb: f64) {
+    let Some(at) = b.in_at[VOCALS] else { return };
+    let v = &w.levels[VOCALS];
+    let level = |beat: f64| {
+        let (a, z) = (((start + beat * spb).max(0.0) * w.bins_per_sec) as usize, ((start + (beat + 1.0) * spb).max(0.0) * w.bins_per_sec) as usize);
+        let (a, z) = (a.min(v.len()), z.min(v.len()));
+        if z > a { v[a..z].iter().sum::<f32>() / (z - a) as f32 } else { 0.0 }
+    };
+    let total = b.bars as f64 * 4.0;
+    let from = (at * 4.0).max(0.0);
+    // How loud the singing is from there (the louder quarter of the beats).
+    let mut ahead: Vec<f32> = (from as usize..(from + 32.0).min(total) as usize).map(|k| level(k as f64)).collect();
+    if ahead.is_empty() {
+        return;
+    }
+    ahead.sort_by(|a, z| z.total_cmp(a));
+    let sung = ahead[ahead.len() / 4];
+    if sung <= PRESENT {
+        return; // no singing there to align
+    }
+    let quiet = |k: f64| level(k) < 0.25 * sung;
+    // A line starts on beat k: singing there, a pause just before (never earlier than planned).
+    let line = (from as usize + 1..=(from + 8.0).min(total - 1.0) as usize).map(|k| k as f64).find(|k| !quiet(*k) && quiet(k - 1.0));
+    if let Some(k) = line {
+        b.in_at[VOCALS] = Some((k - 1.0) / 4.0);
+        b.in_ramp[VOCALS] = 0.25;
+        b.notes.push(format!("new vocals start with a line (bar {})", (k / 4.0) as usize + 1));
+    }
+}
+
 /// The bars the bass swap can be on, in a mix of `bars` bars.
 pub fn swap_range(bars: usize) -> (usize, usize) {
     let lo = ((bars as f64 * 0.2).ceil() as usize).max(1);
@@ -1371,7 +1410,7 @@ pub fn plan_blend(inc: &[Vec<f32>; 4], out: &[Vec<f32>; 4], bars: usize, vocals_
 
 #[cfg(test)]
 mod tests {
-    use super::{breathe_out, plan_blend, smooth, stems_at, BASS, DRUMS, OTHER, VOCALS};
+    use super::{breathe_in, breathe_out, plan_blend, smooth, stems_at, BASS, DRUMS, OTHER, VOCALS};
 
     #[test]
     fn fades_are_smooth_and_bounded() {
@@ -1541,5 +1580,23 @@ mod tests {
         assert_eq!(b.out_ramp[VOCALS], 0.25);
         assert!(b.levels(11.7, false).1[VOCALS] >= 0.99, "full until the pause");
         assert_eq!(b.levels(12.0, false).1[VOCALS], 0.0);
+    }
+
+    #[test]
+    fn new_vocals_start_with_a_line() {
+        // 16 bars at 120 BPM; the new singer pauses on the last beat of every 2 bars, so lines
+        // start on beats 8, 16, 24, …
+        let bins_per_sec = 100.0;
+        let v: Vec<f32> = (0..(32.0 * bins_per_sec) as usize).map(|i| if (i as f64 / bins_per_sec / 0.5) as usize % 8 == 7 { 0.01 } else { 0.6 }).collect();
+        let w = crate::stems::StemWave { bins_per_sec, levels: [vec![0.5; v.len()], vec![0.5; v.len()], v, vec![0.5; 3200]] };
+        let all = lvn(16, [&[(0, 16)], &[(0, 16)], &[(0, 16)], &[(0, 16)]]);
+        let mut b = plan_blend(&all, &all, 16, false, false);
+        // Planned in at bar 4.6 (beat 18.4): mid-line; the next line starts on beat 24 (bar 7).
+        b.in_at[VOCALS] = Some(4.6);
+        b.in_ramp[VOCALS] = 2.0;
+        breathe_in(&mut b, &w, 0.0, 0.5);
+        assert_eq!(b.in_at[VOCALS], Some(5.75), "{:?}", b.notes);
+        assert!(b.levels(5.7, false).0[VOCALS] < 0.01, "not yet");
+        assert!(b.levels(6.0, false).0[VOCALS] >= 0.99, "the first word at full level");
     }
 }

@@ -293,7 +293,8 @@ Fonts: Inter and JetBrains Mono, bundled under the SIL Open Font License (see
   The old track leaves the same way, on its EQ or stems, and is nearly gone a
   bar before the end; only then does its volume close. Each part moves over
   1 to 8 bars, spread through the mix; the old vocals end in a pause of the
-  singer's, not mid-line. The bass swaps where a bass keeps
+  singer's, not mid-line, and the new vocals start with a line, fading in
+  during the pause before it. The bass swaps where a bass keeps
   playing longest (the old one until it stops, the new one from its entry);
   the old drums leave only where the new drums play, so the beat never drops
   out; parts that enter or stop by themselves are left alone. **Techniques only when called for:** a
