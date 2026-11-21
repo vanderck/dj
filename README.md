@@ -218,16 +218,14 @@ Fonts: Inter and JetBrains Mono, bundled under the SIL Open Font License (see
   looping at a cue with its volume down gets a **Mix** button next to Sync.
   Mix syncs it (a paused deck is first turned down, looped where it stands and
   started in time) and asks only **Now** or **Best**. dj works out the rest:
-  how (stems and EQ together, EQ alone without stems, or a cut when that
-  fits best), where and how long, measured as the best transition within the
-  range (soon for Now, anywhere in the playing track for Best).
-  - **When**: **Now** starts on the playing track's next phrase (its next 8
-    bars when that's within 4 bars, else its next 4-bar line) over the whole
-    bars that fit in about 10 s, with the new track's vocals (stems) out; they
-    come back on its next phrase that has vocals. **Best** waits for the phrase start where the two tracks' vocals
-    clash least, preferring the playing track's outro or break (16 bars).
-    With less than a minute of the playing track left, Mix mixes now (in the
-    last style) without asking.
+  how (stems and EQ together, or EQ alone without stems; a cut only when the
+  two can't blend), where and how long, measured as the best transition
+  within the range (soon for Now, anywhere in the playing track for Best).
+  - **When**: **Now** starts on the playing track's next phrase lines, with
+    the new track's vocals (stems) out; they come back on its next phrase
+    that has vocals. **Best** looks over the whole playing track.
+    With less than a minute of the playing track left, Mix mixes now without
+    asking.
 
   **Each mix is found, not scripted.** dj reads both tracks bar by bar: the
   level of drums, bass, vocals and other (from the stems; without stems, an
@@ -236,25 +234,29 @@ Fonts: Inter and JetBrains Mono, bundled under the SIL Open Font License (see
   outro. It then tries every combination of where the old track can start
   leaving (its 4-bar lines, within 4 bars for *Now*), where the new track
   comes in (your cue, its start, its intro end, its drops and the phrases
-  before them, its drop cue) and how long (8, 16 or 32 bars; up to ~10 s for
-  *Now*; or a cut), and scores each on what you'd hear: vocals or (clashing
-  keys) melodies on top of each other, both tracks full at once, the old
-  outro/break meeting the new intro, the new drop landing as the old track
-  leaves, a natural bass swap, phrase lines, the loudness jump after the mix,
-  and waiting. The best wins; the popup shows it and up to two different
-  alternatives, each with what it follows ("its drop lands as the old track
-  leaves (bar 32)"), and the waveform lanes mark where the mix starts, ends
-  and where the basses swap.
+  before them, its drop cue) and how long, and scores each bar of the
+  overlap on what you'd hear: vocals or (clashing keys) melodies on top of
+  each other, both tracks full at once, the old outro/break meeting the new
+  intro; plus the new drop landing as the old track leaves, a natural bass
+  swap, phrase lines, the loudness jump after the mix, and waiting.
+  **How long comes from the songs:** every phrase length up to 64 bars is
+  tried and every bar the two play well together counts, so the mix lasts as
+  long as the music lets it (a long outro under a long intro: a long mix; two
+  full tracks with vocals: a short one). The waveform lanes mark where the
+  mix starts, ends and where the basses swap, and the reasons are printed
+  in the terminal.
 
-  **Volume follows loudness, never a preset fade:** per bar, the new track
-  comes up as far as the room the old one leaves (from what both actually
-  play), and the old one closes only when little of it is left. The parts move
-  where the music says (bass swap where a bass comes in or stops, parts that
-  enter or stop by themselves left alone). **Techniques only when called
-  for:** a high-pass sweep when the old track is still full as it has to go
-  (EQ), an echo-out when it leaves mid-phrase with vocals or is cut while its
-  bass plays, a loop of the old outro when it would end before the mix does,
-  a cut on the new track's drop.
+  **Gentle in, volume last out.** The new track's volume is fully up as it
+  starts; its EQ (every band killed, then the highs rising from the first
+  bar, then the mids, then the bass swap) or its stems (each part fading in
+  over bars: the melody from the first bar, the drums later) bring it in.
+  The old track leaves the same way, on its EQ or stems, and is nearly gone a
+  bar before the end; only then does its volume close. The parts move where
+  the music says (bass swap where a bass comes in or stops, parts that enter
+  or stop by themselves left alone). **Techniques only when called for:** a
+  high-pass sweep when the old track is still full as it has to go (EQ), an
+  echo-out when it leaves mid-phrase with vocals or is cut while its bass
+  plays, a loop of the old outro when it would end before the mix does.
 
   The new track always starts on its own bar line: if its cue isn't on a
   downbeat, it starts a few beats early so its bars fall on the playing
