@@ -92,6 +92,10 @@ pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect) {
         let pr = Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, bar_h));
         if pill(ui, pr, label, st.browser_hist == hist).clicked() {
             st.browser_hist = hist;
+            // All tracks means all of them: a search left in the field would hide most.
+            if !hist {
+                core.browser_query.clear();
+            }
         }
         x += w + 8.0;
     }

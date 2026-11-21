@@ -212,21 +212,24 @@ impl Core {
             return None;
         }
         let v = &self.snap.decks[d];
-        // Waiting: paused (Mix loops it where it stands, at its cue), or looping at a cue.
-        let waiting = !v.playing && !v.play_pending || (v.playing && v.loop_on);
+        let external = self.external_routing();
+        // Waiting: paused (Mix loops it where it stands), looping at a cue, or (dj's mixer) just
+        // turned down: volume down is enough, it may be playing in your headphones.
+        let p = &self.session.channels[d].params;
+        let silent = p.volume <= 0.02 || p.mute;
+        let waiting = (!v.playing && !v.play_pending) || (v.playing && v.loop_on) || (!external && v.playing && silent);
         if !(v.loaded && v.has_grid && waiting) {
             return None;
         }
-        if self.external_routing() {
+        if external {
             let playing = |o: usize| o != d && self.snap.decks[o].playing && self.snap.decks[o].has_grid && !self.snap.decks[o].loop_on;
             return match self.snap.clock.owner {
                 ClockOwner::Deck(m) if playing(m as usize) => Some(m as usize),
                 _ => (0..self.deck_count()).find(|&o| playing(o)),
             };
         }
-        // A looping deck must be silent (else you're mixing it yourself); a paused one is made so.
-        let p = &self.session.channels[d].params;
-        if v.playing && p.volume > 0.02 && !p.mute {
+        // A playing deck must be silent (else you're mixing it yourself); a paused one is made so.
+        if v.playing && !silent {
             return None;
         }
         let audible = |o: usize| {
@@ -361,9 +364,13 @@ impl Core {
         // Every phrase length (4 bars) from 8 up to 128: how long is up to the two songs (the
         // search scores each bar of the overlap where they sound right together).
         let lengths: Vec<usize> = (MIN_MIX_BARS / 4..=MAX_MIX_BARS / 4).map(|k| 4 * k).collect();
-        // Your cue (or where a paused deck stands) as a bar of the new track.
+        // Your cue (or where a paused deck stands) as a bar of the new track. It's a preference
+        // only when you chose it: a cue loop, or the deck cued away from where it loaded (its start
+        // or first cue); otherwise dj picks the best place to bring it in.
         let cue_secs = if i.loop_on { i.loop_start_secs } else { i.position_secs };
         let cue_bar = ((cue_secs - start_i) / inc.bar_secs).round().max(0.0) as usize;
+        let first_cue = i.hot_cues.iter().flatten().copied().fold(f64::MAX, f64::min);
+        let chosen = i.loop_on || (!i.playing && cue_secs > 0.1 && (cue_secs - first_cue).abs() > 0.1);
         let vocals_out = when == MixWhen::Now && i.stems_ready;
         let drop_secs = self.drop_cue(incoming).and_then(|c| i.hot_cues.get(c as usize).copied().flatten());
         let drop_cue_bar = drop_secs.map(|t| ((t - start_i) / inc.bar_secs).round().max(0.0) as usize);
@@ -371,7 +378,7 @@ impl Core {
             earliest,
             latest,
             lengths,
-            cue_bar: Some(cue_bar),
+            cue_bar: chosen.then_some(cue_bar),
             drop_cue_bar,
             in_cues: cb_i.iter().filter(|b| **b >= -0.1).map(|b| b.round().max(0.0) as usize).collect(),
             blend,
@@ -691,6 +698,10 @@ impl Core {
             }
             self.deck_cmd(i, DeckCmd::LoopBeats(self.loop_size[i]));
             self.deck_cmd(i, DeckCmd::Play);
+        } else if !self.snap.decks[i].loop_on {
+            // Playing turned down: it waits in a loop where it is (silent), so it can't run out
+            // before the mix.
+            self.deck_cmd(i, DeckCmd::LoopBeats(self.loop_size[i]));
         }
         // Muted counts as silent: make it volume-down instead, so the fade-in is heard.
         if !external && self.session.channels[i].params.mute {

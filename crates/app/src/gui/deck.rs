@@ -379,8 +379,8 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
     let follower = v.sync && !is_master;
     for (rr, label, dir) in [(minus, "−", -1.0f32), (plus, "+", 1.0)] {
         let resp = button(ui, rr, label, Style::Dark, bold(18.0)).on_hover_text("Fine tempo step");
-        if resp.clicked() && !follower {
-            act_f(core, &a("TempoSlider"), (v.tempo_fader as f32 + dir * 0.01).clamp(-1.0, 1.0));
+        if resp.clicked() {
+            act_f(core, &a("TempoSlider"), (shown_fader(&v, follower) as f32 + dir * 0.01).clamp(-1.0, 1.0));
         }
     }
     let track = Rect::from_min_max(Pos2::new(minus.right() + gap, y), Pos2::new(plus.left() - gap, y + th));
@@ -389,7 +389,7 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
     p.rect_filled(track, CornerRadius::same(8), WELL);
     let cx = track.center().x;
     // Followers show where their actual speed sits on the slider.
-    let shown = if follower { v.tempo_range.fader_for_speed(v.speed / v.speed_mult.max(0.01)) } else { v.tempo_fader };
+    let shown = shown_fader(&v, follower);
     let hx = cx + shown as f32 * (track.width() / 2.0 - 8.0);
     p.rect_filled(Rect::from_min_max(Pos2::new(cx.min(hx), track.top()), Pos2::new(cx.max(hx), track.bottom())), CornerRadius::same(4), alpha(color, 0.32));
     p.line_segment([Pos2::new(cx, track.top() + 6.0), Pos2::new(cx, track.bottom() - 6.0)], Stroke::new(1.0, TEXT_FAINT));
@@ -400,15 +400,15 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
     let handle = Rect::from_center_size(Pos2::new(hx, track.center().y), Vec2::new(12.0, th - 4.0));
     p.rect_filled(handle, CornerRadius::same(4), color);
     p.line_segment([Pos2::new(hx, handle.top() + 6.0), Pos2::new(hx, handle.bottom() - 6.0)], Stroke::new(2.0, on(color)));
-    let resp = resp.on_hover_text(format!("{:+.2}% · drag (Shift: fine), double-click: reset, right-click: range{}", (v.speed - 1.0) * 100.0, if follower { " · following the clock" } else { "" }));
+    let resp = resp.on_hover_text(format!("{:+.2}% · drag (Shift: fine), double-click: reset, right-click: range{}", (v.speed - 1.0) * 100.0, if follower { " · synced: sets the tempo of the mix" } else { "" }));
     learnable(core, &resp, &a("TempoSlider"));
-    if !core.learn && !follower {
+    if !core.learn {
         if resp.double_clicked() {
             act_f(core, &a("TempoSlider"), 0.0);
         } else if resp.dragged() {
             let fine = ui.input(|i| i.modifiers.shift);
             let dv = resp.drag_delta().x / (track.width() / 2.0) * if fine { 0.1 } else { 1.0 };
-            act_f(core, &a("TempoSlider"), (v.tempo_fader as f32 + dv).clamp(-1.0, 1.0));
+            act_f(core, &a("TempoSlider"), (shown as f32 + dv).clamp(-1.0, 1.0));
         }
     }
     resp.context_menu(|ui| {
@@ -874,4 +874,14 @@ fn mix_button(ui: &mut Ui, core: &mut Core, d: usize, rect: Rect, font: egui::Fo
                 ui.add_space(6.0);
             }
         });
+}
+
+/// Where a deck's tempo sits on its fader: a synced deck that follows the clock shows its actual
+/// speed (its own fader isn't what it plays at).
+fn shown_fader(v: &dj_engine::deck::DeckView, follower: bool) -> f64 {
+    if follower {
+        v.tempo_range.fader_for_speed(v.speed / v.speed_mult.max(0.01))
+    } else {
+        v.tempo_fader
+    }
 }

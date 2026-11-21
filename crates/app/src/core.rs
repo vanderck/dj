@@ -1430,6 +1430,31 @@ impl Core {
         true
     }
 
+    /// A deck's tempo fader moved to `fader` (−1..1). A synced deck that isn't the master plays at
+    /// the clock's tempo, so its fader sets the clock: the master (or the header tempo) moves so
+    /// this deck plays at the speed the fader asks for, and every synced deck follows. Its reset
+    /// (0) is this track at its own tempo.
+    fn tempo_cmd(&mut self, d: usize, fader: f64) -> Option<DeckCmd> {
+        let v = self.snap.decks[d];
+        let follower = v.sync && self.snap.clock.owner != ClockOwner::Deck(d as u8) && v.has_grid && v.track_bpm > 0.0;
+        if !follower {
+            return Some(DeckCmd::Tempo(fader));
+        }
+        let bpm = v.track_bpm * v.tempo_range.speed(fader) * v.speed_mult;
+        match self.snap.clock.owner {
+            ClockOwner::Deck(m) => {
+                let mv = self.snap.decks[m as usize];
+                if mv.track_bpm > 0.0 {
+                    let mf = mv.tempo_range.fader_for_speed(bpm / (mv.track_bpm * mv.speed_mult.max(0.01)));
+                    self.deck_cmd(m as usize, DeckCmd::Tempo(mf.clamp(-1.0, 1.0)));
+                }
+            }
+            ClockOwner::Header => self.send(Command::SetBpm(bpm)),
+        }
+        // Its own fader goes along, so it reads the same once it leads or leaves sync.
+        Some(DeckCmd::Tempo(fader))
+    }
+
     fn route_deck(&mut self, d: usize, rest: &[&str], f: Option<f32>, on: Option<bool>, trig: bool, ints: &[i32], args: &[OscType]) -> bool {
         let pressed = on.unwrap_or(true);
         let skip = self.settings.skip_beats;
@@ -1488,8 +1513,8 @@ impl Core {
             ["temposync"] if trig => Some(DeckCmd::ToggleSync),
             ["sync"] => on.map(DeckCmd::Sync),
             ["tempomaster"] if trig => Some(DeckCmd::ToggleMaster),
-            ["temposlider"] => f.map(|v| DeckCmd::Tempo(v.clamp(-1.0, 1.0) as f64)),
-            ["tempo"] => f.map(|v| DeckCmd::Tempo((v.clamp(0.0, 1.0) * 2.0 - 1.0) as f64)),
+            ["temposlider"] => f.and_then(|v| self.tempo_cmd(d, v.clamp(-1.0, 1.0) as f64)),
+            ["tempo"] => f.and_then(|v| self.tempo_cmd(d, (v.clamp(0.0, 1.0) * 2.0 - 1.0) as f64)),
             ["temporange"] => ints.first().map(|i| {
                 let r = TempoRange::ALL[(*i).clamp(0, 4) as usize];
                 self.session.decks[d].tempo_range = r;
@@ -3500,5 +3525,61 @@ mod tests {
         let full: [Option<Cue>; NUM_HOT_CUES] = std::array::from_fn(|i| Some(cue(i as f64 * 10.0, "x")));
         let (_, r, a, d) = merge_cues(&full, vec![cue(5.0, "y"), cue(200.0, "z")], 2.0);
         assert_eq!((r, a, d), (0, 0, 2));
+    }
+
+    #[test]
+    fn a_synced_decks_tempo_fader_sets_the_mix_tempo() {
+        let (mut e, mut c, _config) = core();
+        mix_setup(&mut e, &mut c);
+        // Deck 2's track is at 124 BPM, synced to deck 1 (the master, 120 BPM).
+        c.deck_cmd(1, DeckCmd::SetGrid(Some(dj_engine::track::BeatGrid { bpm: 124.0, anchor_secs: 0.0 })));
+        c.deck_cmd(1, DeckCmd::Sync(true));
+        c.deck_cmd(1, DeckCmd::Play);
+        for _ in 0..40 {
+            pump(&mut e, &mut c);
+        }
+        assert_eq!(c.snap.clock.owner, ClockOwner::Deck(0));
+        assert!((c.snap.decks[1].speed - 120.0 / 124.0).abs() < 0.01, "following 120 BPM");
+        // Reset (0 %) on the synced deck: its track at its own tempo, the master follows.
+        assert!(c.route("Deck/2/TempoSlider", &[OscType::Float(0.0)]));
+        for _ in 0..40 {
+            pump(&mut e, &mut c);
+        }
+        assert!((c.snap.decks[1].speed - 1.0).abs() < 0.005, "deck 2 at 0 %: {}", c.snap.decks[1].speed);
+        assert!((c.snap.clock.bpm - 124.0).abs() < 0.2, "the mix at 124: {}", c.snap.clock.bpm);
+        // Its fader moves the mix: +2 % on deck 2 (a 10 % range: fader 0.2).
+        c.route("Deck/2/TempoRange", &[OscType::Int(1)]);
+        c.route("Deck/2/TempoSlider", &[OscType::Float(0.2)]);
+        for _ in 0..40 {
+            pump(&mut e, &mut c);
+        }
+        assert!((c.snap.decks[1].speed - 1.02).abs() < 0.005, "{}", c.snap.decks[1].speed);
+        assert!((c.snap.clock.bpm - 124.0 * 1.02).abs() < 0.3, "{}", c.snap.clock.bpm);
+    }
+
+    #[test]
+    fn volume_down_is_enough_for_mix() {
+        let (mut e, mut c, _config) = core();
+        mix_setup(&mut e, &mut c);
+        // Deck 2 playing in your headphones (not looping), its fader down: Mix is offered.
+        c.deck_cmd(1, DeckCmd::LoopExit);
+        c.deck_cmd(1, DeckCmd::Play);
+        for _ in 0..20 {
+            pump(&mut e, &mut c);
+        }
+        assert!(c.snap.decks[1].playing && !c.snap.decks[1].loop_on);
+        assert_eq!(c.mix_target(1), Some(0));
+        // Fader up: you're mixing it yourself.
+        c.route("Mixer/CH2/Volume", &[OscType::Float(0.6)]);
+        assert_eq!(c.mix_target(1), None);
+        c.route("Mixer/CH2/Volume", &[OscType::Float(0.0)]);
+        // Mix: it waits in a silent loop where it is, then comes in where dj finds best.
+        let plan = c.plan_best(1, 0, crate::settings::MixStyle::Auto);
+        c.start_mix(plan);
+        for _ in 0..5 {
+            pump(&mut e, &mut c);
+        }
+        assert!(c.snap.decks[1].loop_on, "waiting in a loop");
+        assert!(c.automix.is_some());
     }
 }
