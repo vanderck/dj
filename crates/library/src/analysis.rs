@@ -207,6 +207,11 @@ fn detrend(mut flux: Vec<f32>) -> Vec<f32> {
 /// Returns the corrected grid when it's audibly off (8 ms or more anywhere in the track) and the
 /// measurement is clear; `None` when the grid fits or the beat isn't clear enough to tell.
 pub fn refine_grid(env: &Envelope, grid: &BeatGrid) -> Option<BeatGrid> {
+    refine_grid_within(env, grid, 0.008)
+}
+
+/// [`refine_grid`], correcting when the grid is `tolerance` seconds off or more somewhere.
+fn refine_grid_within(env: &Envelope, grid: &BeatGrid, tolerance: f64) -> Option<BeatGrid> {
     let spb = grid.seconds_per_beat();
     if !(spb > 0.0) || env.duration < 30.0 {
         return None;
@@ -249,7 +254,7 @@ pub fn refine_grid(env: &Envelope, grid: &BeatGrid) -> Option<BeatGrid> {
     };
     let (low, windows) = measure(&env.low_onset);
     let (pts, windows) = if low.len() * 2 >= windows && low.iter().map(|p| p.2).sum::<f64>() / low.len().max(1) as f64 > 1.8 { (low, windows) } else { measure(&env.onset) };
-    if pts.len() < 6 || pts.len() * 2 < windows {
+    if pts.len() < 4 || pts.len() * 2 < windows {
         return None;
     }
     // Weighted line fit; again without the windows far off the line (breaks, fills).
@@ -263,7 +268,7 @@ pub fn refine_grid(env: &Envelope, grid: &BeatGrid) -> Option<BeatGrid> {
     };
     let (tm, om, k) = fit(&pts);
     let kept: Vec<_> = pts.iter().copied().filter(|p| (p.1 - (om + k * (p.0 - tm))).abs() < 0.025).collect();
-    if kept.len() < 6 || kept.len() * 3 < pts.len() * 2 {
+    if kept.len() < 4 || kept.len() * 3 < pts.len() * 2 {
         return None;
     }
     let (tm, om, k) = fit(&kept);
@@ -272,7 +277,7 @@ pub fn refine_grid(env: &Envelope, grid: &BeatGrid) -> Option<BeatGrid> {
     }
     let off = |t: f64| om + k * (t - tm);
     let worst = off(0.0).abs().max(off(env.duration).abs());
-    if worst < 0.008 {
+    if worst < tolerance {
         return None;
     }
     // Beat n moves to where it really is: anchor + n·spb + off(anchor + n·spb).
@@ -378,8 +383,13 @@ pub fn detect_grid(env: &Envelope) -> Option<TempoGrid> {
     };
     let phase = if low_score / low_median > 1.5 { low_phase } else { env.best_phase(bpm, steps).1 };
     let bar = find_bar_phase(env, bpm, phase);
-    let anchor = (phase + bar as f64 * spb).rem_euclid(4.0 * spb);
-    Some(TempoGrid { grid: BeatGrid { bpm, anchor_secs: anchor }, confidence })
+    // (The envelope reads onsets a little early: see ENVELOPE_LAG.)
+    // (The envelope reads onsets a little early: see ENVELOPE_LAG.)
+    let anchor = (phase - ENVELOPE_LAG + bar as f64 * spb).rem_euclid(4.0 * spb);
+    // A tempo a hair off (rounded to 0.01) tilts the grid across the track: fit it to the beats.
+    let grid = BeatGrid { bpm, anchor_secs: anchor };
+    let grid = refine_grid_within(env, &grid, 0.002).filter(|g| (g.anchor_secs - anchor).abs() < 0.25 * spb).unwrap_or(grid);
+    Some(TempoGrid { grid, confidence })
 }
 
 /// Which of the four beats starts the bars: the one where the sound changes most (new chords,
@@ -702,7 +712,7 @@ pub(crate) mod tests {
             let bar = 4.0 * 60.0 / bpm;
             let err = ((g.anchor_secs - offset) / bar).rem_euclid(1.0);
             let err_s = err.min(1.0 - err) * bar;
-            assert!(err_s < 0.015, "{bpm} BPM: anchor {} vs bar start at {offset} (off by {err_s:.3} s)", g.anchor_secs);
+            assert!(err_s < 0.005, "{bpm} BPM: anchor {} vs bar start at {offset} (off by {err_s:.3} s)", g.anchor_secs);
         }
     }
 
