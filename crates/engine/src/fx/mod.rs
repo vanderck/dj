@@ -322,10 +322,6 @@ impl FxChain {
         }
     }
 
-    pub fn has_inserts(&self) -> bool {
-        self.slots.iter().any(|s| s.is_some())
-    }
-
     /// Latency of PRE and POST sections.
     pub fn latency(&self) -> (usize, usize) {
         let mut pre = 0;

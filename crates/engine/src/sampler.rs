@@ -178,17 +178,6 @@ impl Sampler {
         std::mem::replace(&mut self.samples[lane], s)
     }
 
-    pub fn take_all_samples(&mut self, mut f: impl FnMut(Arc<AudioData>)) {
-        for v in self.voices.iter_mut() {
-            v.active = false;
-        }
-        for s in self.samples.iter_mut() {
-            if let Some(a) = s.take() {
-                f(a);
-            }
-        }
-    }
-
     /// Start on the next quantize boundary of the clock (or now).
     pub fn play(&mut self, clock_beat: f64, quantize: Option<f64>) {
         if self.playing {

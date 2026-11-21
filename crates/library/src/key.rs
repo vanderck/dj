@@ -25,12 +25,6 @@ pub enum Compat {
     Clash,
 }
 
-impl Compat {
-    pub fn is_good(self) -> bool {
-        matches!(self, Compat::Same | Compat::Adjacent | Compat::Relative)
-    }
-}
-
 impl Key {
     pub fn new(pitch: u8, minor: bool) -> Self {
         Self { pitch: pitch % 12, minor }

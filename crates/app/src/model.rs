@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use dj_engine::deck::{Quantize, TempoRange};
 use dj_engine::engine::DeckMode;
 use dj_engine::fx::{InsertPos, MacroTarget, MACRO_TARGETS, MAX_SLOTS, NUM_MACROS};
-use dj_engine::mixer::{ChannelParams, MixMode, XfAssign};
+use dj_engine::mixer::ChannelParams;
 use dj_engine::sampler::{LaneParams, Pattern, Step, LANES, PATTERNS, STEPS};
 use serde::{Deserialize, Serialize};
 
@@ -90,20 +90,13 @@ impl FxChainModel {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 pub struct ChannelModel {
     pub params: ChannelParams,
     pub fader_start: bool,
-    pub xf_assign: XfAssign,
     pub fx: FxChainModel,
     /// UI: show EQ (true) or filter (false) knobs.
     pub show_eq: bool,
-}
-
-impl Default for ChannelModel {
-    fn default() -> Self {
-        Self { params: ChannelParams::default(), fader_start: false, xf_assign: XfAssign::Thru, fx: FxChainModel::default(), show_eq: false }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -181,9 +174,6 @@ pub struct MasterModel {
     pub limiter: bool,
     pub cue_volume: f32,
     pub cue_mix: f32,
-    pub metronome: bool,
-    pub metronome_volume: f32,
-    pub metronome_to_master: bool,
 }
 
 impl Default for MasterModel {
@@ -193,9 +183,6 @@ impl Default for MasterModel {
             limiter: true,
             cue_volume: 0.75,
             cue_mix: 0.0,
-            metronome: false,
-            metronome_volume: 0.5,
-            metronome_to_master: false,
         }
     }
 }
@@ -222,31 +209,18 @@ pub struct Session {
     pub quantize: usize,
     pub quantize_on: bool,
     pub wallclock: bool,
-    pub mix_mode: MixMode,
-    pub crossfader: f32,
-    pub crossfader_sharp: bool,
-    pub vector: (f32, f32),
 }
 
 impl Default for Session {
     fn default() -> Self {
-        let mut channels: [ChannelModel; 4] = Default::default();
-        channels[0].xf_assign = XfAssign::A;
-        channels[1].xf_assign = XfAssign::B;
-        channels[2].xf_assign = XfAssign::A;
-        channels[3].xf_assign = XfAssign::B;
         Self {
-            channels,
+            channels: Default::default(),
             decks: Default::default(),
             master: MasterModel::default(),
             bpm: 128.0,
             quantize: 3,
             quantize_on: true,
             wallclock: false,
-            mix_mode: MixMode::Off,
-            crossfader: 0.0,
-            crossfader_sharp: false,
-            vector: (0.5, 0.5),
         }
     }
 }

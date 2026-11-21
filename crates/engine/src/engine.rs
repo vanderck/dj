@@ -14,9 +14,9 @@ use rtrb::{Consumer, Producer, RingBuffer};
 use serde::{Deserialize, Serialize};
 
 use crate::deck::{Deck, DeckCtx, DeckEvent, DeckView, Quantize, TempoRange};
-use crate::dsp::{db_to_gain, Frame, Limiter, Meter};
+use crate::dsp::{Frame, Limiter, Meter};
 use crate::fx::{Effect, FxCtx, FxSlot, InsertPos, MacroTarget, SlotHealth, MACRO_TARGETS, MAX_SLOTS};
-use crate::mixer::{mix_gains, Channel, ChannelParams, ExtStages, FaderCurve, MixMode, Output, XfAssign};
+use crate::mixer::{Channel, ChannelParams, ExtStages, FaderCurve, Output};
 use crate::sampler::{LaneParams, Sampler, SamplerView, Step, LANES};
 use crate::track::{AudioData, BeatGrid, StemData, Track};
 
@@ -117,8 +117,6 @@ pub enum Command {
 
     Channel { ch: u8, params: ChannelParams },
     FaderStart { ch: u8, on: bool },
-    XfAssign { ch: u8, assign: XfAssign },
-    MixMode(MixMode),
     FaderCurve(FaderCurve),
     Crossovers { low_hz: f32, high_hz: f32 },
     ExtStages(ExtStages),
@@ -148,7 +146,6 @@ pub enum Command {
     HeaderMaster,
     Wallclock(bool),
     GlobalQuantize(Option<f64>),
-    Metronome { on: bool, gain: f32, to_master: bool },
 
     StartRecording(Producer<Frame>),
     StopRecording,
@@ -181,7 +178,6 @@ pub struct ChannelView {
     pub post_rms: [f32; 2],
     pub fx: [Option<(bool, SlotHealth, f32)>; MAX_SLOTS],
     pub fx_latency: (u32, u32),
-    pub mix_gain: f32,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -250,15 +246,6 @@ impl Controller {
     }
 }
 
-struct Metronome {
-    on: bool,
-    gain: f32,
-    to_master: bool,
-    phase: f32,
-    env: f32,
-    freq: f32,
-}
-
 pub struct Engine {
     cfg: EngineConfig,
     commands: Consumer<Command>,
@@ -272,8 +259,6 @@ pub struct Engine {
     mode: [DeckMode; NUM_DECKS],
     channels: [Channel; NUM_DECKS],
     fader_start: [bool; NUM_DECKS],
-    xf_assign: [XfAssign; NUM_DECKS],
-    mix_mode: MixMode,
     curve: FaderCurve,
     tape_stop_ms: [f64; NUM_DECKS],
     sync_before_master: [bool; NUM_DECKS],
@@ -292,7 +277,6 @@ pub struct Engine {
     limiter: Limiter,
     master_meter: Meter,
     cue_meter: Meter,
-    metronome: Metronome,
     compensation: usize,
 
     deck_buf: Vec<Frame>,
@@ -323,8 +307,6 @@ pub fn create(cfg: EngineConfig) -> (Engine, Controller) {
         mode: [DeckMode::Track; NUM_DECKS],
         channels: std::array::from_fn(|_| Channel::new(sr, cfg.max_block, cfg.max_latency)),
         fader_start: [false; NUM_DECKS],
-        xf_assign: [XfAssign::A, XfAssign::B, XfAssign::Thru, XfAssign::Thru],
-        mix_mode: MixMode::Off,
         curve: FaderCurve::LinearDb,
         tape_stop_ms: [25.0; NUM_DECKS],
         sync_before_master: [true; NUM_DECKS],
@@ -341,7 +323,6 @@ pub fn create(cfg: EngineConfig) -> (Engine, Controller) {
         limiter: Limiter::new(sr),
         master_meter: Meter::default(),
         cue_meter: Meter::default(),
-        metronome: Metronome { on: false, gain: 0.5, to_master: false, phase: 0.0, env: 0.0, freq: 1000.0 },
         compensation: 0,
         deck_buf: vec![[0.0; 2]; cfg.max_block],
         master_buf: vec![[0.0; 2]; cfg.max_block],
@@ -715,12 +696,6 @@ impl Engine {
                     *f = on;
                 }
             }
-            Command::XfAssign { ch, assign } => {
-                if let Some(a) = self.xf_assign.get_mut(ch as usize) {
-                    *a = assign;
-                }
-            }
-            Command::MixMode(m) => self.mix_mode = m,
             Command::FaderCurve(c) => self.curve = c,
             Command::Crossovers { low_hz, high_hz } => {
                 for ch in self.channels.iter_mut() {
@@ -848,11 +823,6 @@ impl Engine {
                 self.maintain_owner();
             }
             Command::GlobalQuantize(q) => self.global_quantize = q,
-            Command::Metronome { on, gain, to_master } => {
-                self.metronome.on = on;
-                self.metronome.gain = gain;
-                self.metronome.to_master = to_master;
-            }
             Command::StartRecording(p) => {
                 if let Some(old) = self.recorder.replace(p) {
                     self.trash(Garbage::Recorder(old));
@@ -899,7 +869,6 @@ impl Engine {
         self.pair_used = [false; MAX_PAIRS];
 
         let any_solo = self.channels.iter().any(|c| c.params.solo);
-        let gains = mix_gains(self.mix_mode, &self.xf_assign);
         let mut any_cue = false;
 
         for d in 0..NUM_DECKS {
@@ -928,7 +897,6 @@ impl Engine {
 
             let ch = &mut self.channels[d];
             let audible = !ch.params.mute && (!any_solo || ch.params.solo);
-            ch.mix_gain.set(gains[d]);
             let output = ch.params.output;
             if let Some(tap) = ch.process(buf, &fx_ctx, self.curve, audible) {
                 any_cue = true;
@@ -964,47 +932,21 @@ impl Engine {
             });
         }
 
-        // ---- metronome (generated, then mixed after the limiter section)
-        let mut beat_events: [Option<(i64, u8)>; 4] = [None; 4];
+        // ---- beat events (one per clock beat crossed in this block)
         let mut nbe = 0;
-        {
-            let m = &mut self.metronome;
-            for (i, f) in self.deck_buf[..n].iter_mut().enumerate() {
-                let b = beat0 + i as f64 * bpf;
-                let prev = beat0 + (i as f64 - 1.0) * bpf;
-                if b.floor() != prev.floor() || (i == 0 && self.frames == 0) {
-                    let bi = b.floor() as i64;
-                    let in_bar = bi.rem_euclid(4) as u8;
-                    m.env = 1.0;
-                    m.phase = 0.0;
-                    m.freq = if in_bar == 0 { 1760.0 } else { 1100.0 };
-                    if nbe < beat_events.len() {
-                        beat_events[nbe] = Some((bi.div_euclid(4) + 1, in_bar + 1));
-                        nbe += 1;
-                    }
+        for i in 0..n {
+            let b = beat0 + i as f64 * bpf;
+            let prev = beat0 + (i as f64 - 1.0) * bpf;
+            if b.floor() != prev.floor() || (i == 0 && self.frames == 0) {
+                let bi = b.floor() as i64;
+                if nbe < 4 {
+                    let _ = self.events.push(Event::Beat { bar: bi.div_euclid(4) + 1, beat: bi.rem_euclid(4) as u8 + 1 });
+                    nbe += 1;
                 }
-                let s = if m.on && m.env > 0.001 {
-                    m.phase += m.freq / sr as f32;
-                    m.env *= 0.9985;
-                    (m.phase * std::f32::consts::TAU).sin() * m.env * m.gain * 0.5
-                } else {
-                    0.0
-                };
-                *f = [s, s];
             }
-        }
-        for e in beat_events.iter().flatten() {
-            let _ = self.events.push(Event::Beat { bar: e.0, beat: e.1 });
         }
 
         let master = &mut self.master_buf[..n];
-        let met = &self.deck_buf[..n];
-        if self.metronome.on && self.metronome.to_master {
-            for (m, x) in master.iter_mut().zip(met) {
-                m[0] += x[0];
-                m[1] += x[1];
-            }
-        }
 
         // Limiter runs before master volume (−0.3 dBFS ceiling, 1.5 ms lookahead).
         self.limiter.process(master);
@@ -1017,13 +959,6 @@ impl Engine {
 
         // ---- cue / headphones
         let cue = &mut self.cue_buf[..n];
-        if self.metronome.on {
-            any_cue = true;
-            for (c, x) in cue.iter_mut().zip(met) {
-                c[0] += x[0];
-                c[1] += x[1];
-            }
-        }
         let mix = if any_cue { self.cue_mix } else { 1.0 };
         let cg = self.cue_gain;
         for (c, m) in cue.iter_mut().zip(master.iter()) {
@@ -1085,7 +1020,6 @@ impl Engine {
                 post_rms: post.rms,
                 fx: ch.fx.health(),
                 fx_latency: (lp as u32, lq as u32),
-                mix_gain: ch.mix_gain.target,
             };
         }
         s.master = self.master_meter;
@@ -1101,6 +1035,3 @@ impl Engine {
     }
 }
 
-pub fn gain_from_db(db: f32) -> f32 {
-    db_to_gain(db)
-}

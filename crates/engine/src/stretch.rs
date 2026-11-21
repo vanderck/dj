@@ -76,10 +76,6 @@ impl Stretcher {
         }
     }
 
-    pub fn latency_frames(&self) -> usize {
-        0 // grains are centred on the timeline position
-    }
-
     pub fn reset(&mut self) {
         self.grains = [Grain::default(); 2];
         self.countdown = 0;

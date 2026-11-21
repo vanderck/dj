@@ -39,10 +39,9 @@ const DROP_BEATS: f64 = 4.0;
 /// Below this much outgoing time left, Mix always mixes now.
 const LAST_MINUTE_SECS: f64 = 60.0;
 /// Stem order: drums, bass, vocals, other.
-const DRUMS: usize = 0;
-const BASS: usize = 1;
-const VOCALS: usize = 2;
-const OTHER: usize = 3;
+use crate::transition::{BASS, DRUMS, OTHER, PRESENT, VOCALS};
+/// The echo an echo-out inserts.
+const ECHO_ID: &str = "native:echo";
 const STEM_ADDR: [&str; 4] = ["StemDrumsLevel", "StemBassLevel", "StemVocalsLevel", "StemOtherLevel"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -80,7 +79,7 @@ pub struct MixPlan {
     /// Outgoing deck beat where the incoming track starts (a bar line).
     pub start_beat: f64,
     pub length_beats: f64,
-    /// Why this moment, for the popup ("outro · no vocal clash").
+    /// Why this moment ("outro · no vocal clash"), printed when the mix starts.
     pub reason: String,
     /// Why this style, when Auto chose it ("keys clash", "vocals overlap").
     pub why_how: String,
@@ -100,7 +99,7 @@ pub struct MixPlan {
     /// The old track loops from this beat (outgoing beats) for this many beats: it would end
     /// before the mix does.
     pub loop_out: Option<(f64, f64)>,
-    /// What the plan follows in the two tracks, for the popup.
+    /// What the plan follows in the two tracks, printed when the mix starts.
     pub notes: Vec<String>,
 }
 
@@ -728,6 +727,12 @@ impl Core {
             format!("in {:.0} bars", ((mix.plan.start_beat - self.snap.decks[o].beat) / 4.0).max(0.0))
         };
         self.log(format!("Mixing deck {} into deck {} ({}): {when}", i + 1, o + 1, mix.plan.how.name(external)));
+        // Why this mix, for the terminal (the status line stays short).
+        let p = &mix.plan;
+        let why = [p.reason.as_str(), p.why_how.as_str()].into_iter().chain(p.notes.iter().map(String::as_str)).filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ");
+        if !why.is_empty() {
+            eprintln!("  {why}");
+        }
         self.automix = Some(mix);
     }
 
@@ -818,9 +823,12 @@ impl Core {
     /// Advance a running mix (called every tick).
     pub(super) fn automix_tick(&mut self) {
         self.vocal_return_tick();
-        if let Some((ch, slot, at)) = self.echo_cleanup {
-            if self.snap.clock.beat >= at {
-                self.echo_cleanup = None;
+        let now = self.snap.clock.beat;
+        let due: Vec<_> = self.echo_cleanup.iter().copied().filter(|e| now >= e.2).collect();
+        self.echo_cleanup.retain(|e| now < e.2);
+        for (ch, slot, _) in due {
+            // Only if the slot still holds dj's echo (you may have changed it since).
+            if self.session.channels[ch].fx.slots[slot].as_ref().is_some_and(|s| s.effect_id == ECHO_ID) {
                 self.remove_insert(ch, slot);
             }
         }
@@ -957,9 +965,12 @@ impl Core {
         // An echo-out: an echo after the old channel's fader, so its tail rings on.
         if let (Some(at), None, false) = (echo_at, echo_slot, external) {
             if bp >= at {
-                self.route(&format!("Mixer/CH{}/FX/Insert", o + 1), &[OscType::String("native:echo".into()), OscType::String("post".into())]);
-                let slot = self.session.channels[o].fx.slots.iter().rposition(|s| s.as_ref().is_some_and(|s| s.name == "Echo"));
-                self.automix.as_mut().unwrap().echo_slot = slot;
+                // One try: a full chain gets no echo (and a note), not a retry every tick.
+                self.automix.as_mut().unwrap().plan.echo_at = None;
+                match self.add_insert(o, ECHO_ID, InsertPos::Post) {
+                    Ok(slot) => self.automix.as_mut().unwrap().echo_slot = Some(slot),
+                    Err(e) => self.log(format!("CH{}: no echo-out ({e})", o + 1)),
+                }
             }
         }
         if p >= 1.0 {
@@ -968,7 +979,7 @@ impl Core {
                 self.mix_set(&format!("Mixer/CH{}/Filter1", o + 1), out_cutoff);
             }
             if let Some(slot) = self.automix.as_ref().and_then(|m| m.echo_slot) {
-                self.echo_cleanup = Some((o, slot, self.snap.clock.beat + 8.0));
+                self.echo_cleanup.push((o, slot, self.snap.clock.beat + 8.0));
             }
             if external {
                 // The old deck loops (silent with Stems or Drop) until you've faded it out: every
@@ -1013,10 +1024,6 @@ impl Core {
     }
 }
 
-/// A stem counts as playing in a bar when its level (relative to the track's loudest moments)
-/// averages above this.
-const PRESENT: f32 = 0.08;
-
 /// A mix planned from the music: when each part of the two tracks comes in or leaves, from both
 /// tracks' stem levels over the bars of the mix (see [`plan_blend`]).
 #[derive(Clone, Debug, PartialEq)]
@@ -1031,7 +1038,7 @@ pub struct Blend {
     pub out_ramp: f64,
     /// Bar where the basses swap.
     pub swap: f64,
-    /// What the plan follows, for the popup ("bass swaps at bar 9, where its bass comes in").
+    /// What the plan follows ("bass swaps at bar 9, where its bass comes in").
     pub notes: Vec<String>,
 }
 
