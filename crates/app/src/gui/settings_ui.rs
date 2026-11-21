@@ -126,22 +126,6 @@ fn settings(ui: &mut Ui, core: &mut Core, st: &mut UiState) {
             changed_engine = true;
         }
     });
-    ui.horizontal(|ui| {
-        use dj_engine::mixer::MixMode;
-        ui.label("Mix mode");
-        let m = core.session.mix_mode;
-        // The crossfader and vector pad have no on-screen control (MIDI/OSC only), so they
-        // start centred: switching mode never silences a deck.
-        for (lbl, mm) in [("Off", MixMode::Off), ("Crossfader", MixMode::Crossfader { pos: 0.0, sharp: false }), ("Vector (4 decks)", MixMode::Vector { x: 0.5, y: 0.5 })] {
-            let selected = std::mem::discriminant(&m) == std::mem::discriminant(&mm);
-            if ui.selectable_label(selected, lbl).on_hover_text("Controlled over MIDI or OSC (Header/Crossfader, Header/VectorX, Header/VectorY)").clicked() && !selected {
-                core.session.crossfader = 0.0;
-                core.session.vector = (0.5, 0.5);
-                core.session.mix_mode = mm;
-                core.apply_mix_mode();
-            }
-        }
-    });
     // With an external mixer, volume, EQ and filter are on the hardware: nothing to choose here.
     if !core.external_routing() {
         ui.horizontal(|ui| {
@@ -153,15 +137,6 @@ fn settings(ui: &mut Ui, core: &mut Core, st: &mut UiState) {
             changed_engine |= ui.checkbox(&mut e.volume, "Volume").changed();
         });
     }
-    ui.horizontal(|ui| {
-        let m = &mut core.session.master;
-        let mut c = ui.checkbox(&mut m.metronome_to_master, "Metronome to master").changed();
-        ui.label("Metronome level");
-        c |= ui.add(egui::Slider::new(&mut m.metronome_volume, 0.0..=1.0)).changed();
-        if c {
-            core.apply_master();
-        }
-    });
 
     section(ui, "DECKS");
     ui.horizontal(|ui| {

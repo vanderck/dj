@@ -123,6 +123,8 @@ pub struct Settings {
     pub layout: LayoutMode,
     /// Tempo faders move in steps of this many percent (0 = continuous).
     pub tempo_step_pct: f32,
+    /// Settings migrations done (see `migrate_from_collective`).
+    pub version: u32,
     /// What a set hot cue pad does, on screen and on a controller: loop from the cue (at the
     /// deck's loop size) or jump to it.
     pub cue_pads: CuePadMode,
@@ -185,7 +187,7 @@ impl Default for Settings {
             tempo_range: TempoRange::Pct10,
             keylock_on_load: true,
             tape_stop_ms: 25.0,
-            default_loop_beats: 16.0,
+            default_loop_beats: 4.0,
             skip_beats: 16.0,
             load_at_first_cue: true,
             use_replaygain: false,
@@ -209,6 +211,7 @@ impl Default for Settings {
             layout: LayoutMode::Auto,
             cue_points: CuePoints::Tags,
             cue_pads: CuePadMode::Loop,
+            version: 1,
             tempo_step_pct: 0.0,
         }
     }
@@ -232,6 +235,13 @@ impl Settings {
     /// Settings saved by Collective: paths into its old settings folder (a downloaded model)
     /// now live in dj's, and its default OSC root becomes dj's.
     fn migrate_from_collective(&mut self) {
+        // Once: the default loop was 16 beats; it is 4 (a 16 chosen afterwards stays).
+        if self.version < 1 {
+            if self.default_loop_beats == 16.0 {
+                self.default_loop_beats = 4.0;
+            }
+            self.version = 1;
+        }
         if self.osc_root.trim_matches('/').eq_ignore_ascii_case("collective") {
             self.osc_root = "/dj/".into();
         }
@@ -385,14 +395,20 @@ mod tests {
             osc_root: "/Collective/".into(),
             stems_demucs: Some(old.join("models").join("htdemucs.onnx")),
             stems_prepared_dir: Some(PathBuf::from("/elsewhere/stems")),
+            version: 0,
+            default_loop_beats: 16.0,
             ..Default::default()
         };
         s.migrate_from_collective();
         assert_eq!(s.osc_root, "/dj/");
         // (Other tests point DJ_CONFIG_DIR elsewhere meanwhile, so only check the move.)
-        let moved = s.stems_demucs.unwrap();
+        let moved = s.stems_demucs.clone().unwrap();
         assert!(!moved.starts_with(&old) && moved.ends_with("models/htdemucs.onnx"), "{moved:?}");
         assert_eq!(s.stems_prepared_dir, Some(PathBuf::from("/elsewhere/stems")), "other paths stay");
+        assert_eq!(s.default_loop_beats, 4.0, "old default loop moves to 4 once");
+        s.default_loop_beats = 16.0;
+        s.migrate_from_collective();
+        assert_eq!(s.default_loop_beats, 16.0, "a 16 chosen afterwards stays");
         // A root the user chose stays.
         let mut s = Settings { osc_root: "/Syndicate/".into(), ..Default::default() };
         s.migrate_from_collective();
