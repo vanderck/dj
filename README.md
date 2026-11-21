@@ -235,8 +235,9 @@ Fonts: Inter and JetBrains Mono, bundled under the SIL Open Font License (see
   sections: intro (no bass yet), drops (bass back after 4+ bars), breaks,
   outro. It then tries every combination of where the old track can start
   leaving (its 4-bar lines, within 4 bars for *Now*), where the new track
-  comes in (your cue, its start, its intro end, its drops and the phrases
-  before them, its drop cue) and how long, and scores each bar of the
+  comes in (your cue, which wins unless a mix from there can't fit; else its
+  start, its intro end, its drops and the phrases before them; its drop cue
+  for a cut) and how long, and scores each bar of the
   overlap on what you'd hear: vocals or (clashing keys) melodies on top of
   each other, both tracks full at once, the old outro/break meeting the new
   intro; plus the new drop landing as the old track leaves, a natural bass

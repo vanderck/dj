@@ -210,7 +210,8 @@ pub fn score(out: &Bars, inc: &Bars, c: &Candidate, lim: &Limits) -> (f32, Vec<S
     }
     if c.technique == Technique::Cut {
         if Some(c.in_bar) == lim.drop_cue_bar {
-            s += 6.0;
+            // Your drop cue, for a cut: as strong as your cue is for a blend.
+            s += 12.0;
             notes.push("cuts in on its drop cue".into());
         } else if drops.contains(&c.in_bar) {
             s += 5.0;
@@ -282,9 +283,11 @@ pub fn score(out: &Bars, inc: &Bars, c: &Candidate, lim: &Limits) -> (f32, Vec<S
     if c.in_bar.is_multiple_of(8) || Some(c.in_bar) == lim.cue_bar {
         s += 0.5;
     }
-    // Your cue: where you chose to start it.
-    if Some(c.in_bar) == lim.cue_bar {
-        s += 2.5;
+    // Your cue: where you chose to start it. It wins unless a mix from there can't work (other
+    // entries only when the cue is too late in the track, or for a cut on a drop).
+    let cut_on_drop_cue = c.technique == Technique::Cut && lim.drop_cue_bar.is_some();
+    if Some(c.in_bar) == lim.cue_bar && !cut_on_drop_cue {
+        s += 12.0;
     } else if c.in_bar != 0 {
         notes.push(format!("starts it at bar {}", c.in_bar + 1));
     }
