@@ -101,6 +101,8 @@ pub struct MixPlan {
     pub echo_at: Option<f64>,
     /// What the plan follows in the two tracks, printed when the mix starts.
     pub notes: Vec<String>,
+    /// Semitones the new track is shifted so its key fits (0: it already does).
+    pub transpose: i32,
 }
 
 impl MixPlan {
@@ -121,6 +123,7 @@ impl MixPlan {
             filter: None,
             echo_at: None,
             notes: Vec::new(),
+            transpose: 0,
         }
     }
 }
@@ -152,6 +155,8 @@ pub struct AutoMix {
     /// The old channel's filter before the mix (a sweep puts it back) and the echo inserted on it.
     out_cutoff: f32,
     echo_slot: Option<usize>,
+    /// The new deck's transposition before the mix (put back on cancel).
+    in_semitones: f64,
 }
 
 /// After a Now mix: bring the new track's vocals back where its next vocal phrase starts.
@@ -279,7 +284,8 @@ impl Core {
     /// - Otherwise: EQ.
     pub fn assess(&self, incoming: usize, outgoing: usize, when: MixWhen) -> (MixHow, String) {
         let (vi, vo) = (&self.snap.decks[incoming], &self.snap.decks[outgoing]);
-        let clash = self.keys_clash(incoming, outgoing);
+        // (A small transposition fixes a near miss: then they don't clash.)
+        let clash = self.keys_clash(incoming, outgoing) && self.key_shift(incoming, outgoing).is_none();
         if clash && vi.stems_ready && vo.stems_ready {
             // Only drums and bass overlap; the melodies and vocals switch at the swap.
             return (MixHow::Stems, "keys clash: melodies switch at the swap".into());
@@ -303,6 +309,19 @@ impl Core {
             return (MixHow::Stems, why.into());
         }
         (MixHow::Eq, "no stems yet".into())
+    }
+
+    /// When the keys clash: a shift of the new track by one semitone that puts it in a key that
+    /// mixes with the playing one (same, adjacent or relative), if any. (One semitone keeps a
+    /// track sounding like itself, and fixes 8 of 12 keys; with two, every clash would be
+    /// "fixed" by changing the track's character.)
+    pub fn key_shift(&self, incoming: usize, outgoing: usize) -> Option<i32> {
+        use dj_library::key::Compat;
+        let (a, b) = (self.deck_key(incoming)?, self.deck_key(outgoing)?);
+        if !self.keys_clash(incoming, outgoing) {
+            return None;
+        }
+        [1, -1].into_iter().find(|s| matches!(a.transpose(*s).compat(b), Compat::Same | Compat::Adjacent | Compat::Relative))
     }
 
     /// The two decks' keys don't mix (clash or diagonal on the Camelot wheel).
@@ -346,7 +365,10 @@ impl Core {
         let (Some((inc, cb_i)), Some((out, _))) = (self.deck_bars(incoming), self.deck_bars(outgoing)) else { return Vec::new() };
         let start_i = inc.start;
         let stems = i.stems_ready && o.stems_ready && inc.stems.is_some() && out.stems.is_some();
-        let clash = self.keys_clash(incoming, outgoing);
+        // Keys a semitone or two apart: the new track is transposed to fit, and they blend as
+        // if they matched.
+        let transpose = self.key_shift(incoming, outgoing).unwrap_or(0);
+        let clash = self.keys_clash(incoming, outgoing) && transpose == 0;
         let stretch = (i.track_bpm / o.bpm.max(1.0) - 1.0).abs() > 0.08;
         // What the style allows: Auto blends unless the keys clash without stems or the tempos
         // are far apart; only then it cuts.
@@ -426,6 +448,11 @@ impl Core {
                     _ => None,
                 };
                 let mut notes = c.notes.clone();
+                if transpose != 0 {
+                    let key = |d: usize| self.deck_key(d).map(|k| k.camelot()).unwrap_or_default();
+                    let to = self.deck_key(incoming).map(|k| k.transpose(transpose).camelot()).unwrap_or_default();
+                    notes.insert(0, format!("new track {transpose:+} semitone{} ({} → {to}) to fit {}", if transpose.abs() > 1 { "s" } else { "" }, key(incoming), key(outgoing)));
+                }
                 if let Some(b) = &blend {
                     notes.extend(b.notes.iter().take(2).cloned());
                 }
@@ -466,6 +493,7 @@ impl Core {
                     filter,
                     echo_at,
                     notes,
+                    transpose,
                 }
             })
             .collect()
@@ -736,8 +764,13 @@ impl Core {
             beat_offset: self.snap.decks[o].beat - self.snap.clock.beat,
             out_cutoff: params(o).cutoff,
             echo_slot: None,
+            in_semitones: self.snap.decks[i].semitones,
             plan,
         };
+        // Its key fitted to the playing track's, while it's still silent.
+        if mix.plan.transpose != 0 {
+            self.deck_cmd(i, DeckCmd::Semitones(mix.in_semitones + mix.plan.transpose as f64));
+        }
         match mix.plan.how {
             // The incoming bass stays out until the swap.
             // The incoming track starts thinned out on the EQ: its parts come in one by one.
@@ -814,6 +847,9 @@ impl Core {
             }
             if let Some(slot) = m.echo_slot {
                 self.remove_insert(o, slot);
+            }
+            if m.plan.transpose != 0 {
+                self.deck_cmd(i, DeckCmd::Semitones(m.in_semitones));
             }
             self.log("Mix cancelled".to_string());
         }
