@@ -114,7 +114,7 @@ pub fn addr_kind(addr: &str) -> Kind {
         | "previous" | "next" | "tap" => Kind::Trigger,
         "playing" | "cuemomentary" | "slip" | "cueslip" | "faderstart" | "speedhalf" | "speeddouble" | "reverse"
         | "slipdotted" | "slipth" | "sliptriplet" | "pitchpreserve" | "mute" | "solo" | "fx" | "on" | "limiter"
-        | "metronome" | "wallclock" | "sync" | "record" | "quantizeon" | "bypassall" | "stemdrums" | "stembass"
+        | "wallclock" | "sync" | "record" | "quantizeon" | "bypassall" | "stemdrums" | "stembass"
         | "stemvocals" | "stemother" | "acapella" | "instrumental" => Kind::Switch,
         "cue" | "backspin" | "phaseminus" | "phaseplus" | "trigger" => Kind::Hold,
         "beatskip" | "barskip" | "loopmovebeat" | "loopmovebar" | "pitchstep" | "bpmstep" | "browse" => Kind::Step,
@@ -480,19 +480,15 @@ impl Core {
         let cue_gain = if self.settings.audio.cue_enabled { m.cue_volume * m.cue_volume * 1.5 } else { 0.0 };
         self.send(Command::CueGain(cue_gain));
         self.send(Command::CueMix(m.cue_mix));
-        self.send(Command::Metronome { on: m.metronome, gain: m.metronome_volume, to_master: m.metronome_to_master });
+        self.send(Command::Metronome { on: false, gain: 0.0, to_master: false }); // (no metronome)
         self.mark_dirty();
     }
 
+    /// No crossfader or vector pad: every channel plays at its own fader (sessions saved with one
+    /// on start without it).
     pub fn apply_mix_mode(&mut self) {
-        let s = &self.session;
-        let mode = match s.mix_mode {
-            MixMode::Crossfader { .. } => MixMode::Crossfader { pos: s.crossfader, sharp: s.crossfader_sharp },
-            MixMode::Vector { .. } => MixMode::Vector { x: s.vector.0, y: s.vector.1 },
-            m => m,
-        };
-        self.send(Command::MixMode(mode));
-        self.mark_dirty();
+        self.session.mix_mode = MixMode::Off;
+        self.send(Command::MixMode(MixMode::Off));
     }
 
     // ------------------------------------------------------------ tracks
@@ -1409,37 +1405,11 @@ impl Core {
                     self.apply_master();
                 }
             }
-            ["metronome"] => {
-                if let Some(o) = on {
-                    self.session.master.metronome = o;
-                    self.apply_master();
-                }
-            }
             ["master"] if trig => self.send(Command::HeaderMaster),
             ["wallclock"] => {
                 if let Some(o) = on {
                     self.session.wallclock = o;
                     self.send(Command::Wallclock(o));
-                }
-            }
-            ["crossfader"] => {
-                if let Some(v) = f {
-                    self.session.crossfader = v.clamp(0.0, 1.0) * 2.0 - 1.0;
-                    if !matches!(self.session.mix_mode, MixMode::Crossfader { .. }) {
-                        self.session.mix_mode = MixMode::Crossfader { pos: 0.0, sharp: false };
-                    }
-                    self.apply_mix_mode();
-                }
-            }
-            ["vectorx"] | ["vectory"] => {
-                if let Some(v) = f {
-                    if rest[0] == "vectorx" {
-                        self.session.vector.0 = v.clamp(0.0, 1.0);
-                    } else {
-                        self.session.vector.1 = v.clamp(0.0, 1.0);
-                    }
-                    self.session.mix_mode = MixMode::Vector { x: 0.5, y: 0.5 };
-                    self.apply_mix_mode();
                 }
             }
             ["record"] => {
@@ -1930,7 +1900,6 @@ impl Core {
             ["mixer", c, "fx"] => !self.session.channels[idx(c)?].fx.bypass_all,
             ["mixer", c, "faderstart"] => self.session.channels[idx(c)?].fader_start,
             ["header", "limiter"] => self.session.master.limiter,
-            ["header", "metronome"] => self.session.master.metronome,
             ["header", "wallclock"] => self.session.wallclock,
             ["header", "quantizeon"] => self.session.quantize_on,
             ["header", "master"] => self.snap.clock.owner == ClockOwner::Header,
@@ -2201,7 +2170,6 @@ impl Core {
         out.push(("Header/BPM".into(), vec![OscType::Float((s.clock.bpm * 100.0).round() as f32 / 100.0)]));
         out.push(("Header/MasterVolume".into(), vec![OscType::Float(self.session.master.volume)]));
         out.push(("Header/CueVolume".into(), vec![OscType::Float(self.session.master.cue_volume)]));
-        out.push(("Header/Metronome".into(), vec![OscType::Int(self.session.master.metronome as i32)]));
         for d in 0..self.deck_count() {
             let n = d + 1;
             let v = s.decks[d];

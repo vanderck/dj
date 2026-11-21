@@ -152,10 +152,6 @@ fn menu(ui: &mut Ui, core: &mut Core, st: &mut UiState) {
         ui.close();
     }
     ui.separator();
-    let met = core.session.master.metronome;
-    if ui.selectable_label(met, "Metronome").clicked() {
-        act_i(core, "Header/Metronome", !met as i32);
-    }
     ui.separator();
     ui.horizontal(|ui| {
         ui.label("Decks");

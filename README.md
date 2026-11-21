@@ -275,10 +275,9 @@ Fonts: Inter and JetBrains Mono, bundled under the SIL Open Font License (see
 - **Mixer**: trim; 3-band full-kill EQ (LR4 crossovers, adjustable); one-knob
   CUTOFF/RES/WIDTH filter; fader curves (Linear dB / Constant power / Dipped /
   Fast cut); CUE/MUTE/SOLO; fader start. Outputs: master, none, or a direct
-  hardware pair (choose which stages apply). Optional crossfader (A/B/thru per
-  channel) or 4-deck vector pad, controlled over MIDI/OSC (no on-screen control).
+  hardware pair (choose which stages apply).
 - **Master**: look-ahead limiter, master/cue levels, cue mix, split cue,
-  metronome, recording to 32-bit float WAV.
+  recording to 32-bit float WAV.
 - **Control**: MIDI learn (toggle/absolute/relative), LED feedback, MIDI clock
   out, keyboard shortcuts, OSC input + feedback.
 

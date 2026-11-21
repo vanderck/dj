@@ -127,6 +127,27 @@ pub enum GridSource {
     Detected,
 }
 
+/// Serato's (and so Mixed In Key's) times in an MP3 are one MP3 frame (1152 samples) later than
+/// where a decoder that skips the encoder's lead-in plays the audio, as dj's does: 26 ms at 44.1
+/// kHz, 24 ms at 48 kHz (measured by Mixxx, `SeratoTags::guessTimingOffsetMillis`). Move cues,
+/// loops and the Serato beat grid back by that much, so they land on the music.
+pub fn serato_timing(tags: &mut Tags, path: &Path, sample_rate: u32) {
+    let mp3 = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("mp3"));
+    if !mp3 || sample_rate == 0 {
+        return;
+    }
+    let shift = 1152.0 / sample_rate as f64;
+    for c in &mut tags.cues {
+        c.secs = (c.secs - shift).max(0.0);
+        if let Some(e) = c.end_secs.as_mut() {
+            *e = (*e - shift).max(0.0);
+        }
+    }
+    if let Some(g) = tags.grid.as_mut() {
+        g.anchor_secs -= shift;
+    }
+}
+
 /// Choose a beat grid from tags, never estimating the tempo itself.
 pub fn grid_for(tags: &Tags, audio: &AudioData) -> Option<(BeatGrid, GridSource)> {
     if let Some(g) = tags.grid {
@@ -194,6 +215,7 @@ pub struct Detected {
 pub fn load(path: &Path, overrides: Option<&TrackOverrides>, use_replaygain: bool, detect: DetectOptions) -> Result<LoadedTrack> {
     let audio = decode(path)?;
     let mut tags = tags::read(path).unwrap_or_default();
+    serato_timing(&mut tags, path, audio.sample_rate);
     let mut detected = Detected::default();
     let (mut grid, mut source) = match grid_for(&tags, &audio) {
         Some((g, s)) => (Some(g), Some(s)),
@@ -220,8 +242,22 @@ pub fn load(path: &Path, overrides: Option<&TrackOverrides>, use_replaygain: boo
             source = Some(if o.grid_detected { GridSource::Detected } else { GridSource::User });
         }
         if let Some(c) = &o.cues {
+            // Cues saved before the MP3 timing fix kept Serato's late times: a saved cue at exactly
+            // a tag cue's uncorrected time is that cue, so it takes the corrected time.
+            let shift = if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("mp3")) && audio.sample_rate > 0 {
+                1152.0 / audio.sample_rate as f64
+            } else {
+                0.0
+            };
             for (i, v) in c.iter().enumerate().take(NUM_HOT_CUES) {
-                cues[i] = v.clone();
+                let mut v = v.clone();
+                if let Some(cue) = v.as_mut() {
+                    if let Some(t) = tags.cues.iter().find(|t| shift > 0.0 && (t.secs + shift - cue.secs).abs() < 0.0005) {
+                        cue.secs = t.secs;
+                        cue.end_secs = t.end_secs;
+                    }
+                }
+                cues[i] = v;
             }
         }
         if tags.energy.is_none() {
@@ -370,5 +406,29 @@ mod tests {
         assert_eq!(again.grid_source, Some(GridSource::Detected));
         assert!(!again.detected.grid && again.detected.energy.is_none() && !again.detected.cues_pending);
         let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[cfg(test)]
+mod serato_timing_tests {
+    use super::*;
+
+    #[test]
+    fn mp3_serato_times_move_back_one_frame() {
+        let cue = |secs| Cue { kind: CueKind::Hot, secs, end_secs: Some(secs + 4.0), name: String::new(), color: [0; 3] };
+        let mut t = Tags { cues: vec![cue(10.0), cue(0.01)], grid: Some(BeatGrid { bpm: 128.0, anchor_secs: 0.5 }), ..Default::default() };
+        serato_timing(&mut t, Path::new("/m/a.MP3"), 44100);
+        let d = 1152.0 / 44100.0;
+        assert!((t.cues[0].secs - (10.0 - d)).abs() < 1e-9 && (t.cues[0].end_secs.unwrap() - (14.0 - d)).abs() < 1e-9);
+        assert_eq!(t.cues[1].secs, 0.0, "never before the start");
+        assert!((t.grid.unwrap().anchor_secs - (0.5 - d)).abs() < 1e-9);
+        assert!((d * 1000.0 - 26.1).abs() < 0.1);
+        // 48 kHz: 24 ms. Other formats: unchanged.
+        let mut t = Tags { cues: vec![cue(10.0)], ..Default::default() };
+        serato_timing(&mut t, Path::new("/m/a.mp3"), 48000);
+        assert!((t.cues[0].secs - 9.976).abs() < 1e-9);
+        let mut t = Tags { cues: vec![cue(10.0)], ..Default::default() };
+        serato_timing(&mut t, Path::new("/m/a.flac"), 44100);
+        assert_eq!(t.cues[0].secs, 10.0);
     }
 }
