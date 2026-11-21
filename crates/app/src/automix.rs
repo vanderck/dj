@@ -101,6 +101,8 @@ pub struct MixPlan {
     pub echo_at: Option<f64>,
     /// What the plan follows in the two tracks, printed when the mix starts.
     pub notes: Vec<String>,
+    /// Semitones the new track is shifted so its key fits (0: it already does).
+    pub transpose: i32,
 }
 
 impl MixPlan {
@@ -121,6 +123,7 @@ impl MixPlan {
             filter: None,
             echo_at: None,
             notes: Vec::new(),
+            transpose: 0,
         }
     }
 }
@@ -152,6 +155,8 @@ pub struct AutoMix {
     /// The old channel's filter before the mix (a sweep puts it back) and the echo inserted on it.
     out_cutoff: f32,
     echo_slot: Option<usize>,
+    /// The new deck's transposition before the mix (put back on cancel).
+    in_semitones: f64,
 }
 
 /// After a Now mix: bring the new track's vocals back where its next vocal phrase starts.
@@ -279,7 +284,8 @@ impl Core {
     /// - Otherwise: EQ.
     pub fn assess(&self, incoming: usize, outgoing: usize, when: MixWhen) -> (MixHow, String) {
         let (vi, vo) = (&self.snap.decks[incoming], &self.snap.decks[outgoing]);
-        let clash = self.keys_clash(incoming, outgoing);
+        // (A small transposition fixes a near miss: then they don't clash.)
+        let clash = self.keys_clash(incoming, outgoing) && self.key_shift(incoming, outgoing).is_none();
         if clash && vi.stems_ready && vo.stems_ready {
             // Only drums and bass overlap; the melodies and vocals switch at the swap.
             return (MixHow::Stems, "keys clash: melodies switch at the swap".into());
@@ -303,6 +309,19 @@ impl Core {
             return (MixHow::Stems, why.into());
         }
         (MixHow::Eq, "no stems yet".into())
+    }
+
+    /// When the keys clash: a shift of the new track by one semitone that puts it in a key that
+    /// mixes with the playing one (same, adjacent or relative), if any. (One semitone keeps a
+    /// track sounding like itself, and fixes 8 of 12 keys; with two, every clash would be
+    /// "fixed" by changing the track's character.)
+    pub fn key_shift(&self, incoming: usize, outgoing: usize) -> Option<i32> {
+        use dj_library::key::Compat;
+        let (a, b) = (self.deck_key(incoming)?, self.deck_key(outgoing)?);
+        if !self.keys_clash(incoming, outgoing) {
+            return None;
+        }
+        [1, -1].into_iter().find(|s| matches!(a.transpose(*s).compat(b), Compat::Same | Compat::Adjacent | Compat::Relative))
     }
 
     /// The two decks' keys don't mix (clash or diagonal on the Camelot wheel).
@@ -346,7 +365,10 @@ impl Core {
         let (Some((inc, cb_i)), Some((out, _))) = (self.deck_bars(incoming), self.deck_bars(outgoing)) else { return Vec::new() };
         let start_i = inc.start;
         let stems = i.stems_ready && o.stems_ready && inc.stems.is_some() && out.stems.is_some();
-        let clash = self.keys_clash(incoming, outgoing);
+        // Keys a semitone or two apart: the new track is transposed to fit, and they blend as
+        // if they matched.
+        let transpose = self.key_shift(incoming, outgoing).unwrap_or(0);
+        let clash = self.keys_clash(incoming, outgoing) && transpose == 0;
         let stretch = (i.track_bpm / o.bpm.max(1.0) - 1.0).abs() > 0.08;
         // What the style allows: Auto blends unless the keys clash without stems or the tempos
         // are far apart; only then it cuts.
@@ -407,7 +429,16 @@ impl Core {
                 let ob = |k: usize| c.out_bar + k;
                 let inc_w: [Vec<f32>; 4] = std::array::from_fn(|p| (0..bars).map(|k| inc.level(p, c.in_bar + k)).collect());
                 let out_w: [Vec<f32>; 4] = std::array::from_fn(|p| (0..bars).map(|k| out.level(p, ob(k))).collect());
-                let blend = (how != MixHow::Drop).then(|| plan_blend(&inc_w, &out_w, bars, vocals_out, clash));
+                let mut blend = (how != MixHow::Drop).then(|| plan_blend(&inc_w, &out_w, bars, vocals_out, clash));
+                // The old vocals end in a breath, not mid-line.
+                if let (Some(b), Some(w)) = (blend.as_mut(), self.decks[outgoing].stem_wave.as_deref()) {
+                    breathe_out(b, w, out.secs(c.out_bar as f64), out.bar_secs / 4.0);
+                }
+                // The new vocals start with a line, not in the middle of one.
+                if let (Some(b), Some(w)) = (blend.as_mut(), self.decks[incoming].stem_wave.as_deref()) {
+                    let spb_i = inc.bar_secs / 4.0;
+                    breathe_in(b, w, entry_secs.unwrap_or(inc.secs(c.in_bar as f64)) + lead_in * spb_i, spb_i);
+                }
                 // Techniques, only when the music calls for them:
                 // a high-pass sweep when the old track is still full as it has to go (EQ: no stems
                 // to take it apart); an echo-out when it leaves mid-phrase with vocals, or is cut
@@ -422,6 +453,11 @@ impl Core {
                     _ => None,
                 };
                 let mut notes = c.notes.clone();
+                if transpose != 0 {
+                    let key = |d: usize| self.deck_key(d).map(|k| k.camelot()).unwrap_or_default();
+                    let to = self.deck_key(incoming).map(|k| k.transpose(transpose).camelot()).unwrap_or_default();
+                    notes.insert(0, format!("new track {transpose:+} semitone{} ({} → {to}) to fit {}", if transpose.abs() > 1 { "s" } else { "" }, key(incoming), key(outgoing)));
+                }
                 if let Some(b) = &blend {
                     notes.extend(b.notes.iter().take(2).cloned());
                 }
@@ -462,6 +498,7 @@ impl Core {
                     filter,
                     echo_at,
                     notes,
+                    transpose,
                 }
             })
             .collect()
@@ -478,8 +515,21 @@ impl Core {
         let spb = 60.0 / v.track_bpm;
         let start = v.position_secs - v.beat * spb;
         let cues: Vec<f64> = v.hot_cues.iter().flatten().map(|t| (t - start) / (4.0 * spb)).collect();
+        // Mixed In Key's "Energy N" cues: the energy of each section.
+        let energy: Vec<(f64, u8)> = info
+            .cues
+            .iter()
+            .enumerate()
+            .filter_map(|(i, c)| {
+                let c = c.as_ref()?;
+                let n: u8 = c.name.trim().strip_prefix("Energy")?.trim().parse().ok()?;
+                let t = v.hot_cues.get(i).copied().flatten().unwrap_or(c.secs);
+                Some(((t - start) / (4.0 * spb), n.clamp(1, 10)))
+            })
+            .collect();
         let bars = crate::transition::Bars::new(&info.waveform, self.decks[d].stem_wave.as_deref(), start, spb, v.duration_secs)
-            .with_phrase(crate::transition::phrase_offset(&cues));
+            .with_phrase(crate::transition::phrase_offset(&cues))
+            .with_energy(&energy, self.deck_energy(d));
         (!bars.is_empty()).then_some((bars, cues))
     }
 
@@ -732,8 +782,13 @@ impl Core {
             beat_offset: self.snap.decks[o].beat - self.snap.clock.beat,
             out_cutoff: params(o).cutoff,
             echo_slot: None,
+            in_semitones: self.snap.decks[i].semitones,
             plan,
         };
+        // Its key fitted to the playing track's, while it's still silent.
+        if mix.plan.transpose != 0 {
+            self.deck_cmd(i, DeckCmd::Semitones(mix.in_semitones + mix.plan.transpose as f64));
+        }
         match mix.plan.how {
             // The incoming bass stays out until the swap.
             // The incoming track starts thinned out on the EQ: its parts come in one by one.
@@ -810,6 +865,9 @@ impl Core {
             }
             if let Some(slot) = m.echo_slot {
                 self.remove_insert(o, slot);
+            }
+            if m.plan.transpose != 0 {
+                self.deck_cmd(i, DeckCmd::Semitones(m.in_semitones));
             }
             self.log("Mix cancelled".to_string());
         }
@@ -1096,10 +1154,10 @@ impl Blend {
         let mut o = [1.0f32; 4];
         for s in 0..4 {
             if let Some(b) = self.in_at[s] {
-                i[s] = if s == BASS { (bp >= b) as u8 as f32 } else { smooth((bp - b) / self.in_ramp[s].max(0.5)) };
+                i[s] = if s == BASS { (bp >= b) as u8 as f32 } else { smooth((bp - b) / self.in_ramp[s].max(0.1)) };
             }
             if let Some(b) = self.out_at[s] {
-                o[s] = if s == BASS { (bp < b) as u8 as f32 } else { 1.0 - smooth((bp - (b - self.out_ramp[s])) / self.out_ramp[s].max(0.5)) };
+                o[s] = if s == BASS { (bp < b) as u8 as f32 } else { 1.0 - smooth((bp - (b - self.out_ramp[s])) / self.out_ramp[s].max(0.1)) };
             }
         }
         if vocals_out {
@@ -1127,6 +1185,77 @@ pub fn bar_levels(w: &crate::stems::StemWave, t0: f64, beat_secs: f64, bars: usi
             })
             .collect()
     })
+}
+
+/// Move the old vocals' fade into a pause of the singer's: the vocals stay at full level until
+/// the nearest beat (within a bar or two of the planned fade) where the vocal stem is quiet, and
+/// fade out inside it. `start` is the old track's time at the mix's first bar, `spb` its seconds
+/// per beat. Unchanged when the old vocals leave on their own or no pause is near.
+pub fn breathe_out(b: &mut Blend, w: &crate::stems::StemWave, start: f64, spb: f64) {
+    let Some(end) = b.out_at[VOCALS] else { return };
+    let v = &w.levels[VOCALS];
+    let level = |beat: f64| {
+        let (a, z) = (((start + beat * spb) * w.bins_per_sec) as usize, ((start + (beat + 1.0) * spb) * w.bins_per_sec) as usize);
+        let (a, z) = (a.min(v.len()), z.min(v.len()));
+        if z > a { v[a..z].iter().sum::<f32>() / (z - a) as f32 } else { 0.0 }
+    };
+    // How loud the singing is around there (the louder half of the beats).
+    let from = ((end - b.out_ramp[VOCALS]) * 4.0 - 8.0).max(0.0);
+    let to = (end * 4.0 + 4.0).min(b.bars as f64 * 4.0 - 4.0);
+    if to <= from {
+        return;
+    }
+    let mut around: Vec<f32> = (from as usize..to as usize).map(|k| level(k as f64)).collect();
+    around.sort_by(|a, z| z.total_cmp(a));
+    let sung = around.get(around.len() / 4).copied().unwrap_or(0.0);
+    if sung <= PRESENT {
+        return; // hardly singing there: nothing to cut
+    }
+    // The pause nearest the planned end of the fade.
+    let target = end * 4.0 - 1.0;
+    let gap = (from as usize..to as usize)
+        .map(|k| k as f64)
+        .filter(|k| level(*k) < 0.25 * sung)
+        .min_by(|a, z| (a - target).abs().total_cmp(&(z - target).abs()));
+    if let Some(g) = gap {
+        b.out_at[VOCALS] = Some((g + 1.0) / 4.0);
+        b.out_ramp[VOCALS] = 0.25;
+        b.notes.push(format!("old vocals end in a pause (bar {})", (g / 4.0) as usize + 1));
+    }
+}
+
+/// Bring the new vocals in at the start of a line: from where the plan lets them in, the next
+/// beat (within 2 bars) where the vocal stem starts singing after a pause; they fade in during
+/// that pause, so the first word is there. `start` is the new track's time at the mix's first
+/// bar, `spb` its seconds per beat. Unchanged when no line starts that soon.
+pub fn breathe_in(b: &mut Blend, w: &crate::stems::StemWave, start: f64, spb: f64) {
+    let Some(at) = b.in_at[VOCALS] else { return };
+    let v = &w.levels[VOCALS];
+    let level = |beat: f64| {
+        let (a, z) = (((start + beat * spb).max(0.0) * w.bins_per_sec) as usize, ((start + (beat + 1.0) * spb).max(0.0) * w.bins_per_sec) as usize);
+        let (a, z) = (a.min(v.len()), z.min(v.len()));
+        if z > a { v[a..z].iter().sum::<f32>() / (z - a) as f32 } else { 0.0 }
+    };
+    let total = b.bars as f64 * 4.0;
+    let from = (at * 4.0).max(0.0);
+    // How loud the singing is from there (the louder quarter of the beats).
+    let mut ahead: Vec<f32> = (from as usize..(from + 32.0).min(total) as usize).map(|k| level(k as f64)).collect();
+    if ahead.is_empty() {
+        return;
+    }
+    ahead.sort_by(|a, z| z.total_cmp(a));
+    let sung = ahead[ahead.len() / 4];
+    if sung <= PRESENT {
+        return; // no singing there to align
+    }
+    let quiet = |k: f64| level(k) < 0.25 * sung;
+    // A line starts on beat k: singing there, a pause just before (never earlier than planned).
+    let line = (from as usize + 1..=(from + 8.0).min(total - 1.0) as usize).map(|k| k as f64).find(|k| !quiet(*k) && quiet(k - 1.0));
+    if let Some(k) = line {
+        b.in_at[VOCALS] = Some((k - 1.0) / 4.0);
+        b.in_ramp[VOCALS] = 0.25;
+        b.notes.push(format!("new vocals start with a line (bar {})", (k / 4.0) as usize + 1));
+    }
 }
 
 /// The bars the bass swap can be on, in a mix of `bars` bars.
@@ -1281,7 +1410,7 @@ pub fn plan_blend(inc: &[Vec<f32>; 4], out: &[Vec<f32>; 4], bars: usize, vocals_
 
 #[cfg(test)]
 mod tests {
-    use super::{plan_blend, smooth, stems_at, BASS, DRUMS, OTHER, VOCALS};
+    use super::{breathe_in, breathe_out, plan_blend, smooth, stems_at, BASS, DRUMS, OTHER, VOCALS};
 
     #[test]
     fn fades_are_smooth_and_bounded() {
@@ -1432,5 +1561,42 @@ mod tests {
         let sung = lvn(24, [&[], &[], &[(0, 24)], &[(0, 24)]]);
         let b = plan_blend(&inc, &sung, 24, false, false);
         assert!(b.in_at[VOCALS].unwrap() >= 23.5);
+    }
+
+    #[test]
+    fn old_vocals_end_in_a_pause() {
+        // 16 bars at 120 BPM (0.5 s a beat); the singer pauses on the last beat of every 2 bars.
+        let bins_per_sec = 100.0;
+        let v: Vec<f32> = (0..(32.0 * bins_per_sec) as usize).map(|i| if (i as f64 / bins_per_sec / 0.5) as usize % 8 == 7 { 0.01 } else { 0.6 }).collect();
+        let w = crate::stems::StemWave { bins_per_sec, levels: [vec![0.5; v.len()], vec![0.5; v.len()], v, vec![0.5; 3200]] };
+        let all = lvn(16, [&[(0, 16)], &[(0, 16)], &[(0, 16)], &[(0, 16)]]);
+        let mut b = plan_blend(&all, &all, 16, false, false);
+        b.out_at[VOCALS] = Some(13.0);
+        b.out_ramp[VOCALS] = 4.0;
+        breathe_out(&mut b, &w, 0.0, 0.5);
+        let end = b.out_at[VOCALS].unwrap();
+        // Out at the end of a pause beat (beats 7, 15, … end at bars 2, 4, …), the nearest to 13.
+        assert_eq!(end, 12.0, "{:?}", b.notes);
+        assert_eq!(b.out_ramp[VOCALS], 0.25);
+        assert!(b.levels(11.7, false).1[VOCALS] >= 0.99, "full until the pause");
+        assert_eq!(b.levels(12.0, false).1[VOCALS], 0.0);
+    }
+
+    #[test]
+    fn new_vocals_start_with_a_line() {
+        // 16 bars at 120 BPM; the new singer pauses on the last beat of every 2 bars, so lines
+        // start on beats 8, 16, 24, …
+        let bins_per_sec = 100.0;
+        let v: Vec<f32> = (0..(32.0 * bins_per_sec) as usize).map(|i| if (i as f64 / bins_per_sec / 0.5) as usize % 8 == 7 { 0.01 } else { 0.6 }).collect();
+        let w = crate::stems::StemWave { bins_per_sec, levels: [vec![0.5; v.len()], vec![0.5; v.len()], v, vec![0.5; 3200]] };
+        let all = lvn(16, [&[(0, 16)], &[(0, 16)], &[(0, 16)], &[(0, 16)]]);
+        let mut b = plan_blend(&all, &all, 16, false, false);
+        // Planned in at bar 4.6 (beat 18.4): mid-line; the next line starts on beat 24 (bar 7).
+        b.in_at[VOCALS] = Some(4.6);
+        b.in_ramp[VOCALS] = 2.0;
+        breathe_in(&mut b, &w, 0.0, 0.5);
+        assert_eq!(b.in_at[VOCALS], Some(5.75), "{:?}", b.notes);
+        assert!(b.levels(5.7, false).0[VOCALS] < 0.01, "not yet");
+        assert!(b.levels(6.0, false).0[VOCALS] >= 0.99, "the first word at full level");
     }
 }

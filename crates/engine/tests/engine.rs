@@ -5,7 +5,7 @@ use dj_engine::dsp::Frame;
 use dj_engine::engine::{ClockOwner, DeckCmd, NUM_DECKS};
 use dj_engine::fx::{Effect, FxCtx, InsertPos};
 use dj_engine::mixer::ChannelParams;
-use dj_engine::track::{AudioData, BeatGrid, Track};
+use dj_engine::track::{AudioData, BeatGrid, TempoMap, Track};
 use dj_engine::{create, Command, Controller, Engine, EngineConfig, Event, Garbage};
 
 const SR: f32 = 48000.0;
@@ -28,6 +28,7 @@ fn click_track(id: u64, bpm: f64, secs: f64, sr: u32) -> Arc<Track> {
         id,
         audio: AudioData { sample_rate: sr, frames },
         grid: Some(BeatGrid { bpm, anchor_secs: 0.0 }),
+        tempo_map: None,
         gain: 1.0,
         cues: Default::default(),
     })
@@ -95,6 +96,68 @@ fn synced_deck_locks_tempo_and_phase() {
     let frac = |b: f64| b - b.round();
     let err = frac(s.decks[1].beat - s.decks[0].beat);
     assert!(err.abs() < 0.01, "phase error {err}");
+}
+
+#[test]
+fn a_synced_deck_follows_a_tempo_that_changes() {
+    // Deck 2's track speeds up from 120 to 130 BPM after 64 beats (clicks exactly there, and a
+    // tempo map saying so); deck 1 plays a steady 125 BPM and leads.
+    let sr = 48000u32;
+    let (t64, spb2) = (32.0, 60.0 / 130.0);
+    let beat_secs = |b: f64| if b <= 64.0 { b * 0.5 } else { t64 + (b - 64.0) * spb2 };
+    let n = (70.0 * sr as f64) as usize;
+    let mut frames = vec![[0.0f32; 2]; n];
+    let mut b = 0.0;
+    while beat_secs(b) < 70.0 {
+        let s0 = (beat_secs(b) * sr as f64) as usize;
+        for f in frames.iter_mut().skip(s0).take(64) {
+            *f = [0.8, 0.8];
+        }
+        b += 1.0;
+    }
+    let map = TempoMap::new(vec![(0.0, 0.0), (64.0, t64), (200.0, beat_secs(200.0))]).unwrap();
+    let track = Arc::new(Track {
+        id: 2,
+        audio: AudioData { sample_rate: sr, frames },
+        grid: Some(map.average()),
+        tempo_map: Some(map.clone()),
+        gain: 1.0,
+        cues: Default::default(),
+    });
+    let (mut e, mut c) = setup();
+    send(&mut c, Command::GlobalQuantize(None));
+    send(&mut c, Command::Load { deck: 0, track: click_track(1, 125.0, 120.0, sr), start_at_first_cue: false });
+    send(&mut c, Command::Load { deck: 1, track, start_at_first_cue: false });
+    deck(&mut c, 0, DeckCmd::Play);
+    run(&mut e, 20);
+    deck(&mut c, 1, DeckCmd::Sync(true));
+    deck(&mut c, 1, DeckCmd::Play);
+    // Through the change and on: deck 2 stays on deck 1's beat (its own beats where its clicks
+    // are), playing slower before the change and faster after it.
+    let frac = |b: f64| b - b.round();
+    let (mut checked, mut before, mut after) = (0, false, false);
+    for _ in 0..240 {
+        run(&mut e, 50);
+        let s = e.snapshot();
+        let (d1, d2) = (s.decks[0], s.decks[1]);
+        if d2.position_secs < 5.0 {
+            continue; // (sync settling after Play)
+        }
+        let err = frac(d2.beat - d1.beat);
+        assert!(err.abs() < 0.01, "at {:.1} s: phase error {err:.3} beat", d2.position_secs);
+        assert!((d2.beat - map.beat_at(d2.position_secs)).abs() < 1e-6, "its beats are the map's");
+        if d2.position_secs < t64 - 2.0 {
+            assert!((d2.track_bpm - 120.0).abs() < 0.01);
+            before = true;
+        }
+        if d2.position_secs > t64 + 2.0 {
+            assert!((d2.track_bpm - 130.0).abs() < 0.01);
+            assert!((d2.speed - 125.0 / 130.0).abs() < 0.01, "speed {}", d2.speed);
+            after = true;
+        }
+        checked += 1;
+    }
+    assert!(checked > 100 && before && after, "{checked} {before} {after}");
 }
 
 #[test]
@@ -359,6 +422,7 @@ fn stem_track(id: u64) -> (Arc<Track>, Arc<StemData>) {
         id,
         audio: AudioData { sample_rate: SR as u32, frames },
         grid: None,
+        tempo_map: None,
         gain: 1.0,
         cues: Default::default(),
     });
@@ -451,7 +515,7 @@ fn click_lag_ms(keylock: bool, tempo: f64) -> f64 {
     for f in frames.iter_mut().skip(sr as usize).take(32) {
         *f = [0.9, 0.9];
     }
-    let track = Arc::new(Track { id: 1, audio: AudioData { sample_rate: sr, frames }, grid: None, gain: 1.0, cues: Default::default() });
+    let track = Arc::new(Track { id: 1, audio: AudioData { sample_rate: sr, frames }, grid: None, tempo_map: None, gain: 1.0, cues: Default::default() });
     let (mut e, mut c) = setup();
     send(&mut c, Command::Load { deck: 0, track, start_at_first_cue: false });
     send(&mut c, Command::GlobalQuantize(None));
@@ -523,7 +587,7 @@ fn empty_decks_do_not_loop_and_gridless_loops_report_their_length() {
     // A track without a grid loops at an assumed 120 BPM, and says how many beats.
     let t = click_track(1, 120.0, 30.0, 48000);
     let audio = AudioData { sample_rate: t.audio.sample_rate, frames: t.audio.frames.to_vec() };
-    let gridless = Track { id: 2, audio, grid: None, gain: 1.0, cues: Default::default() };
+    let gridless = Track { id: 2, audio, grid: None, tempo_map: None, gain: 1.0, cues: Default::default() };
     send(&mut c, Command::Load { deck: 0, track: Arc::new(gridless), start_at_first_cue: false });
     deck(&mut c, 0, DeckCmd::LoopBeats(4.0));
     run(&mut e, 2);

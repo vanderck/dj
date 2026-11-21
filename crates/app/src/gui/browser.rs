@@ -311,7 +311,10 @@ pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect) {
                 for d in 0..n {
                     let b = Rect::from_center_size(Pos2::new(rr.right() - 18.0 - (n - 1 - d) as f32 * 30.0, rr.center().y), Vec2::splat(24.0));
                     deck_badge(ui, b, d, 12.0);
-                    if ui.allocate_rect(b, Sense::click()).clicked() {
+                    // Clickable without taking layout space: allocating here moved the rows below
+                    // (and their ids) whenever a row was hovered, so the list jittered under the
+                    // cursor.
+                    if ui.interact(b, ui.scope_id().with(("load-to", i, d)), Sense::click()).clicked() {
                         if core.session.decks[d].mode == DeckMode::Sampler {
                             let lane = core.session.decks[d].sampler.selected_lane;
                             core.load_sample(d, lane, &e.path);

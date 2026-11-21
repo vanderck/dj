@@ -32,6 +32,8 @@ pub struct Bars {
     pub loud: Vec<f32>,
     /// The bar (0–7) the track's 8-bar phrases start on (see [`phrase_offset`]).
     pub phrase: usize,
+    /// Energy (1–10) per bar, when known (see [`Bars::with_energy`]).
+    pub energy: Vec<f32>,
     /// Sections, worked out once (see [`Bars::finished`]).
     drop_bars: Vec<usize>,
     intro: usize,
@@ -138,6 +140,29 @@ impl Bars {
     pub fn with_phrase(mut self, phrase: usize) -> Self {
         self.phrase = phrase % 8;
         self
+    }
+
+    /// Energy per bar: from Mixed In Key's "Energy N" cues (`cues`: bar and level; each holds
+    /// until the next), else the track's overall energy shaped by its loudness.
+    pub fn with_energy(mut self, cues: &[(f64, u8)], overall: Option<u8>) -> Self {
+        let n = self.len();
+        let mut cues: Vec<(f64, u8)> = cues.to_vec();
+        cues.sort_by(|a, b| a.0.total_cmp(&b.0));
+        self.energy = if let Some(first) = cues.first() {
+            (0..n).map(|k| cues.iter().rev().find(|c| c.0 <= k as f64 + 0.5).unwrap_or(first).1 as f32).collect()
+        } else if let Some(e) = overall {
+            let mut sorted = self.loud.clone();
+            sorted.sort_by(f32::total_cmp);
+            let median = sorted.get(n / 2).copied().unwrap_or(0.0).max(0.02);
+            self.loud.iter().map(|l| (e as f32 * (l / median).powf(0.7)).clamp(1.0, 10.0)).collect()
+        } else {
+            Vec::new()
+        };
+        self
+    }
+
+    pub fn energy_at(&self, k: usize) -> Option<f32> {
+        self.energy.get(k.min(self.energy.len().saturating_sub(1))).copied().filter(|_| !self.energy.is_empty())
     }
 
     /// Bar `k` starts a 4-bar phrase line / an 8-bar phrase.
@@ -326,6 +351,26 @@ pub fn score(out: &Bars, inc: &Bars, c: &Candidate, lim: &Limits) -> (f32, Vec<S
         s += 2.5;
     } else if c.in_bar != 0 {
         notes.push(format!("starts it at bar {}", c.in_bar + 1));
+    }
+    // Energy flow: after the mix level with, or a step above, the energy before it; a drop or a
+    // big jump costs. While they overlap, the new track much hotter than the old (a peak under a
+    // quiet outro) costs too.
+    if let (Some(eb), Some(ea)) = (out.energy_at(c.out_bar.saturating_sub(1)), inc.energy_at(end_in)) {
+        let step = ea - eb;
+        if (0.0..=1.0).contains(&step) {
+            s += 1.0;
+        }
+        s -= 0.6 * (-step - 0.5).max(0.0) + 0.4 * (step - 1.5).max(0.0);
+        if step.abs() >= 1.0 {
+            notes.push(format!("energy {eb:.0} → {ea:.0}"));
+        }
+    }
+    if c.technique == Technique::Blend {
+        let hotter = (0..playing).filter(|&k| match (out.energy_at(ob(k)), inc.energy_at(c.in_bar + k)) {
+            (Some(o), Some(i)) => i > o + 1.5,
+            _ => false,
+        });
+        s -= 0.1 * hotter.count() as f32;
     }
     // Loudness: the new track after the mix shouldn't jump far from the old one before it.
     let before = out.loud.get(c.out_bar.saturating_sub(1)).copied().unwrap_or(0.0);
@@ -555,5 +600,25 @@ mod tests {
         // From bar 52 the gap lands on the old track's silence (4 bars with neither drums nor
         // bass); from 48 the old drums fill it.
         assert!(at(48) > at(52), "{} {}", at(48), at(52));
+    }
+
+    #[test]
+    fn energy_flows_up_not_down() {
+        // The old track ends at energy 6. The new one: an energy-4 break at bars 32-48, energy 7
+        // from bar 48 (cues at 0: 6, 32: 4, 48: 7).
+        let out = track(96, [&[(0, 96)], &[(0, 96)], &[], &[(0, 96)]]).with_energy(&[(0.0, 6)], None);
+        let inc = track(128, [&[(0, 128)], &[(0, 128)], &[], &[(0, 128)]]).with_energy(&[(0.0, 6), (32.0, 4), (48.0, 7)], None);
+        assert_eq!(inc.energy_at(40), Some(4.0));
+        let lim = limits(64, 64);
+        let at = |in_bar, bars| score(&out, &inc, &Candidate { out_bar: 64, in_bar, bars, technique: Technique::Blend, score: 0.0, notes: vec![] }, &lim);
+        // Ending the mix into the energy-4 break (a drop of 2) scores below ending into the energy
+        // 6 or 7 sections.
+        let (drop, _) = at(24, 16);
+        let (up, notes) = at(32, 16);
+        assert!(up > drop, "{up} {drop}");
+        assert!(notes.iter().any(|n| n.contains("energy 6 → 7")), "{notes:?}");
+        // Without cues: the overall energy shaped by loudness.
+        let plain = track(32, [&[(0, 32)]; 4]).with_energy(&[], Some(6));
+        assert_eq!(plain.energy_at(10), Some(6.0));
     }
 }

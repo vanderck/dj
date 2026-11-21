@@ -147,6 +147,9 @@ pub fn serato_timing(tags: &mut Tags, path: &Path, sample_rate: u32) {
     if let Some(g) = tags.grid.as_mut() {
         g.anchor_secs -= shift;
     }
+    if let Some(m) = tags.tempo_map.as_mut() {
+        m.shift_secs(-shift);
+    }
 }
 
 /// Mixed In Key puts its cues on phrase starts, so on downbeats. When most hot cues sit the same
@@ -264,6 +267,8 @@ pub struct Detected {
     pub cues_pending: bool,
     /// The tag grid was off the audio and corrected: (ms moved, BPM change).
     pub grid_fix: Option<(f64, f64)>,
+    /// The tempo changes through the track: it plays by a measured tempo map.
+    pub tempo_map: bool,
 }
 
 /// Decode + read tags + build waveform. Runs on a worker thread.
@@ -320,16 +325,20 @@ pub fn load(path: &Path, overrides: Option<&TrackOverrides>, match_loudness: boo
         }
     }
 
+    // A Serato grid with several markers: the tempo changes, deliberately (your own grid wins).
+    let mut tempo_map = if source == Some(GridSource::Tag) { tags.tempo_map.clone() } else { None };
     // A tag grid whose first beat isn't a downbeat: the cues say where the bars start.
     if let (Some(g), Some(GridSource::Tag | GridSource::FirstCue)) = (grid.as_mut(), source) {
-        downbeat_from_cues(g, &cues);
+        if let (Some(beats), Some(m)) = (downbeat_from_cues(g, &cues), tempo_map.as_mut()) {
+            m.shift_beats(-beats);
+        }
     }
 
     // Detection for what the tags (and saved values) do not give.
     let user_cues = overrides.is_some_and(|o| o.cues.is_some());
     let want_cues = !user_cues && (detect.prefer_detected_cues || cues.iter().all(|c| c.is_none()));
     // A grid from tags (or anchored by dj on a tagged tempo) is checked against the audio.
-    let check_grid = grid.is_some() && matches!(source, Some(GridSource::Tag | GridSource::FirstCue | GridSource::Aligned));
+    let check_grid = grid.is_some() && tempo_map.is_none() && matches!(source, Some(GridSource::Tag | GridSource::FirstCue | GridSource::Aligned));
     let need = check_grid || grid.is_none() || tags.energy.is_none() || (want_cues && detect.cues_from_mix);
     let env = need.then(|| analysis::Envelope::compute(&audio));
     if let (true, Some(g), Some(env)) = (check_grid, grid, &env) {
@@ -339,11 +348,26 @@ pub fn load(path: &Path, overrides: Option<&TrackOverrides>, match_loudness: boo
             grid = Some(fixed);
         }
     }
+    let fresh = check_grid || grid.is_none();
     if let (None, Some(env)) = (grid, &env) {
         if let Some(t) = analysis::detect_grid(env) {
             grid = Some(t.grid);
             source = Some(GridSource::Detected);
             detected.grid = true;
+        }
+    }
+    // A tempo that really changes (a live drummer, a speed-up): a map through the beats, for a
+    // grid checked or detected just now. Cues on the steady grid's beats move to the map's.
+    if let (true, true, Some(g), Some(env)) = (fresh, tempo_map.is_none(), grid, &env) {
+        if let Some(m) = analysis::tempo_map(env, &g) {
+            for c in cues.iter_mut().flatten() {
+                let b = g.beat_at(c.secs);
+                if (b - b.round()).abs() < 0.06 {
+                    c.secs = m.secs_at_beat(b.round()).max(0.0);
+                }
+            }
+            detected.tempo_map = true;
+            tempo_map = Some(m);
         }
     }
     if let (None, Some(env)) = (tags.energy, &env) {
@@ -373,7 +397,7 @@ pub fn load(path: &Path, overrides: Option<&TrackOverrides>, match_loudness: boo
         Some(l) if match_loudness => db_to_gain(((LOUDNESS_TARGET - l).clamp(-12.0, 12.0)) as f32),
         _ => 1.0,
     };
-    let track = Arc::new(Track { id: next_track_id(), audio, grid, gain, cues });
+    let track = Arc::new(Track { id: next_track_id(), audio, grid, tempo_map, gain, cues });
     Ok(LoadedTrack { path: path.to_path_buf(), track, tags, grid_source: source, waveform, detected, loudness })
 }
 

@@ -38,6 +38,68 @@ impl BeatGrid {
     }
 }
 
+/// A tempo that changes through a track (a live drummer, a speed-up, several Serato grid
+/// markers): where given beats are, in seconds, with the tempo steady between them and the end
+/// segments carried on beyond. Beat numbers are the grid's (beat 0 is a downbeat).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TempoMap {
+    /// (beat, seconds), both increasing; at least two.
+    pub points: Vec<(f64, f64)>,
+}
+
+impl TempoMap {
+    /// A map from (beat, seconds) points (sorted, duplicates dropped); `None` with fewer than two.
+    pub fn new(mut points: Vec<(f64, f64)>) -> Option<Self> {
+        points.sort_by(|a, b| a.0.total_cmp(&b.0));
+        points.dedup_by(|b, a| b.0 <= a.0 || b.1 <= a.1);
+        (points.len() >= 2).then_some(TempoMap { points })
+    }
+
+    /// The segment index (into `points`, its start) covering `x` on axis `axis` (0 beats, 1 secs).
+    fn seg(&self, x: f64, axis: usize) -> usize {
+        let p = &self.points;
+        let i = p.partition_point(|q| if axis == 0 { q.0 } else { q.1 } <= x);
+        i.saturating_sub(1).min(p.len() - 2)
+    }
+
+    pub fn secs_at_beat(&self, beat: f64) -> f64 {
+        let i = self.seg(beat, 0);
+        let ((b0, s0), (b1, s1)) = (self.points[i], self.points[i + 1]);
+        s0 + (beat - b0) * (s1 - s0) / (b1 - b0)
+    }
+
+    pub fn beat_at(&self, secs: f64) -> f64 {
+        let i = self.seg(secs, 1);
+        let ((b0, s0), (b1, s1)) = (self.points[i], self.points[i + 1]);
+        b0 + (secs - s0) * (b1 - b0) / (s1 - s0)
+    }
+
+    /// The steady grid that matches the map at `secs` (its tempo there, its beats there).
+    pub fn local(&self, secs: f64) -> BeatGrid {
+        let i = self.seg(secs, 1);
+        let ((b0, s0), (b1, s1)) = (self.points[i], self.points[i + 1]);
+        let spb = (s1 - s0) / (b1 - b0);
+        BeatGrid { bpm: 60.0 / spb, anchor_secs: s0 - b0 * spb }
+    }
+
+    /// The overall steady grid (first to last point).
+    pub fn average(&self) -> BeatGrid {
+        let ((b0, s0), (b1, s1)) = (self.points[0], self.points[self.points.len() - 1]);
+        let spb = (s1 - s0) / (b1 - b0);
+        BeatGrid { bpm: 60.0 / spb, anchor_secs: s0 - b0 * spb }
+    }
+
+    /// Every time moved by `secs`.
+    pub fn shift_secs(&mut self, secs: f64) {
+        self.points.iter_mut().for_each(|p| p.1 += secs);
+    }
+
+    /// Every beat number moved by `beats` (a new downbeat).
+    pub fn shift_beats(&mut self, beats: f64) {
+        self.points.iter_mut().for_each(|p| p.0 += beats);
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum CueKind {
     #[default]
@@ -65,6 +127,8 @@ pub struct Track {
     pub id: u64,
     pub audio: AudioData,
     pub grid: Option<BeatGrid>,
+    /// When the tempo changes through the track: the grid follows this map (see [`TempoMap`]).
+    pub tempo_map: Option<TempoMap>,
     /// Gain applied before trim (e.g. from ReplayGain tags), linear.
     pub gain: f32,
     pub cues: [Option<Cue>; NUM_HOT_CUES],
@@ -211,5 +275,27 @@ mod stem_tests {
         assert!((data.mix(0, [0.0; 2], &[1.0, 0.0, 0.0, 0.0])[0] - 1.8).abs() < 1e-3);
         // Reading past the end yields the plain mix scaled by the "other" gain.
         assert_eq!(data.mix(100, [0.5, 0.5], &[0.0, 0.0, 0.0, 1.0]), [0.5, 0.5]);
+    }
+}
+
+#[cfg(test)]
+mod tempo_map_tests {
+    use super::*;
+
+    #[test]
+    fn a_map_bends_the_grid() {
+        // 120 BPM for 64 beats, then 124 BPM.
+        let (t64, spb2) = (64.0 * 0.5, 60.0 / 124.0);
+        let m = TempoMap::new(vec![(0.0, 0.0), (64.0, t64), (128.0, t64 + 64.0 * spb2)]).unwrap();
+        assert!((m.secs_at_beat(32.0) - 16.0).abs() < 1e-9);
+        assert!((m.secs_at_beat(96.0) - (t64 + 32.0 * spb2)).abs() < 1e-9);
+        assert!((m.beat_at(t64 + 10.0 * spb2) - 74.0).abs() < 1e-9);
+        // Beyond the last point: its tempo carries on.
+        assert!((m.secs_at_beat(200.0) - (t64 + 136.0 * spb2)).abs() < 1e-9);
+        // The local grid: the tempo there, matching the map's beat there.
+        let g = m.local(t64 + 5.0);
+        assert!((g.bpm - 124.0).abs() < 1e-9);
+        assert!((g.beat_at(t64 + 5.0) - m.beat_at(t64 + 5.0)).abs() < 1e-9);
+        assert!((m.local(3.0).bpm - 120.0).abs() < 1e-9);
     }
 }

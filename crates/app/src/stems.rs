@@ -519,6 +519,7 @@ mod tests {
             id,
             audio: AudioData { sample_rate: rate, frames },
             grid: None,
+            tempo_map: None,
             gain: 1.0,
             cues: Default::default(),
         })

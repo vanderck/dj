@@ -3272,7 +3272,7 @@ mod tests {
         mix_setup(&mut e, &mut c);
         // Clashing keys with stems on both decks: Stems, only drums and bass overlapping.
         c.decks[0].info.as_mut().unwrap().tags.key = dj_library::key::Key::parse("8A");
-        c.decks[1].info.as_mut().unwrap().tags.key = dj_library::key::Key::parse("2A");
+        c.decks[1].info.as_mut().unwrap().tags.key = dj_library::key::Key::parse("10A");
         assert!(c.keys_clash(1, 0));
         let (how, why) = c.assess(1, 0, MixWhen::Now);
         assert_eq!(how, MixHow::Stems, "{why}");
@@ -3584,5 +3584,33 @@ mod tests {
         }
         assert!(c.snap.decks[1].loop_on, "waiting in a loop");
         assert!(c.automix.is_some());
+    }
+
+    #[test]
+    fn a_new_track_a_semitone_off_is_transposed_to_fit() {
+        let (mut e, mut c, _config) = core();
+        mix_setup(&mut e, &mut c);
+        // Am (8A) playing; the new track in B flat minor (3A): a semitone apart, a clash.
+        c.decks[0].info.as_mut().unwrap().tags.key = dj_library::key::Key::parse("8A");
+        c.decks[1].info.as_mut().unwrap().tags.key = dj_library::key::Key::parse("3A");
+        assert!(c.keys_clash(1, 0));
+        assert_eq!(c.key_shift(1, 0), Some(-1));
+        let plan = c.plan_best(1, 0, crate::settings::MixStyle::Auto);
+        assert_eq!(plan.transpose, -1, "{plan:?}");
+        assert!(plan.notes[0].contains("3A → 8A"), "{:?}", plan.notes);
+        c.start_mix(plan);
+        for _ in 0..5 {
+            pump(&mut e, &mut c);
+        }
+        assert_eq!(c.snap.decks[1].semitones, -1.0);
+        assert_eq!(c.deck_key(1).map(|k| k.camelot()).as_deref(), Some("8A"));
+        assert!(!c.keys_clash(1, 0));
+        // Cancelled: back to its own key.
+        c.cancel_mix();
+        pump(&mut e, &mut c);
+        assert_eq!(c.snap.decks[1].semitones, 0.0);
+        // Too far apart for a semitone (8A against 10A): no shift.
+        c.decks[1].info.as_mut().unwrap().tags.key = dj_library::key::Key::parse("10A");
+        assert_eq!(c.key_shift(1, 0), None);
     }
 }
