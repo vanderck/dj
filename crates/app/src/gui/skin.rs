@@ -227,5 +227,9 @@ pub fn set_visuals(ctx: &egui::Context) {
     v.window_stroke = Stroke::new(1.0, BORDER);
     v.window_corner_radius = CornerRadius::same(12);
     v.override_text_color = Some(TEXT);
-    ctx.set_visuals(v);
+    // dj is dark whatever the system theme: pin it, and give both themes dj's style (else a Mac
+    // in light mode gets egui's light windows and menus).
+    ctx.set_theme(egui::ThemePreference::Dark);
+    ctx.set_visuals_of(egui::Theme::Dark, v.clone());
+    ctx.set_visuals_of(egui::Theme::Light, v);
 }
