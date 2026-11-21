@@ -298,6 +298,8 @@ fn settings(ui: &mut Ui, core: &mut Core, st: &mut UiState) {
     section(ui, "STEMS");
     ui.checkbox(&mut core.settings.stems_enabled, "Separate loaded tracks into stems (drums, bass, vocals, other)");
     if core.settings.stems_enabled {
+        ui.checkbox(&mut core.settings.song_sections, "Find song sections (intro, verse, chorus, break, outro)")
+            .on_hover_text("With All-In-One, once a track's stems are ready (about a minute the first time, then kept with the stems). The auto mix uses them to leave and land on the song's real parts.");
         // HT-Demucs: best quality, offline, downloaded on request.
         let mut demucs = core.settings.stems_demucs.as_ref().map(|p| p.display().to_string()).unwrap_or_default();
         ui.horizontal(|ui| {

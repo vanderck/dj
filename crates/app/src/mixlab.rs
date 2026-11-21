@@ -88,6 +88,8 @@ fn mixlab() {
         library_folders: vec![],
         stems_demucs: Some(PathBuf::from(env("MIX_DEMUCS"))),
         stems_prepared_dir: Some(PathBuf::from(env("MIX_PREPARED"))),
+        // MIX_SECTIONS=0: without the songs' sections.
+        song_sections: std::env::var("MIX_SECTIONS").map_or(true, |v| v != "0"),
         ..Default::default()
     };
     let mut c = Core::new(ctl, SR as f32, 512, settings, Session::default());
@@ -97,7 +99,8 @@ fn mixlab() {
     }
     let t0 = Instant::now();
     let pending = |c: &Core, d: usize| c.decks[d].info.as_ref().is_none_or(|i| i.cues_pending);
-    while !(0..2).all(|d| c.snap.decks[d].loaded && c.decks[d].info.is_some() && c.snap.decks[d].stems_ready && c.decks[d].stem_wave.is_some() && !pending(&c, d)) {
+    let sections = c.settings.song_sections;
+    while !(0..2).all(|d| c.snap.decks[d].loaded && c.decks[d].info.is_some() && c.snap.decks[d].stems_ready && c.decks[d].stem_wave.is_some() && !pending(&c, d) && (!sections || c.decks[d].sections.is_some())) {
         assert!(t0.elapsed().as_secs() < 900, "decks never ready");
         pump(&mut e, &mut c, None);
         std::thread::sleep(std::time::Duration::from_millis(5));
@@ -125,8 +128,17 @@ fn mixlab() {
     let (spb_i, spb_o) = (60.0 / vi.track_bpm, 60.0 / vo.track_bpm);
     let (start_i, start_o) = (vi.position_secs - vi.beat * spb_i, vo.position_secs - vo.beat * spb_o);
     let (ii, oi) = (c.decks[1].info.as_ref().unwrap(), c.decks[0].info.as_ref().unwrap());
-    let inc = Bars::new(&ii.waveform, c.decks[1].stem_wave.as_deref(), start_i, spb_i, vi.duration_secs);
-    let outb = Bars::new(&oi.waveform, c.decks[0].stem_wave.as_deref(), start_o, spb_o, vo.duration_secs);
+    let with = |b: Bars, d: usize| match c.decks[d].sections.as_deref() {
+        Some(s) => b.with_sections(s),
+        None => b,
+    };
+    let inc = with(Bars::new(&ii.waveform, c.decks[1].stem_wave.as_deref(), start_i, spb_i, vi.duration_secs), 1);
+    let outb = with(Bars::new(&oi.waveform, c.decks[0].stem_wave.as_deref(), start_o, spb_o, vo.duration_secs), 0);
+    for d in 0..2 {
+        for s in c.decks[d].sections.iter().flat_map(|s| s.iter()) {
+            eprintln!("deck {} {:>6.1}-{:>6.1} s {}", d + 1, s.start, s.end, s.label);
+        }
+    }
     let cues = |info: &LoadedInfo| info.cues.iter().enumerate().filter_map(|(i, c)| c.as_ref().map(|c| (i, c.name.clone(), c.secs))).collect::<Vec<_>>();
     let (cues_o, cues_i) = (cues(oi), cues(ii));
     let (title_o, title_i) = (oi.tags.title.clone(), ii.tags.title.clone());

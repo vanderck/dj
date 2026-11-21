@@ -22,7 +22,11 @@ pub enum Update {
     /// No stems for this track: none prepared and no HT-Demucs model, or it failed (`error`, to
     /// report). `cues`: cue points detected from the mix instead, when the request asked for them.
     NoStems { deck: usize, track_id: u64, error: Option<String>, cues: Option<Vec<Cue>> },
+    /// The track's sections (intro, verse, chorus…), found with its stems after `Done`.
+    Sections { deck: usize, track_id: u64, sections: Arc<Vec<Section>> },
 }
+
+pub use stems_core::structure::Section;
 
 pub struct Request {
     pub deck: usize,
@@ -35,6 +39,8 @@ pub struct Request {
     /// Folder of prepared stems (from Demucs, on load or with `--prepare-stems`); checked
     /// first and never evicted.
     pub prepared: Option<PathBuf>,
+    /// Find the track's sections once its stems are ready (see `Update::Sections`).
+    pub sections: bool,
 }
 
 /// Separator id of prepared stems in cache keys: one set per track, whichever command made it.
@@ -54,6 +60,8 @@ impl StemsWorker {
     pub fn new() -> Self {
         let (jobs, job_rx) = unbounded::<Request>();
         let (tx, updates) = unbounded();
+        let tx2 = tx.clone();
+        let (section_tx, section_rx) = unbounded::<SectionJob>();
         let wanted: Arc<[AtomicU64; NUM_DECKS]> = Arc::new(std::array::from_fn(|_| AtomicU64::new(0)));
         let w = wanted.clone();
         std::thread::Builder::new()
@@ -61,10 +69,23 @@ impl StemsWorker {
             .spawn(move || {
                 let mut demucs = DemucsCache::default();
                 while let Ok(job) = job_rx.recv() {
-                    run(job, &w, &tx, &mut demucs);
+                    run(job, &w, &tx, &mut demucs, &section_tx);
                 }
             })
             .expect("spawn stems worker");
+        // Sections on their own thread, so the next deck's stems don't wait for them.
+        let (w, tx) = (wanted.clone(), tx2);
+        std::thread::Builder::new()
+            .name("sections".into())
+            .spawn(move || {
+                let mut model = StructureCache::default();
+                while let Ok(job) = section_rx.recv() {
+                    if w[job.deck].load(Ordering::Relaxed) == job.track.id {
+                        sections(&job, &tx, &mut model);
+                    }
+                }
+            })
+            .expect("spawn sections worker");
         Self { demucs_download: None, jobs, updates, wanted }
     }
 
@@ -126,7 +147,7 @@ impl StemWave {
 }
 
 /// Report finished stems, with cue points detected from them when asked for.
-fn done(job: &Request, tx: &Sender<Update>, stems: StemData, source: String) {
+fn done(job: &Request, tx: &Sender<Update>, stems: StemData, source: String) -> Arc<StemData> {
     let audio = &job.track.audio;
     let wave = Arc::new(StemWave::compute(&audio.frames, audio.sample_rate, &stems));
     let cues = match (job.detect_cues, job.track.grid) {
@@ -136,10 +157,12 @@ fn done(job: &Request, tx: &Sender<Update>, stems: StemData, source: String) {
         }
         _ => None,
     };
-    let _ = tx.send(Update::Done { deck: job.deck, track_id: job.track.id, stems: Arc::new(stems), wave, source, cues });
+    let stems = Arc::new(stems);
+    let _ = tx.send(Update::Done { deck: job.deck, track_id: job.track.id, stems: stems.clone(), wave, source, cues });
+    stems
 }
 
-fn run(job: Request, wanted: &[AtomicU64; NUM_DECKS], tx: &Sender<Update>, demucs: &mut DemucsCache) {
+fn run(job: Request, wanted: &[AtomicU64; NUM_DECKS], tx: &Sender<Update>, demucs: &mut DemucsCache, sections: &Sender<SectionJob>) {
     let (deck, id) = (job.deck, job.track.id);
     let still_wanted = || wanted[deck].load(Ordering::Relaxed) == id;
     if !still_wanted() {
@@ -147,9 +170,17 @@ fn run(job: Request, wanted: &[AtomicU64; NUM_DECKS], tx: &Sender<Update>, demuc
     }
     let audio = &job.track.audio;
     let prepared_key = content_key(&audio.frames, audio.sample_rate);
+    let threads = std::thread::available_parallelism().map(|n| n.get().saturating_sub(2).max(1)).unwrap_or(1);
+    let then_sections = |stems: Arc<StemData>| {
+        if job.sections {
+            let file = job.prepared.as_ref().map(|dir| dir.join(format!("{prepared_key:016x}.sections")));
+            let _ = sections.send(SectionJob { deck, track: job.track.clone(), stems, file, threads: (threads / 2).max(1) });
+        }
+    };
     if let Some(dir) = &job.prepared {
         if let Some(stems) = find_prepared(dir, &job.path, &audio.frames, audio.sample_rate, id) {
-            done(&job, tx, stems, "prepared stems".into());
+            let stems = done(&job, tx, stems, "prepared stems".into());
+            then_sections(stems);
             return;
         }
     }
@@ -174,18 +205,124 @@ fn run(job: Request, wanted: &[AtomicU64; NUM_DECKS], tx: &Sender<Update>, demuc
                 eprintln!("prepared stems: {e}");
             }
         }
-        done(&job, tx, stems, name);
+        done(&job, tx, stems, name)
     };
-    let threads = std::thread::available_parallelism().map(|n| n.get().saturating_sub(2).max(1)).unwrap_or(1);
     let error = match &job.demucs {
         Some(path) => match demucs.separate(path, threads, &audio.frames, audio.sample_rate, &mut progress) {
-            Ok((buffers, name)) => return deliver_prepared(buffers, name),
+            Ok((buffers, name)) => {
+                let stems = deliver_prepared(buffers, name);
+                return then_sections(stems);
+            }
             Err(OfflineError::Cancelled) => return,
             Err(e) => Some(format!("Demucs: {e}")),
         },
         None => None,
     };
     no_stems(&job, tx, error);
+}
+
+/// A track whose sections to find, with its stems.
+struct SectionJob {
+    deck: usize,
+    track: Arc<Track>,
+    stems: Arc<StemData>,
+    /// Where they are kept (next to the prepared stems).
+    file: Option<PathBuf>,
+    threads: usize,
+}
+
+/// Find a track's sections with All-In-One (kept next to its prepared stems, as they take a
+/// while), and report them.
+fn sections(job: &SectionJob, tx: &Sender<Update>, model: &mut StructureCache) {
+    let found = match job.file.as_deref().and_then(read_sections) {
+        Some(s) => s,
+        None => {
+            match model.analyze(job.threads, &job.track.audio, &job.stems) {
+                Ok(s) => {
+                    if let Some(f) = &job.file {
+                        if let Err(e) = write_sections(f, &s) {
+                            eprintln!("sections: {e}");
+                        }
+                    }
+                    s
+                }
+                Err(e) => {
+                    eprintln!("sections: {e}");
+                    return;
+                }
+            }
+        }
+    };
+    let _ = tx.send(Update::Sections { deck: job.deck, track_id: job.track.id, sections: Arc::new(found) });
+}
+
+/// Sections as text: a line per section, "start end label" (seconds).
+fn read_sections(path: &Path) -> Option<Vec<Section>> {
+    let text = fs::read_to_string(path).ok()?;
+    let mut lines = text.lines();
+    if lines.next()? != "dj-sections 1" {
+        return None;
+    }
+    lines
+        .map(|l| {
+            let mut w = l.split_whitespace();
+            let start = w.next()?.parse().ok()?;
+            let end = w.next()?.parse().ok()?;
+            let label = stems_core::structure::label(w.next()?)?;
+            Some(Section { start, end, label })
+        })
+        .collect()
+}
+
+fn write_sections(path: &Path, sections: &[Section]) -> std::io::Result<()> {
+    let mut text = String::from("dj-sections 1\n");
+    for s in sections {
+        text.push_str(&format!("{:.2} {:.2} {}\n", s.start, s.end, s.label));
+    }
+    let tmp = path.with_extension("tmp");
+    fs::write(&tmp, text)?;
+    fs::rename(&tmp, path)
+}
+
+/// The All-In-One model, loaded on first use and kept.
+#[derive(Default)]
+pub struct StructureCache {
+    #[cfg(any(feature = "stems-onnx", feature = "stems-onnx-dynamic"))]
+    loaded: Option<(usize, stems_core::structure::StructureModel)>,
+}
+
+impl StructureCache {
+    /// The sections of a track from its mix and stems.
+    #[cfg(any(feature = "stems-onnx", feature = "stems-onnx-dynamic"))]
+    pub fn analyze(&mut self, threads: usize, audio: &dj_engine::track::AudioData, stems: &StemData) -> Result<Vec<Section>, String> {
+        use stems_core::structure::{mono_44k, StructureModel};
+        if self.loaded.as_ref().is_none_or(|(t, _)| *t != threads) {
+            let options = stems_core::OnnxOptions { intra_threads: threads };
+            self.loaded = Some((threads, StructureModel::new(&options).map_err(|e| e.to_string())?));
+        }
+        let (_, model) = self.loaded.as_ref().expect("loaded above");
+        let deq = |v: Option<&[i16; 2]>| v.map_or([0.0; 2], |v| [v[0] as f32 * stems.scale, v[1] as f32 * stems.scale]);
+        let rate = audio.sample_rate;
+        let part = |k: usize| -> Vec<f32> {
+            // bass, drums, other, vocals
+            let frames = audio.frames.iter().enumerate().map(|(i, m)| match k {
+                0 => deq(stems.bass.get(i)),
+                1 => deq(stems.drums.get(i)),
+                3 => deq(stems.vocals.get(i)),
+                _ => {
+                    let (d, b, v) = (deq(stems.drums.get(i)), deq(stems.bass.get(i)), deq(stems.vocals.get(i)));
+                    [m[0] - d[0] - b[0] - v[0], m[1] - d[1] - b[1] - v[1]]
+                }
+            });
+            mono_44k(frames, rate)
+        };
+        Ok(model.analyze(part).map_err(|e| e.to_string())?.sections)
+    }
+
+    #[cfg(not(any(feature = "stems-onnx", feature = "stems-onnx-dynamic")))]
+    pub fn analyze(&mut self, _threads: usize, _audio: &dj_engine::track::AudioData, _stems: &StemData) -> Result<Vec<Section>, String> {
+        Err("built without ONNX Runtime".into())
+    }
 }
 
 /// No stems for this track: say so, with cue points from the mix when they were asked for.
@@ -544,7 +681,7 @@ mod tests {
     }
 
     fn req(track: Arc<Track>, demucs: Option<PathBuf>, detect_cues: bool, prepared: Option<PathBuf>) -> Request {
-        Request { deck: 0, track, path: PathBuf::from("/nonexistent/song.wav"), demucs, detect_cues, prepared }
+        Request { deck: 0, track, path: PathBuf::from("/nonexistent/song.wav"), demucs, detect_cues, prepared, sections: false }
     }
 
     #[test]
@@ -560,6 +697,19 @@ mod tests {
     }
 
     #[cfg(any(feature = "stems-onnx", feature = "stems-onnx-dynamic"))]
+    #[test]
+    fn sections_are_kept_as_text() {
+        let dir = std::env::temp_dir().join(format!("dj-sections-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("1.sections");
+        let s = vec![Section { start: 0.0, end: 24.5, label: "intro" }, Section { start: 24.5, end: 61.25, label: "chorus" }];
+        write_sections(&f, &s).unwrap();
+        assert_eq!(read_sections(&f), Some(s));
+        fs::write(&f, "dj-sections 1\n0 10 nonsense\n").unwrap();
+        assert_eq!(read_sections(&f), None, "unknown labels are not trusted");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn cancelled_jobs_produce_nothing() {
         let w = StemsWorker::new();
@@ -592,6 +742,7 @@ mod tests {
         let t = track(61, 1.0);
         let req = |track, demucs: Option<PathBuf>| Request {
             deck: 2,
+            sections: false,
             track,
             path: dir.join("song.wav"),
             demucs,

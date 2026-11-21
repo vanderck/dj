@@ -113,6 +113,9 @@ pub struct Settings {
     /// Where prepared stems (Demucs, `--prepare-stems`) are kept; never cleaned up
     /// automatically. `None` = `stems-prepared` in the config folder.
     pub stems_prepared_dir: Option<PathBuf>,
+    /// Find each track's sections (intro, verse, chorus, break, outro) from its stems with
+    /// All-In-One, for the auto mix and the waveform.
+    pub song_sections: bool,
     /// Mixing happens on an external (hardware) mixer: every deck goes to its own output pair,
     /// dj's volume / trim / EQ / filter and the mixer section are bypassed and hidden.
     pub external_mixer: bool,
@@ -204,6 +207,7 @@ impl Default for Settings {
             stems_enabled: true,
             stems_demucs: None,
             stems_prepared_dir: None,
+            song_sections: true,
             external_mixer: false,
             layout: LayoutMode::Auto,
             cue_points: CuePoints::Tags,

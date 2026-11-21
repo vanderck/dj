@@ -34,6 +34,10 @@ pub struct Bars {
     pub phrase: usize,
     /// Energy (1–10) per bar, when known (see [`Bars::with_energy`]).
     pub energy: Vec<f32>,
+    /// The song's sections from All-In-One, when found (see [`Bars::with_sections`]): the label
+    /// of each bar ("intro", "verse", "chorus", "break", "outro"…), and the bars where one starts.
+    pub labels: Vec<&'static str>,
+    pub section_starts: Vec<usize>,
     /// Sections, worked out once (see [`Bars::finished`]).
     drop_bars: Vec<usize>,
     intro: usize,
@@ -161,6 +165,29 @@ impl Bars {
         self
     }
 
+    /// With the song's sections (seconds; see `stems_core::structure`): each bar takes the label
+    /// of the section it is mostly in, and every section starts on its nearest bar line.
+    pub fn with_sections(mut self, sections: &[crate::stems::Section]) -> Self {
+        let n = self.len();
+        let bar = |t: f64| (t - self.start) / self.bar_secs;
+        self.labels = (0..n)
+            .map(|k| sections.iter().find(|s| bar(s.start) <= k as f64 + 0.5 && k as f64 + 0.5 < bar(s.end)).map_or("", |s| s.label))
+            .collect();
+        self.section_starts = sections.iter().map(|s| bar(s.start).round()).filter(|b| *b >= 1.0 && *b < n as f64).map(|b| b as usize).collect();
+        self.section_starts.dedup();
+        self
+    }
+
+    /// The section label of bar `k` ("" when unknown).
+    pub fn label(&self, k: usize) -> &'static str {
+        self.labels.get(k).copied().unwrap_or("")
+    }
+
+    /// A section starts at bar `k`.
+    pub fn starts_section(&self, k: usize) -> bool {
+        self.section_starts.contains(&k)
+    }
+
     pub fn energy_at(&self, k: usize) -> Option<f32> {
         self.energy.get(k.min(self.energy.len().saturating_sub(1))).copied().filter(|_| !self.energy.is_empty())
     }
@@ -275,6 +302,7 @@ pub fn score(out: &Bars, inc: &Bars, c: &Candidate, lim: &Limits) -> (f32, Vec<S
     let mut good = 0.0f32;
     let mut holes = 0usize;
     let (mut out_room, mut in_room) = (0usize, 0usize);
+    let (mut peak_out, mut peak_in) = (0usize, 0usize);
     if c.technique == Technique::Blend {
         for k in 0..playing {
             let (o, i) = (ob(k), c.in_bar + k);
@@ -298,11 +326,19 @@ pub fn score(out: &Bars, inc: &Bars, c: &Candidate, lim: &Limits) -> (f32, Vec<S
                 holes += 1;
             }
             // The old track in its outro or a break, the new one in its intro: they leave room.
-            if o >= out.outro_start() || out.in_break(o) {
+            if o >= out.outro_start() || out.in_break(o) || matches!(out.label(o), "outro" | "break" | "end") {
                 out_room += 1;
             }
-            if i < inc.intro_end() {
+            if i < inc.intro_end() || matches!(inc.label(i), "intro" | "start") {
                 in_room += 1;
+            }
+            // The song's peak parts: the old chorus faded under the new track is missed, and the
+            // new chorus heard first under the old one is wasted.
+            if matches!(out.label(o), "chorus" | "solo") {
+                peak_out += 1;
+            }
+            if matches!(inc.label(i), "chorus" | "solo") {
+                peak_in += 1;
             }
         }
         // Stems keep vocals and melodies apart (each part moves on its own): a smaller cost than
@@ -313,6 +349,10 @@ pub fn score(out: &Bars, inc: &Bars, c: &Candidate, lim: &Limits) -> (f32, Vec<S
         // Bars where the old track leaves room (outro, break) or the new one is still sparse
         // (intro) fit best.
         s += 0.15 * (out_room + in_room) as f32;
+        s -= 0.15 * peak_out as f32 + 0.1 * peak_in as f32;
+        if peak_out > 0 {
+            notes.push(format!("over {peak_out} bars of the old chorus"));
+        }
         let (fo, fi) = (out_room as f32 / playing.max(1) as f32, in_room as f32 / playing.max(1) as f32);
         if vox == 0 && (0..c.bars).any(|k| inc.on(VOCALS, c.in_bar + k) || out.on(VOCALS, ob(k))) {
             notes.push("no vocals on top of each other".into());
@@ -325,6 +365,23 @@ pub fn score(out: &Bars, inc: &Bars, c: &Candidate, lim: &Limits) -> (f32, Vec<S
         if natural {
             s += 2.0;
         }
+    }
+    // The songs' sections: leave as the old one's outro or break begins (or at least at a section
+    // change), be gone as a section ends, and land the new chorus as the old track leaves.
+    if out.starts_section(c.out_bar) {
+        let what = out.label(c.out_bar);
+        s += if matches!(what, "outro" | "break") { 1.5 } else { 0.75 };
+        notes.push(format!("leaves as its {what} begins"));
+    }
+    if out.starts_section(c.out_bar + c.bars) || (c.out_bar + c.bars >= n_out && !out.labels.is_empty()) {
+        s += 0.75;
+    }
+    if inc.starts_section(c.in_bar) {
+        s += 0.5;
+    }
+    if c.technique == Technique::Blend && !drops.contains(&end_in) && inc.starts_section(end_in) && inc.label(end_in) == "chorus" {
+        s += 3.0;
+        notes.push(format!("its chorus lands as the old track leaves (bar {})", end_in + 1));
     }
     // Phrases: start and end on the old track's phrase lines; the new track from a phrase line.
     if out.line8(c.out_bar) {
@@ -396,7 +453,9 @@ pub fn search(out: &Bars, inc: &Bars, lim: &Limits) -> Vec<Candidate> {
     entries.extend(lim.drop_cue_bar);
     entries.extend(lim.in_cues.iter().copied());
     entries.push(0);
-    for d in inc.drops().iter().copied().chain([inc.intro_end()]) {
+    entries.extend(inc.section_starts.iter().copied());
+    let choruses = inc.section_starts.iter().copied().filter(|&k| inc.label(k) == "chorus");
+    for d in inc.drops().iter().copied().chain([inc.intro_end()]).chain(choruses) {
         for back in [0, 4, 8, 16] {
             if d >= back {
                 entries.push(d - back);
@@ -484,6 +543,39 @@ mod tests {
             stems: true,
             hurry: false,
         }
+    }
+
+    /// Sections for a track of 2 s bars: (first bar, label).
+    fn sections(parts: &[(usize, &'static str)], n: usize) -> Vec<crate::stems::Section> {
+        parts
+            .iter()
+            .enumerate()
+            .map(|(k, &(b, label))| crate::stems::Section { start: 2.0 * b as f64, end: 2.0 * parts.get(k + 1).map_or(n, |p| p.0) as f64, label })
+            .collect()
+    }
+
+    #[test]
+    fn the_songs_sections_say_where_to_leave_and_land() {
+        // Two songs that play everything throughout (the stems alone can't tell their parts
+        // apart), vocals in their verses and choruses.
+        let out_parts = [(0, "intro"), (16, "verse"), (32, "chorus"), (48, "verse"), (64, "chorus"), (80, "outro")];
+        let in_parts = [(0, "intro"), (16, "verse"), (32, "chorus"), (48, "verse"), (64, "chorus"), (96, "outro")];
+        let out = track(96, [&[(0, 96)], &[(0, 96)], &[(16, 80)], &[(0, 96)]]).with_sections(&sections(&out_parts, 96));
+        let inc = track(128, [&[(0, 128)], &[(0, 128)], &[(16, 96)], &[(0, 128)]]).with_sections(&sections(&in_parts, 128));
+        assert_eq!((out.label(40), out.label(80), inc.label(0)), ("chorus", "outro", "intro"));
+        assert!(out.starts_section(80) && !out.starts_section(81));
+        let best = search(&out, &inc, &limits(40, 90));
+        let b = &best[0];
+        // It starts leaving as a section of the old song begins (its last chorus: the new intro
+        // and verse ride under its chorus and outro, no vocals on top of each other) and the new
+        // chorus lands as the old song is gone.
+        assert!(out.starts_section(b.out_bar), "{b:?}");
+        assert!(b.notes.iter().any(|n| n.contains("chorus lands")), "{b:?}");
+        assert_eq!(inc.label(b.in_bar + b.bars), "chorus", "{b:?}");
+        assert!(b.notes.iter().any(|n| n.contains("no vocals on top")), "{b:?}");
+        // Without the sections it can't know where the songs' parts are.
+        let plain = search(&track(96, [&[(0, 96)], &[(0, 96)], &[(16, 80)], &[(0, 96)]]), &track(128, [&[(0, 128)], &[(0, 128)], &[(16, 96)], &[(0, 128)]]), &limits(40, 90));
+        assert!(plain[0].notes.iter().all(|n| !n.contains("chorus")), "{:?}", plain[0]);
     }
 
     #[test]

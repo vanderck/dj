@@ -76,6 +76,8 @@ pub struct DeckUi {
     pub loop_in_pending: bool,
     /// Per-stem loudness of the loaded track, for the waveform lanes (once separated).
     pub stem_wave: Option<std::sync::Arc<crate::stems::StemWave>>,
+    /// The loaded track's sections (intro, verse, chorus…), once found from its stems.
+    pub sections: Option<Arc<Vec<crate::stems::Section>>>,
     /// The loaded track as the engine has it (to request its stems again).
     pub track: Option<Arc<dj_engine::track::Track>>,
     /// Bar/beat last reported over OSC.
@@ -499,6 +501,7 @@ impl Core {
         self.decks[d].stems_source = None;
         self.decks[d].stems_missing = None;
         self.decks[d].stem_wave = None;
+        self.decks[d].sections = None;
         self.decks[d].loop_in_pending = false;
         self.decks[d].loading = Some(path.to_path_buf());
         self.decks[d].error = None;
@@ -537,6 +540,7 @@ impl Core {
             demucs: self.settings.stems_demucs.clone().filter(|p| p.exists()),
             detect_cues,
             prepared: Some(self.settings.stems_prepared_dir()),
+            sections: self.settings.song_sections && self.decks[d].sections.is_none(),
         });
     }
 
@@ -574,6 +578,7 @@ impl Core {
         self.decks[d].stems_source = None;
         self.decks[d].stems_missing = None;
         self.decks[d].stem_wave = None;
+        self.decks[d].sections = None;
         self.send(Command::Eject { deck: d as u8 });
         self.decks[d].info = None;
         self.session.decks[d].track = None;
@@ -633,6 +638,9 @@ impl Core {
                 if let Some(c) = cues {
                     self.apply_detected_cues(deck, c);
                 }
+            }
+            Update::Sections { deck, track_id, sections } if current(self, deck, track_id) => {
+                self.decks[deck].sections = Some(sections);
             }
             Update::NoStems { deck, track_id, error, cues } if current(self, deck, track_id) => {
                 self.decks[deck].stems_progress = None;
@@ -2567,7 +2575,7 @@ mod tests {
         let (engine, ctl) = create(EngineConfig { sample_rate: 48000.0, max_block: 512, max_latency: 4096 });
         // Stems from the tiny stand-in HT-Demucs model (stems-core's test data).
         let demucs = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../stems-core/tests/data/demucs_test.onnx"));
-        let settings = Settings { osc_enabled: false, vst3_enabled: false, library_folders: vec![], stems_demucs: Some(demucs), ..Default::default() };
+        let settings = Settings { osc_enabled: false, vst3_enabled: false, library_folders: vec![], stems_demucs: Some(demucs), song_sections: false, ..Default::default() };
         let mut c = Core::new(ctl, 48000.0, 512, settings, Session::default());
         c.sync_engine();
         (engine, c, guard)

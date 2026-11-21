@@ -86,6 +86,15 @@ header shows the progress until they're there.
 Without either, a track has no stems (the deck says so); Mix's Auto then uses EQ, and cue points
 are detected from the full mix.
 
+**Song sections.** Once a track has stems, dj finds its sections (intro, verse, chorus, bridge,
+break, instrumental, solo, outro) with [All-In-One](https://github.com/mir-aidj/all-in-one)
+(Kim & Nam, 2023; MIT), which listens to the four stems. Its eight trained models are built into
+dj, averaged, as ONNX (11 MB, `crates/stems-core/models/allinone.onnx`; neighbourhood attention
+rewritten in plain operations, so no custom kernels). It takes about a minute per track the
+first time; the result is kept next to the prepared stems (`<key>.sections`). The deck's
+progress strip has a notch where each section starts: hover it for the name. The auto mix uses
+them (see below). Settings → Stems → *Find song sections* turns it off.
+
 **Playing with stems**: each stem's level can be put on its channel fader (Drums / Bass / Vocals /
 Other, in the fader popup), and the popup's *Stems* group turns them all back to the plain mix. Stems are mixed where the deck reads audio, before key lock, loops, slip and hot
 cues, so there is no added latency. MIDI and OSC: `Deck/N/StemDrums` … `StemOther` (switches),
@@ -273,6 +282,12 @@ Fonts: Inter and JetBrains Mono, bundled under the SIL Open Font License (see
   each other, both tracks full at once, the old outro/break meeting the new
   intro; plus the new drop landing as the old track leaves, a natural bass
   swap, phrase lines, the loudness jump after the mix, and waiting.
+  **With the songs' sections** (above) it also knows their real parts: it
+  starts leaving as a section of the old song begins (its outro or break
+  best), is gone as one ends, comes in on a section of the new song, counts
+  the old outro and break and the new intro as room, lands the new chorus
+  as the old song leaves (like a drop), and costs bars that fade the old
+  chorus away or bury the new one under the old song.
   **How long comes from the songs:** every phrase length from 8 to 128 bars
   is tried. A bar where the two fit counts fully, two full tracks in sync
   half, a clash (vocals on vocals, melodies in clashing keys) not at all, and

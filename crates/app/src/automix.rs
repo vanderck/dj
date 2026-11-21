@@ -530,6 +530,10 @@ impl Core {
         let bars = crate::transition::Bars::new(&info.waveform, self.decks[d].stem_wave.as_deref(), start, spb, v.duration_secs)
             .with_phrase(crate::transition::phrase_offset(&cues))
             .with_energy(&energy, self.deck_energy(d));
+        let bars = match self.decks[d].sections.as_deref() {
+            Some(sections) => bars.with_sections(sections),
+            None => bars,
+        };
         (!bars.is_empty()).then_some((bars, cues))
     }
 
