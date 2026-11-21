@@ -904,13 +904,22 @@ fn mix_button(ui: &mut Ui, core: &mut Core, d: usize, rect: Rect, font: egui::Fo
                 if p.why_how.is_empty() { name.to_string() } else { format!("{name} ({})", p.why_how) }
             };
             let now_when = if now.how == crate::core::automix::MixHow::Drop { now.reason.clone() } else { format!("{:.0} bars", now.length_beats / 4.0) };
-            let options = [
-                ("Now", format!("{} · {now_when} · vocals back on their next phrase", how(&now)), now),
-                ("Best", format!("{} · in {:.0} bars · {}", how(&best), bars_away(&best), best.reason), best),
+            let mut options = vec![
+                ("Now".to_string(), format!("{} · {now_when} · vocals back on their next phrase", how(&now)), now),
+                ("Best".to_string(), format!("{} · in {:.0} bars · {}", how(&best), bars_away(&best), best.reason), best),
             ];
+            // Runners-up of the search, to choose from.
+            for alt in core.plan_alternatives(d, out, style).into_iter().take(2) {
+                let detail = format!("{} · in {:.0} bars · {}", how(&alt), bars_away(&alt), alt.reason);
+                options.push(("Also".to_string(), detail, alt));
+            }
             for (title, detail, plan) in options {
                 // What the plan follows in the music (from the stems), on a third line.
-                let notes = plan.blend.as_ref().map(|b| b.notes.iter().take(2).cloned().collect::<Vec<_>>().join(" · ")).unwrap_or_default();
+                let notes = if plan.notes.is_empty() {
+                    plan.blend.as_ref().map(|b| b.notes.iter().take(2).cloned().collect::<Vec<_>>().join(" · ")).unwrap_or_default()
+                } else {
+                    plan.notes.iter().take(3).cloned().collect::<Vec<_>>().join(" · ")
+                };
                 let h = if notes.is_empty() { 54.0 } else { 72.0 };
                 let (r, _) = ui.allocate_exact_size(Vec2::new(W, h), Sense::hover());
                 let resp = button(ui, r, "", Style::Dark, bold(15.0));

@@ -243,17 +243,32 @@ Fonts: Inter and JetBrains Mono, bundled under the SIL Open Font License (see
     With less than a minute of the playing track left, Mix mixes now (in the
     last style) without asking.
 
-  **Each mix is planned from the music** when both decks have stems: dj reads
-  both tracks' drums, bass, vocals and other bar by bar over the mix window.
-  The basses swap where the new bass comes in on its own, or where the old
-  bass stops, else halfway. Parts that come in or stop by themselves are left
-  alone; parts that are there get moved (new drums halfway to the swap, old
-  drums after it, old vocals and other by the end); with Best, the new vocals
-  wait until the old ones are gone. Best's length follows the music: 8 bars
-  when the energy steps up (2+ levels), 32 when it steps down or the new
-  intro has no bass for 16 bars, else 16. The popup shows what each plan
-  follows ("bass swaps at bar 9, where the new bass comes in"). Without stems
-  the moves follow the fixed script above.
+  **Each mix is found, not scripted.** dj reads both tracks bar by bar: the
+  level of drums, bass, vocals and other (from the stems; without stems, an
+  estimate from the low/mid/high bands) and loudness, and from those their
+  sections: intro (no bass yet), drops (bass back after 4+ bars), breaks,
+  outro. It then tries every combination of where the old track can start
+  leaving (its 4-bar lines, within 4 bars for *Now*), where the new track
+  comes in (your cue, its start, its intro end, its drops and the phrases
+  before them, its drop cue) and how long (8, 16 or 32 bars; up to ~10 s for
+  *Now*; or a cut), and scores each on what you'd hear: vocals or (clashing
+  keys) melodies on top of each other, both tracks full at once, the old
+  outro/break meeting the new intro, the new drop landing as the old track
+  leaves, a natural bass swap, phrase lines, the loudness jump after the mix,
+  and waiting. The best wins; the popup shows it and up to two different
+  alternatives, each with what it follows ("its drop lands as the old track
+  leaves (bar 32)"), and the waveform lanes mark where the mix starts, ends
+  and where the basses swap.
+
+  **Volume follows loudness, never a preset fade:** per bar, the new track
+  comes up as far as the room the old one leaves (from what both actually
+  play), and the old one closes only when little of it is left. The parts move
+  where the music says (bass swap where a bass comes in or stops, parts that
+  enter or stop by themselves left alone). **Techniques only when called
+  for:** a high-pass sweep when the old track is still full as it has to go
+  (EQ), an echo-out when it leaves mid-phrase with vocals or is cut while its
+  bass plays, a loop of the old outro when it would end before the mix does,
+  a cut on the new track's drop.
 
   The new track always starts on its own bar line: if its cue isn't on a
   downbeat, it starts a few beats early so its bars fall on the playing
