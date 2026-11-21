@@ -137,28 +137,6 @@ impl Biquad {
         self.set_coefs((1.0 + c) / 2.0, -(1.0 + c), (1.0 + c) / 2.0, 1.0 + alpha, -2.0 * c, 1.0 - alpha);
     }
 
-    pub fn set_allpass(&mut self, sr: f32, freq: f32, q: f32) {
-        let w0 = 2.0 * PI * (freq / sr).clamp(1e-5, 0.49);
-        let (s, c) = w0.sin_cos();
-        let alpha = s / (2.0 * q);
-        self.set_coefs(1.0 - alpha, -2.0 * c, 1.0 + alpha, 1.0 + alpha, -2.0 * c, 1.0 - alpha);
-    }
-
-    pub fn set_bandpass(&mut self, sr: f32, freq: f32, q: f32) {
-        let w0 = 2.0 * PI * (freq / sr).clamp(1e-5, 0.49);
-        let (s, c) = w0.sin_cos();
-        let alpha = s / (2.0 * q);
-        self.set_coefs(alpha, 0.0, -alpha, 1.0 + alpha, -2.0 * c, 1.0 - alpha);
-    }
-
-    pub fn set_peaking(&mut self, sr: f32, freq: f32, q: f32, gain_db: f32) {
-        let a = 10f32.powf(gain_db / 40.0);
-        let w0 = 2.0 * PI * (freq / sr).clamp(1e-5, 0.49);
-        let (s, c) = w0.sin_cos();
-        let alpha = s / (2.0 * q);
-        self.set_coefs(1.0 + alpha * a, -2.0 * c, 1.0 - alpha * a, 1.0 + alpha / a, -2.0 * c, 1.0 - alpha / a);
-    }
-
     pub fn reset(&mut self) {
         self.z1 = [0.0; 2];
         self.z2 = [0.0; 2];

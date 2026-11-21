@@ -152,14 +152,14 @@ pub enum Technique {
 pub struct Candidate {
     /// Bar of the old track where it starts (the mix's first bar).
     pub out_bar: usize,
-    /// Bar of the new track that plays at that moment; `None` = the user's cue (`cue_bar` below).
+    /// Bar of the new track that plays at that moment.
     pub in_bar: usize,
     pub bars: usize,
     pub technique: Technique,
     /// The old track loops its last phrase from this bar (it would end before the mix does).
     pub loop_from: Option<usize>,
     pub score: f32,
-    /// Why, for the popup.
+    /// Why (printed when the mix starts).
     pub notes: Vec<String>,
 }
 

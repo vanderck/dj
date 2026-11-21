@@ -1,4 +1,4 @@
-//! Mixer: channel strips, crossfader / vector mixing, master & cue buses.
+//! Mixer: channel strips, master & cue buses.
 //!
 //! Channel signal order (as documented in the original's §12.4):
 //! TRIM → EQ → FILTER → PRE inserts → (cue tap) → VOLUME → POST inserts → output.
@@ -139,8 +139,6 @@ pub struct Channel {
     /// Delay applied to the cue tap for the same reason.
     pub cue_delay: DelayLine,
     cue_buf: Vec<Frame>,
-    /// Crossfader / vector-mixer gain applied on top of the volume.
-    pub mix_gain: Smoother,
     pub ext_stages: ExtStages,
 }
 
@@ -172,7 +170,6 @@ impl Channel {
             comp_delay: DelayLine::new(max_latency),
             cue_delay: DelayLine::new(max_latency),
             cue_buf: vec![[0.0; 2]; max_block],
-            mix_gain: Smoother::new(1.0, 10.0, sr),
             ext_stages: ExtStages::default(),
         };
         c.update_filter(true);
@@ -313,7 +310,7 @@ impl Channel {
         };
 
         for f in buf.iter_mut() {
-            let g = self.vol.next() * self.mix_gain.next();
+            let g = self.vol.next();
             f[0] *= g;
             f[1] *= g;
         }
@@ -325,65 +322,6 @@ impl Channel {
             Some(&self.cue_buf[..buf.len()])
         } else {
             None
-        }
-    }
-}
-
-/// How channel levels are blended on top of the volume dials.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, Default)]
-pub enum MixMode {
-    #[default]
-    Off,
-    /// Classic crossfader. `pos` −1 = A, +1 = B.
-    Crossfader { pos: f32, sharp: bool },
-    /// Triangle pad for three channels (barycentric, equal power).
-    Delta { a: f32, b: f32, c: f32 },
-    /// XY pad blending four channels at the corners (equal power).
-    Vector { x: f32, y: f32 },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum XfAssign {
-    A,
-    B,
-    #[default]
-    Thru,
-}
-
-/// Per-channel gains from the mix mode. Channels 0..4 are the deck channels.
-pub fn mix_gains(mode: MixMode, assign: &[XfAssign; 4]) -> [f32; 4] {
-    match mode {
-        MixMode::Off => [1.0; 4],
-        MixMode::Crossfader { pos, sharp } => {
-            let t = (pos.clamp(-1.0, 1.0) + 1.0) * 0.5; // 0 = A, 1 = B
-            let (ga, gb) = if sharp {
-                ((2.0 - 2.0 * t).min(1.0), (2.0 * t).min(1.0))
-            } else {
-                // Equal power, but unity at centre so a blend doesn't dip.
-                let a = (t * std::f32::consts::FRAC_PI_2).cos();
-                let b = (t * std::f32::consts::FRAC_PI_2).sin();
-                ((a * std::f32::consts::SQRT_2).min(1.0), (b * std::f32::consts::SQRT_2).min(1.0))
-            };
-            let mut g = [1.0; 4];
-            for i in 0..4 {
-                g[i] = match assign[i] {
-                    XfAssign::A => ga,
-                    XfAssign::B => gb,
-                    XfAssign::Thru => 1.0,
-                };
-            }
-            g
-        }
-        MixMode::Delta { a, b, c } => {
-            let s = (a.max(0.0) + b.max(0.0) + c.max(0.0)).max(1e-6);
-            [(a.max(0.0) / s).sqrt(), (b.max(0.0) / s).sqrt(), (c.max(0.0) / s).sqrt(), 1.0]
-        }
-        MixMode::Vector { x, y } => {
-            let x = x.clamp(0.0, 1.0);
-            let y = y.clamp(0.0, 1.0);
-            // Corners: 0 top-left, 1 top-right, 2 bottom-left, 3 bottom-right.
-            let w = [(1.0 - x) * (1.0 - y), x * (1.0 - y), (1.0 - x) * y, x * y];
-            [w[0].sqrt(), w[1].sqrt(), w[2].sqrt(), w[3].sqrt()]
         }
     }
 }
@@ -435,24 +373,6 @@ mod tests {
         assert!((FaderCurve::LinearDb.gain(0.5) - db_to_gain(-30.0)).abs() < 1e-5);
         assert!((FaderCurve::ConstantPower.gain(1.0) - 1.0).abs() < 1e-6);
         assert_eq!(FaderCurve::FastCut.gain(0.2), 1.0);
-    }
-
-    #[test]
-    fn vector_mixer_is_equal_power() {
-        let g = mix_gains(MixMode::Vector { x: 0.5, y: 0.5 }, &[XfAssign::Thru; 4]);
-        let p: f32 = g.iter().map(|v| v * v).sum();
-        assert!((p - 1.0).abs() < 1e-5);
-        let g = mix_gains(MixMode::Vector { x: 0.0, y: 0.0 }, &[XfAssign::Thru; 4]);
-        assert_eq!(g, [1.0, 0.0, 0.0, 0.0]);
-    }
-
-    #[test]
-    fn crossfader_assign() {
-        let assign = [XfAssign::A, XfAssign::B, XfAssign::Thru, XfAssign::Thru];
-        let g = mix_gains(MixMode::Crossfader { pos: -1.0, sharp: false }, &assign);
-        assert!((g[0] - 1.0).abs() < 1e-5 && g[1] < 1e-5 && g[2] == 1.0);
-        let g = mix_gains(MixMode::Crossfader { pos: 0.0, sharp: false }, &assign);
-        assert!((g[0] - 1.0).abs() < 1e-5 && (g[1] - 1.0).abs() < 1e-5);
     }
 
     #[test]

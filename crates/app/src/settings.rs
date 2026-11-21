@@ -154,10 +154,6 @@ pub enum MixStyle {
     Drop,
 }
 
-impl MixStyle {
-    pub const ALL: [MixStyle; 4] = [MixStyle::Auto, MixStyle::Stems, MixStyle::Eq, MixStyle::Drop];
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum CuePadMode {
     /// Start a loop at the cue, of the deck's loop size.

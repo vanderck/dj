@@ -548,24 +548,6 @@ pub fn parse_ogg(data: &[u8], tags: &mut Tags) {
     }
 }
 
-// ------------------------------------------------------------ RIFF/WAV and AIFF
-
-pub fn parse_iff(data: &[u8], tags: &mut Tags) {
-    let riff = &data[..4] == b"RIFF";
-    let rd = |b: &[u8]| if riff { le32(b) } else { be32(b) };
-    let mut p = 12;
-    while p + 8 <= data.len() {
-        let id = &data[p..p + 4];
-        let len = rd(&data[p + 4..p + 8]) as usize;
-        p += 8;
-        let end = (p + len).min(data.len());
-        if id.eq_ignore_ascii_case(b"id3 ") {
-            parse_id3(&data[p..end], tags);
-        }
-        p = end + (len & 1);
-    }
-}
-
 // ------------------------------------------------------------ MP4
 
 fn mp4_atoms(data: &[u8]) -> impl Iterator<Item = (&[u8], &[u8])> {

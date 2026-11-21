@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use dj_engine::deck::{DeckEvent, Quantize, TempoRange};
 use dj_engine::engine::{ClockOwner, DeckCmd, DeckMode, SamplerCmd, NUM_DECKS};
 use dj_engine::fx::{InsertPos, MacroTarget, MACRO_TARGETS, MAX_SLOTS, NUM_MACROS};
-use dj_engine::mixer::{ChannelParams, ExtStages, MixMode, Output, XfAssign};
+use dj_engine::mixer::{ChannelParams, ExtStages, Output};
 use dj_engine::sampler::{LaneParams, Step, LANES, STEPS};
 use dj_engine::track::{Cue, CueKind, NUM_HOT_CUES};
 use dj_engine::{Command, Controller, Event, Garbage, Snapshot};
@@ -243,8 +243,8 @@ pub struct Core {
     pub automix: Option<automix::AutoMix>,
     /// After a Now mix: the new track's vocals coming back on its next vocal phrase.
     pub vocal_return: Option<automix::VocalReturn>,
-    /// An echo-out's insert to remove once its tail has rung out: (channel, slot, clock beat).
-    pub echo_cleanup: Option<(usize, usize, f64)>,
+    /// Echo-out inserts to remove once their tails have rung out: (channel, slot, clock beat).
+    pub echo_cleanup: Vec<(usize, usize, f64)>,
     /// MIDI pick-up: controls dj moved itself (lowercase address -> last MIDI value seen).
     pickup: HashMap<String, Option<f32>>,
     /// Each deck's loop size in beats (the loop buttons, and hot cue pads in Loop mode).
@@ -328,7 +328,7 @@ impl Core {
             dirty_since: None,
             automix: None,
             vocal_return: None,
-            echo_cleanup: None,
+            echo_cleanup: Vec::new(),
             pickup: HashMap::new(),
             loop_size,
         };
@@ -419,12 +419,10 @@ impl Core {
         self.send(Command::SetBpm(ses.bpm));
         self.send(Command::GlobalQuantize(ses.global_quantize()));
         self.apply_master();
-        self.apply_mix_mode();
         for ch in 0..NUM_DECKS {
             let c = &ses.channels[ch];
             self.send(Command::Channel { ch: ch as u8, params: self.engine_params(ch, c.params) });
             self.send(Command::FaderStart { ch: ch as u8, on: c.fader_start });
-            self.send(Command::XfAssign { ch: ch as u8, assign: c.xf_assign });
             self.restore_chain(ch, c.fx.clone());
         }
         for d in 0..NUM_DECKS {
@@ -480,15 +478,7 @@ impl Core {
         let cue_gain = if self.settings.audio.cue_enabled { m.cue_volume * m.cue_volume * 1.5 } else { 0.0 };
         self.send(Command::CueGain(cue_gain));
         self.send(Command::CueMix(m.cue_mix));
-        self.send(Command::Metronome { on: false, gain: 0.0, to_master: false }); // (no metronome)
         self.mark_dirty();
-    }
-
-    /// No crossfader or vector pad: every channel plays at its own fader (sessions saved with one
-    /// on start without it).
-    pub fn apply_mix_mode(&mut self) {
-        self.session.mix_mode = MixMode::Off;
-        self.send(Command::MixMode(MixMode::Off));
     }
 
     // ------------------------------------------------------------ tracks
@@ -1567,7 +1557,7 @@ impl Core {
             }),
             [s] if stem_level(s).is_some() => f.map(|v| DeckCmd::StemGain {
                 stem: stem_level(s).unwrap() as u8,
-                gain: (v as f32).clamp(0.0, 1.0),
+                gain: v.clamp(0.0, 1.0),
             }),
             ["acapella"] => on.and_then(|o| self.set_stems(d, if o { STEMS_ACAPELLA } else { [1.0; 4] })),
             ["instrumental"] => on.and_then(|o| self.set_stems(d, if o { STEMS_INSTRUMENTAL } else { [1.0; 4] })),
@@ -1819,13 +1809,6 @@ impl Core {
             ["output"] => {
                 if let Some(&i) = ints.first() {
                     self.set_channel(c, |p| p.output = if i <= 0 { Output::Master } else { Output::Pair((i - 1) as u8) });
-                }
-            }
-            ["xfader"] => {
-                if let Some(&i) = ints.first() {
-                    let a = [XfAssign::A, XfAssign::Thru, XfAssign::B][i.clamp(0, 2) as usize];
-                    self.session.channels[c].xf_assign = a;
-                    self.send(Command::XfAssign { ch: c as u8, assign: a });
                 }
             }
             // §7.4 routes: FX switch (1 runs inserts, 0 bypasses all) and macros.
@@ -3294,11 +3277,11 @@ mod tests {
         assert!(looped, "the old track looped");
         assert_eq!(c.session.channels[0].params.cutoff, 0.5, "filter back");
         // The echo goes once its tail has rung out (2 bars).
-        assert!(c.echo_cleanup.is_some());
+        assert!(!c.echo_cleanup.is_empty());
         for _ in 0..200 {
             pump(&mut e, &mut c);
         }
-        assert!(c.echo_cleanup.is_none());
+        assert!(c.echo_cleanup.is_empty());
         assert!(!c.session.channels[0].fx.slots.iter().flatten().any(|s| s.name == "Echo"), "echo removed");
     }
 
