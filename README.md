@@ -162,7 +162,9 @@ One screen, laid out for 1600×1000 points and fitted to the window:
 
 - **Waveform lanes** across the top for all four decks, **beat-aligned**: every
   lane uses the same pixels-per-beat, so synced decks line up vertically.
-  Played audio is dimmed; stems are drawn in their colours; bar lines, named cue
+  Heights are scaled to each track's own loud parts (about 85 % of the lane,
+  the rest in proportion), so breaks and quiet parts look quiet and silence is
+  flat. Played audio is dimmed; stems are drawn in their colours; bar lines, named cue
   flags and loops are drawn on the lane, and a progress strip with cue ticks
   sits under each. Drag a lane to scrub, scroll to zoom, click the strip to jump.
 - **Decks**: two large decks and two compact ones below (**Swap** brings a
