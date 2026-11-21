@@ -338,25 +338,11 @@ impl Core {
     /// The best transitions found by analysing both tracks (see [`crate::transition`]), best
     /// first; empty when a deck has no beat grid (then the fixed script plans the mix).
     pub fn search_plans(&self, incoming: usize, outgoing: usize, when: MixWhen, style: MixStyle) -> Vec<MixPlan> {
-        use crate::transition::{self as tr, Bars, Limits, Technique};
+        use crate::transition::{self as tr, Limits, Technique};
         let (i, o) = (&self.snap.decks[incoming], &self.snap.decks[outgoing]);
-        let (Some(ii), Some(oi)) = (self.decks[incoming].info.as_ref(), self.decks[outgoing].info.as_ref()) else { return Vec::new() };
-        if !(i.has_grid && o.has_grid) || i.track_bpm <= 0.0 || o.track_bpm <= 0.0 {
-            return Vec::new();
-        }
-        let (spb_i, spb_o) = (60.0 / i.track_bpm, 60.0 / o.track_bpm);
-        // Bar 0 of each track = its grid's beat 0 (so outgoing bar k is mix beat 4k).
-        let (start_i, start_o) = (i.position_secs - i.beat * spb_i, o.position_secs - o.beat * spb_o);
-        let (wi, wo) = (self.decks[incoming].stem_wave.as_deref(), self.decks[outgoing].stem_wave.as_deref());
-        // Cue points as bars of each track: its phrase starts.
-        let cue_bars = |v: &dj_engine::deck::DeckView, start: f64, spb: f64| v.hot_cues.iter().flatten().map(|t| (t - start) / (4.0 * spb)).collect::<Vec<f64>>();
-        let (cb_i, cb_o) = (cue_bars(i, start_i, spb_i), cue_bars(o, start_o, spb_o));
-        let inc = Bars::new(&ii.waveform, wi, start_i, spb_i, i.duration_secs).with_phrase(tr::phrase_offset(&cb_i));
-        let out = Bars::new(&oi.waveform, wo, start_o, spb_o, o.duration_secs).with_phrase(tr::phrase_offset(&cb_o));
-        if inc.is_empty() || out.is_empty() {
-            return Vec::new();
-        }
-        let stems = i.stems_ready && o.stems_ready && wi.is_some() && wo.is_some();
+        let (Some((inc, cb_i)), Some((out, _))) = (self.deck_bars(incoming), self.deck_bars(outgoing)) else { return Vec::new() };
+        let start_i = inc.start;
+        let stems = i.stems_ready && o.stems_ready && inc.stems.is_some() && out.stems.is_some();
         let clash = self.keys_clash(incoming, outgoing);
         let stretch = (i.track_bpm / o.bpm.max(1.0) - 1.0).abs() > 0.08;
         // What the style allows: Auto blends unless the keys clash without stems or the tempos
@@ -471,6 +457,72 @@ impl Core {
                 }
             })
             .collect()
+    }
+
+    /// A deck's track bar by bar (see [`crate::transition::Bars`]), with its phrases from its cue
+    /// points, and those cues as bars. Bar 0 is its grid's beat 0 (outgoing bar k is mix beat 4k).
+    pub fn deck_bars(&self, d: usize) -> Option<(crate::transition::Bars, Vec<f64>)> {
+        let v = &self.snap.decks[d];
+        let info = self.decks[d].info.as_ref()?;
+        if !v.has_grid || v.track_bpm <= 0.0 {
+            return None;
+        }
+        let spb = 60.0 / v.track_bpm;
+        let start = v.position_secs - v.beat * spb;
+        let cues: Vec<f64> = v.hot_cues.iter().flatten().map(|t| (t - start) / (4.0 * spb)).collect();
+        let bars = crate::transition::Bars::new(&info.waveform, self.decks[d].stem_wave.as_deref(), start, spb, v.duration_secs)
+            .with_phrase(crate::transition::phrase_offset(&cues));
+        (!bars.is_empty()).then_some((bars, cues))
+    }
+
+    /// With two tracks loaded and nothing playing: which order mixes clearly better (the deck to
+    /// play first, then the other), from the best transition each way.
+    pub fn mix_order_hint(&self) -> Option<(usize, usize)> {
+        use crate::transition::{self as tr, Limits};
+        let decks: Vec<usize> = (0..self.deck_count()).filter(|&d| self.snap.decks[d].loaded && self.decks[d].info.is_some()).collect();
+        if decks.len() != 2 || decks.iter().any(|&d| self.snap.decks[d].playing) {
+            return None;
+        }
+        let best = |first: usize, then: usize| -> Option<f32> {
+            let ((out, _), (inc, cb_i)) = (self.deck_bars(first)?, self.deck_bars(then)?);
+            let stems = out.stems.is_some() && inc.stems.is_some();
+            let lim = Limits {
+                earliest: 0,
+                latest: out.len(),
+                lengths: (MIN_MIX_BARS / 4..=MAX_MIX_BARS / 4).map(|k| 4 * k).collect(),
+                cue_bar: Some(0),
+                drop_cue_bar: None,
+                in_cues: cb_i.iter().filter(|b| **b >= -0.1).map(|b| b.round().max(0.0) as usize).collect(),
+                blend: true,
+                cut: false,
+                keys_clash: self.keys_clash(then, first),
+                vocals_out: false,
+                stems,
+                hurry: false,
+            };
+            tr::search(&out, &inc, &lim).first().map(|c| c.score)
+        };
+        let (a, b) = (decks[0], decks[1]);
+        let (ab, ba) = (best(a, b)?, best(b, a)?);
+        // Only a clear difference (a few bars' worth of fit).
+        if (ab - ba).abs() < 3.0 {
+            return None;
+        }
+        Some(if ab > ba { (a, b) } else { (b, a) })
+    }
+
+    /// Tell once per pair of tracks which order mixes better (see [`Core::mix_order_hint`]).
+    pub(super) fn order_hint_tick(&mut self) {
+        let ids: Vec<u64> = (0..self.deck_count()).filter(|&d| self.snap.decks[d].loaded).map(|d| self.snap.decks[d].track_id).collect();
+        let ready = (0..self.deck_count()).filter(|&d| self.snap.decks[d].loaded).all(|d| self.snap.decks[d].stems_ready || self.decks[d].stems_missing.is_some());
+        if ids.len() != 2 || !ready || self.order_hinted.as_deref() == Some(&ids[..]) {
+            return;
+        }
+        self.order_hinted = Some(ids);
+        if let Some((first, then)) = self.mix_order_hint() {
+            let title = |d: usize| self.decks[d].info.as_ref().and_then(|i| i.tags.title.clone()).unwrap_or_else(|| format!("deck {}", d + 1));
+            self.log(format!("Mix tip: play deck {} ({}) first, then deck {} ({}): they mix better that way", first + 1, title(first), then + 1, title(then)));
+        }
     }
 
     /// Mix now: a blend from the next bar line over the whole bars that fit in about 10 s; a drop
@@ -795,6 +847,7 @@ impl Core {
     /// Advance a running mix (called every tick).
     pub(super) fn automix_tick(&mut self) {
         self.vocal_return_tick();
+        self.order_hint_tick();
         let now = self.snap.clock.beat;
         let due: Vec<_> = self.echo_cleanup.iter().copied().filter(|e| now >= e.2).collect();
         self.echo_cleanup.retain(|e| now < e.2);
@@ -1332,8 +1385,9 @@ mod tests {
         assert_eq!(b.swap, 9.0, "{:?}", b.notes);
         // The old drums leave only where the new drums play (not in their gap).
         let t = b.out_at[DRUMS].unwrap();
-        for k in (t - b.out_ramp[DRUMS]) as usize..=t as usize {
-            assert!(inc[DRUMS][k] > 0.0, "old drums leave at bar {k} while the new ones are out");
+        let (a, z) = ((t - b.out_ramp[DRUMS]) as usize, t as usize);
+        for (k, v) in inc[DRUMS].iter().enumerate().take(z + 1).skip(a) {
+            assert!(*v > 0.0, "old drums leave at bar {k} while the new ones are out");
         }
         // Every ramp is a phrase or two, not most of the mix.
         for r in b.in_ramp.iter().chain(b.out_ramp.iter()) {

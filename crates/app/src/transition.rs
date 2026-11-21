@@ -248,6 +248,7 @@ pub fn score(out: &Bars, inc: &Bars, c: &Candidate, lim: &Limits) -> (f32, Vec<S
     }
     let (mut vox, mut mel) = (0, 0);
     let mut good = 0.0f32;
+    let mut holes = 0usize;
     let (mut out_room, mut in_room) = (0usize, 0usize);
     if c.technique == Technique::Blend {
         for k in 0..playing {
@@ -267,6 +268,10 @@ pub fn score(out: &Bars, inc: &Bars, c: &Candidate, lim: &Limits) -> (f32, Vec<S
             let value = if clash_here { 0.0 } else if full { 0.5 } else { 1.0 };
             let weight = if k < 16 { 0.5 } else if k < 32 { 0.3 } else { 0.15 };
             good += value * weight;
+            // A hole: neither track has drums or bass here (an outro's tail on an intro's gap).
+            if !(out.on(DRUMS, o) || inc.on(DRUMS, i)) && !(out.on(BASS, o) || inc.on(BASS, i)) {
+                holes += 1;
+            }
             // The old track in its outro or a break, the new one in its intro: they leave room.
             if o >= out.outro_start() || out.in_break(o) {
                 out_room += 1;
@@ -279,7 +284,7 @@ pub fn score(out: &Bars, inc: &Bars, c: &Candidate, lim: &Limits) -> (f32, Vec<S
         // with the EQ alone.
         let (wv, wm) = if lim.stems { (0.6, 0.4) } else { (2.0, 1.5) };
         s -= wv * vox as f32 + wm * mel as f32;
-        s += good;
+        s += good - 0.6 * holes as f32;
         // Bars where the old track leaves room (outro, break) or the new one is still sparse
         // (intro) fit best.
         s += 0.15 * (out_room + in_room) as f32;
@@ -538,5 +543,17 @@ mod tests {
         let b = &search(&out, &inc, &lim)[0];
         assert!(b.in_bar + b.bars + 64 <= 128, "half of the new track left: {b:?}");
         assert!(b.out_bar >= 64, "the old track plays most of itself first: {b:?}");
+    }
+
+    #[test]
+    fn gaps_in_both_tracks_are_not_lined_up() {
+        // The old track's drums and bass stop at bar 60; the new intro has a 4-bar gap at 8-12.
+        let out = track(96, [&[(0, 60)], &[(0, 60)], &[], &[(0, 96)]]);
+        let inc = track(96, [&[(0, 8), (12, 96)], &[(12, 96)], &[], &[(0, 96)]]);
+        let lim = limits(40, 60);
+        let at = |out_bar| score(&out, &inc, &Candidate { out_bar, in_bar: 0, bars: 16, technique: Technique::Blend, score: 0.0, notes: vec![] }, &lim).0;
+        // From bar 52 the gap lands on the old track's silence (4 bars with neither drums nor
+        // bass); from 48 the old drums fill it.
+        assert!(at(48) > at(52), "{} {}", at(48), at(52));
     }
 }

@@ -21,6 +21,9 @@ use rosc::OscType;
 
 #[path = "automix.rs"]
 pub mod automix;
+#[cfg(test)]
+#[path = "mixlab.rs"]
+mod mixlab;
 
 use crate::fxcat::{self, CatalogEntry, FxLive, ScanCache};
 use crate::model::{FxChainModel, FxSlotModel, MacroModel, Session, QUANTIZE_VALUES};
@@ -80,7 +83,7 @@ pub struct DeckUi {
 }
 
 enum LoadJob {
-    Track { deck: usize, path: PathBuf, overrides: Option<TrackOverrides>, replaygain: bool, detect: dj_library::DetectOptions },
+    Track { deck: usize, path: PathBuf, overrides: Option<TrackOverrides>, match_loudness: bool, detect: dj_library::DetectOptions },
     Sample { deck: usize, lane: usize, path: PathBuf },
 }
 
@@ -245,6 +248,8 @@ pub struct Core {
     pub vocal_return: Option<automix::VocalReturn>,
     /// Echo-out inserts to remove once their tails have rung out: (channel, slot, clock beat).
     pub echo_cleanup: Vec<(usize, usize, f64)>,
+    /// The two tracks the deck-order tip was last worked out for.
+    order_hinted: Option<Vec<u64>>,
     /// MIDI pick-up: controls dj moved itself (lowercase address -> last MIDI value seen).
     pickup: HashMap<String, Option<f32>>,
     /// Each deck's loop size in beats (the loop buttons, and hot cue pads in Loop mode).
@@ -266,9 +271,9 @@ impl Core {
                 .spawn(move || {
                     while let Ok(job) = job_rx.recv() {
                         let r = match job {
-                            LoadJob::Track { deck, path, overrides, replaygain, detect } => LoadResult::Track {
+                            LoadJob::Track { deck, path, overrides, match_loudness, detect } => LoadResult::Track {
                                 deck,
-                                result: dj_library::load(&path, overrides.as_ref(), replaygain, detect).map_err(|e| e.to_string()),
+                                result: dj_library::load(&path, overrides.as_ref(), match_loudness, detect).map_err(|e| e.to_string()),
                                 path,
                             },
                             LoadJob::Sample { deck, lane, path } => LoadResult::Sample {
@@ -329,6 +334,7 @@ impl Core {
             automix: None,
             vocal_return: None,
             echo_cleanup: Vec::new(),
+            order_hinted: None,
             pickup: HashMap::new(),
             loop_size,
         };
@@ -500,7 +506,7 @@ impl Core {
             deck: d,
             path: path.to_path_buf(),
             overrides,
-            replaygain: self.settings.use_replaygain,
+            match_loudness: self.settings.match_loudness,
             detect: dj_library::DetectOptions {
                 prefer_detected_cues: self.settings.cue_points == crate::settings::CuePoints::Detected,
                 // With stems on, cue points wait for the stems (better); otherwise from the mix.

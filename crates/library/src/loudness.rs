@@ -108,7 +108,7 @@ mod tests {
     fn silence_is_gated_out() {
         let mut a = sine(0.5, 5.0, 48000);
         let loud = integrated(&a).unwrap();
-        a.frames.extend(std::iter::repeat([0.0, 0.0]).take(48000 * 20));
+        a.frames.extend(std::iter::repeat_n([0.0, 0.0], 48000 * 20));
         assert!((integrated(&a).unwrap() - loud).abs() < 0.3, "silence doesn't pull it down");
         assert_eq!(integrated(&sine(0.0, 5.0, 48000)), None);
     }

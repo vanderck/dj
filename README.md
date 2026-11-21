@@ -59,6 +59,9 @@ folder.
 
 ```bash
 cargo test --workspace
+# Render a mix of two of your tracks with dj's own planner (WAV, analysis and timeline JSON):
+MIX_A=out.mp3 MIX_B=in.mp3 MIX_OUT=/tmp/mix MIX_DEMUCS=htdemucs.onnx MIX_PREPARED=stems-dir \
+  cargo test -p dj mixlab -- --ignored --nocapture
 ```
 
 ## Stems
@@ -106,7 +109,15 @@ dj reads, from MP3, WAV, AIFF, FLAC, Ogg/Opus and M4A files:
   option). Hot cues keep their pad number, name and colour.
 - **Beat grid**: the Serato BeatGrid if present. Otherwise the tagged BPM is
   anchored on the first cue. Only when there's no cue does dj look for
-  where the kicks fall, still using the tagged BPM.
+  where the kicks fall, still using the tagged BPM. A Serato grid can start
+  on any beat of a bar; when most hot cues sit the same number of beats into
+  dj's bars, the bars move onto them (Mixed In Key's cues are on downbeats),
+  so phrases line up in a mix. Cues written just before the first audio
+  frame start at 0:00.
+- **Loudness**: measured when a track loads (EBU R128 / BS.1770, the same
+  reading as ffmpeg's) and, with Settings → *Match loudness* (on), every
+  track is brought to −12 LUFS (within ±12 dB), so a mix doesn't jump in
+  level. Your channel trim stays yours. `dj --info FILE` shows the reading.
 
 **Tracks without tags** (fresh downloads, promos) are analysed when they load
 (`crates/library/src/analysis.rs`; keys are never guessed):
@@ -236,21 +247,24 @@ Fonts: Inter and JetBrains Mono, bundled under the SIL Open Font License (see
   level of drums, bass, vocals and other (from the stems; without stems, an
   estimate from the low/mid/high bands) and loudness, and from those their
   sections: intro (no bass yet), drops (bass back after 4+ bars), breaks,
-  outro. It then tries every combination of where the old track can start
-  leaving (its 4-bar lines, within 4 bars for *Now*), where the new track
-  comes in (your cue is a starting point, slightly preferred; its start, its
-  intro end, its drops and the phrases before them; its drop cue for a cut)
-  and how long, and scores each bar of the
+  outro, and from the cue points where the phrases start. It then tries
+  every combination of where the old track can start leaving (its phrase
+  lines, within 4 bars for *Now*), where the new track comes in (your cue is
+  a starting point, slightly preferred; its start, its cue points, its intro
+  end, its drops and the phrases before them; its drop cue for a cut) and
+  how long, and scores each bar of the
   overlap on what you'd hear: vocals or (clashing keys) melodies on top of
   each other, both tracks full at once, the old outro/break meeting the new
   intro; plus the new drop landing as the old track leaves, a natural bass
   swap, phrase lines, the loudness jump after the mix, and waiting.
   **How long comes from the songs:** every phrase length from 8 to 128 bars
-  is tried; every bar of the blend counts, more where the two fit together,
-  and only what sounds wrong counts against it (vocals on vocals, melodies in
-  clashing keys), so the mix is as long and gradual as the music lets it be.
-  Two full tracks in sync are fine; vocals on vocals without stems: a short
-  one. The waveform lanes mark where the
+  is tried. A bar where the two fit counts fully, two full tracks in sync
+  half, a clash (vocals on vocals, melodies in clashing keys) not at all, and
+  each bar a little less after 16 and 32 bars; bars where neither track has
+  drums or bass count against it. So the mix is as long as the music lets
+  it be, not everywhere. At least half of the new track (32 bars or more)
+  plays on after the mix, and with *Best* the old track plays most of
+  itself before it starts leaving. The waveform lanes mark where the
   mix starts, ends and where the basses swap, and the reasons are printed
   in the terminal.
 
@@ -259,9 +273,11 @@ Fonts: Inter and JetBrains Mono, bundled under the SIL Open Font License (see
   bar, then the mids, then the bass swap) or its stems (each part fading in
   over bars: the melody from the first bar, the drums later) bring it in.
   The old track leaves the same way, on its EQ or stems, and is nearly gone a
-  bar before the end; only then does its volume close. The parts move where
-  the music says (bass swap where a bass comes in or stops, parts that enter
-  or stop by themselves left alone). **Techniques only when called for:** a
+  bar before the end; only then does its volume close. Each part moves over
+  1 to 8 bars, spread through the mix. The bass swaps where a bass keeps
+  playing longest (the old one until it stops, the new one from its entry);
+  the old drums leave only where the new drums play, so the beat never drops
+  out; parts that enter or stop by themselves are left alone. **Techniques only when called for:** a
   high-pass sweep when the old track is still full as it has to go (EQ), an
   echo-out when it leaves mid-phrase with vocals or is cut while its bass
   plays.
@@ -269,6 +285,9 @@ Fonts: Inter and JetBrains Mono, bundled under the SIL Open Font License (see
   The new track always starts on its own bar line: if its cue isn't on a
   downbeat, it starts a few beats early so its bars fall on the playing
   track's. The tempo stays the playing track's.
+
+  With two tracks loaded and nothing playing, dj says which one to play
+  first when one order mixes clearly better (*Mix tip* in the status line).
 
   The old track stops at the end and the new one becomes the tempo master.
   Tap the button during a mix to cancel it. Controller faders that dj moved
