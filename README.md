@@ -317,18 +317,35 @@ Fonts: Inter and JetBrains Mono, bundled under the SIL Open Font License (see
   mix starts, ends and where the basses swap, and the reasons are printed
   in the terminal.
 
+  **Checked against real DJs.** The tuning follows the DJ-mix studies of Kim
+  et al. ([ISMIR 2020](https://mir-aidj.github.io/djmix-analysis/): 1,557 mixes,
+  20,765 transitions; [DAFx 2022](https://github.com/mir-aidj/djmix-dataset):
+  5,040 mixes, EQ and fader curves estimated from the audio). Real
+  transitions last 16 bars at the median (half between 8 and 26, a tenth
+  over 40) and land on whole 8-bar phrases 1.5–1.65× as often as the lengths
+  around them, so dj prefers lengths of whole phrases (it still lets the
+  music make them long: the median is a habit, not a rule). In the estimated
+  EQ curves the old track's highs and mids come down first, in steps, and its
+  bass is the last to go, late in the mix; dj's EQ mix and bass swap do the
+  same. Tempos stay close (86 % of tracks within 5 %), and only 2.5 % of tracks
+  are transposed, nearly all by one semitone, as dj's key matching does.
+
   **Gentle in, volume last out.** The new track's volume is fully up as it
   starts; its EQ (every band killed, then the highs rising from the first
   bar, then the mids, then the bass swap) or its stems (each part fading in
   over bars: the melody from the first bar, the drums later) bring it in.
   The old track leaves the same way, on its EQ or stems, and is nearly gone a
-  bar before the end; only then does its volume close. Each part moves over
+  bar before the end; only then does its volume close. On the EQ its highs and
+  mids come partly down as the new ones rise, while its bass plays on: the bass
+  is the last part of it to go. Each part moves over
   1 to 8 bars, spread through the mix; the old vocals end in a pause of the
   singer's, not mid-line, and the new vocals start with a line, fading in
   during the pause before it. The bass swaps where a bass keeps
   playing longest (the old one until it stops, the new one from its entry);
   the old drums leave only where the new drums play, so the beat never drops
-  out; parts that enter or stop by themselves are left alone. **Techniques only when called for:** a
+  out; parts that enter or stop by themselves are left alone. When the music
+  doesn't say where, the bass swaps late, on the phrase line nearest 70 % of
+  the way. **Techniques only when called for:** a
   high-pass sweep when the old track is still full as it has to go (EQ), an
   echo-out when it leaves mid-phrase with vocals or is cut while its bass
   plays.

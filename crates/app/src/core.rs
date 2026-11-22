@@ -3130,7 +3130,7 @@ mod tests {
                 }
                 before = true;
             }
-            if (ps + 0.03..0.75).contains(&p) {
+            if (ps + 0.03..(ps + 0.12).min(0.9)).contains(&p) {
                 assert_eq!((gi[1], go[1]), (1.0, 0.0), "the basses swapped where the plan says");
                 assert_eq!(c.session.channels[0].params.volume, 0.9, "the stems do the fading, not the volume");
                 assert_eq!(c.session.channels[1].params.eq[2], 0.5, "new highs in");
@@ -3259,14 +3259,25 @@ mod tests {
         c.start_mix(plan);
         assert_eq!(c.session.channels[1].params.volume, 0.0, "silent until the mix brings it in");
         let mut heard = false;
+        // How DJs stage it (the DJ-mix studies' EQ curves): the old highs come down to make room
+        // while the old bass still plays; the old bass is the last to go.
+        let (mut room, mut highs_first) = (false, true);
         run_mix(&mut e, &mut c, |c, p| {
             if (0.1..0.4).contains(&p) {
                 let b = c.snap.decks[1];
                 assert!(b.playing && b.sync && !b.loop_on, "started in sync and left its loop");
                 heard = c.session.channels[1].params.volume > 0.05;
             }
+            let old = c.session.channels[0].params.eq;
+            if old[0] == 0.5 && old[2] < 0.45 {
+                room = true;
+            }
+            if old[0] < 0.5 && !room {
+                highs_first = false;
+            }
         });
         assert!(heard);
+        assert!(room && highs_first, "the old highs make room before the old bass goes");
         assert!(!c.snap.decks[0].playing && c.snap.decks[1].playing);
         assert_eq!(c.session.channels[1].params.volume, 1.0);
         // In time: deck 2's beat lines up with the clock's.
