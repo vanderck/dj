@@ -84,6 +84,9 @@ pub struct DeckUi {
     last_beat: i64,
     /// A jog wheel nudging the playing track: until when (it stops shortly after the wheel does).
     jog_until: Option<Instant>,
+    /// You picked where this track starts (a hot cue pad or the Cue button since it loaded): a
+    /// mix brings it in from there.
+    pub cue_chosen: bool,
 }
 
 enum LoadJob {
@@ -532,6 +535,7 @@ impl Core {
         self.decks[d].stem_wave = None;
         self.decks[d].sections = None;
         self.decks[d].loop_in_pending = false;
+        self.decks[d].cue_chosen = false;
         self.decks[d].loading = Some(path.to_path_buf());
         self.decks[d].error = None;
         let _ = self.loader_tx.send(LoadJob::Track {
@@ -1627,7 +1631,12 @@ impl Core {
         let cmd: Option<DeckCmd> = match rest {
             ["playpause"] if trig => Some(DeckCmd::TogglePlay),
             ["playing"] => on.map(DeckCmd::SetPlaying),
-            ["cue"] => Some(DeckCmd::Cue(pressed)),
+            ["cue"] => {
+                if pressed {
+                    self.decks[d].cue_chosen = true;
+                }
+                Some(DeckCmd::Cue(pressed))
+            }
             ["gridstart"] if trig => Some(DeckCmd::GridStart),
             // A hot cue pad (screen, MIDI, keys): see `pad_press`.
             [c] if c.starts_with("cue") && c.len() == 4 => {
@@ -2266,6 +2275,9 @@ impl Core {
     /// size or jumps to it (Settings → Hot cue pads), the same on screen and on a controller.
     fn pad_press(&mut self, d: usize, idx: u8) -> Option<DeckCmd> {
         let set = self.snap.decks[d].hot_cues.get(idx as usize).is_some_and(|c| c.is_some());
+        if set {
+            self.decks[d].cue_chosen = true;
+        }
         // Another deck is playing: a cue comes in in time with it (tempo and beat).
         let v = self.snap.decks[d];
         let other_playing = (0..self.deck_count()).any(|o| o != d && self.snap.decks[o].playing);
@@ -3414,6 +3426,30 @@ pub(crate) mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         assert_eq!(c.mix_target(1), Some(0));
+    }
+
+    #[test]
+    fn a_mix_starts_the_new_track_from_the_cue_you_chose() {
+        let (mut e, mut c, _config) = core();
+        mix_setup(&mut e, &mut c);
+        // Hot cue 2 (16 s) pressed on the waiting deck: that's where it comes in, whatever the
+        // search would rather pick, blend or cut.
+        assert!(c.route("Deck/2/Cue2", &[OscType::Int(1)]));
+        let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        while (c.snap.decks[1].position_secs - 16.0).abs() > 0.5 && (c.snap.decks[1].loop_start_secs - 16.0).abs() > 0.01 {
+            assert!(Instant::now() < deadline, "never went to the cue");
+            pump(&mut e, &mut c);
+        }
+        assert!(c.decks[1].cue_chosen);
+        for style in [crate::settings::MixStyle::Auto, crate::settings::MixStyle::Stems, crate::settings::MixStyle::Drop] {
+            for plan in [c.plan_best(1, 0, style), c.plan_now(1, 0, style)] {
+                let from = plan.entry_secs.unwrap_or(if c.snap.decks[1].loop_on { c.snap.decks[1].loop_start_secs } else { c.snap.decks[1].position_secs });
+                assert!((from - 16.0).abs() < 0.01, "{style:?}: from {from} s: {plan:?}");
+            }
+        }
+        // A new track: nothing chosen yet.
+        c.load_track(1, &kick_wav("style-b.wav", 60));
+        assert!(!c.decks[1].cue_chosen);
     }
 
     fn run_mix(e: &mut dj_engine::Engine, c: &mut Core, mut each: impl FnMut(&Core, f64)) {
