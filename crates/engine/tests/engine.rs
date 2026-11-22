@@ -535,7 +535,59 @@ fn key_lock_does_not_delay_audio_against_the_playhead() {
     let plain = click_lag_ms(false, 0.0);
     for tempo in [0.0, 0.3, -0.3, 0.8, -0.8] {
         let locked = click_lag_ms(true, tempo);
-        assert!((locked - plain).abs() < 6.0, "key lock at tempo {tempo}: {locked:+.1} ms vs {plain:+.1} ms without");
+        assert!((locked - plain).abs() < 2.0, "key lock at tempo {tempo}: {locked:+.1} ms vs {plain:+.1} ms without");
+    }
+}
+
+/// Where the clicks are heard (output frames) while a track of irregular clicks (90–200 ms apart, so
+/// a loop doesn't repeat what follows it) plays at +10 %, loops 1½ beats for a while, halves the
+/// loop (`halve_at` blocks later), and leaves it.
+fn clicks_through_a_loop(keylock: bool, halve_at: usize) -> Vec<usize> {
+    let (mut e, mut c) = setup();
+    let sr = SR as u32;
+    let mut frames = vec![[0.0f32; 2]; sr as usize * 20];
+    let (mut at, mut k) = (0usize, 0usize);
+    while at + 64 < frames.len() {
+        frames[at..at + 64].fill([0.8, 0.8]);
+        k += 1;
+        at += sr as usize * (90 + (k * 37) % 110) / 1000;
+    }
+    let grid = Some(BeatGrid { bpm: 120.0, anchor_secs: 0.0 });
+    let track = Arc::new(Track { id: 1, audio: AudioData { sample_rate: sr, frames }, grid, tempo_map: None, gain: 1.0, cues: Default::default() });
+    send(&mut c, Command::Load { deck: 0, track, start_at_first_cue: false });
+    send(&mut c, Command::GlobalQuantize(None));
+    deck(&mut c, 0, DeckCmd::KeyLock(keylock));
+    deck(&mut c, 0, DeckCmd::Tempo(0.1));
+    deck(&mut c, 0, DeckCmd::Play);
+    let mut out = run(&mut e, SR as usize / BLOCK);
+    deck(&mut c, 0, DeckCmd::LoopBeats(1.5));
+    out.extend(run(&mut e, 2 * SR as usize / BLOCK + halve_at));
+    deck(&mut c, 0, DeckCmd::LoopScale(0.5));
+    out.extend(run(&mut e, SR as usize / BLOCK));
+    deck(&mut c, 0, DeckCmd::LoopToggle);
+    out.extend(run(&mut e, 2 * SR as usize / BLOCK));
+    let mut peaks = Vec::new();
+    for (i, f) in out.iter().enumerate() {
+        if f[0].abs() > 0.3 && peaks.last().is_none_or(|p: &usize| i > p + SR as usize / 10) {
+            peaks.push(i);
+        }
+    }
+    peaks
+}
+
+#[test]
+fn key_lock_follows_loops_in_and_out() {
+    // The stretcher reads ahead of the playhead: the clicks must still come where the plain deck
+    // plays them, through the loop and after it (none early, none missing, none doubled).
+    // Halved at every point of the loop (a loop lasts about 64 blocks): also while the
+    // stretcher has read past the new end but the playhead hasn't reached it.
+    for halve_at in (0..68).step_by(4) {
+        let (plain, locked) = (clicks_through_a_loop(false, halve_at), clicks_through_a_loop(true, halve_at));
+        assert!(plain.len() > 8, "{plain:?}");
+        assert_eq!(plain.len(), locked.len(), "halved at {halve_at}:\n{plain:?}\n{locked:?}");
+        for (p, l) in plain.iter().zip(&locked) {
+            assert!((*p as f64 - *l as f64).abs() < 0.004 * SR as f64, "halved at {halve_at}:\n{plain:?}\n{locked:?}");
+        }
     }
 }
 
