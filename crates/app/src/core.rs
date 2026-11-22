@@ -218,6 +218,8 @@ pub struct Core {
     pub vst3_scanning: bool,
     vst3_rx: Option<Receiver<ScanCache>>,
     pub library: Vec<Entry>,
+    /// Keeps the computer awake while dj runs (Settings → Decks).
+    awake: crate::awake::KeepAwake,
     /// Preparing library tracks in the background (see `prepare_tracks`).
     pub preparer: Option<crate::profile::Preparer>,
     /// Tracks whose profile is in (or not, `None`) as read from disk, by path.
@@ -322,6 +324,7 @@ impl Core {
             vst3_scanning: false,
             vst3_rx: None,
             library: Vec::new(),
+            awake: Default::default(),
             library_scanning: false,
             library_rx: None,
             browser_selected: None,
@@ -2080,7 +2083,7 @@ impl Core {
 
     // ------------------------------------------------------------ MIDI input
 
-    fn handle_midi(&mut self, msg: &[u8]) {
+    pub(crate) fn handle_midi(&mut self, msg: &[u8]) {
         if msg.is_empty() {
             return;
         }
@@ -2456,6 +2459,7 @@ impl Core {
 
     /// Poll everything; call ~60×/s from the UI or headless loop.
     pub fn tick(&mut self) {
+        self.awake.set(self.settings.keep_awake);
         self.snap = *self.ctl.snapshot();
         self.midi.set_clock(self.snap.clock.bpm);
 
@@ -2703,7 +2707,7 @@ pub fn merge_cues(old: &[Option<Cue>; NUM_HOT_CUES], mut found: Vec<Cue>, close:
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use dj_engine::{create, EngineConfig};
 
@@ -2712,7 +2716,7 @@ mod tests {
 
     /// A test's config folder (settings, prepared stems, generated audio): removed when the test
     /// ends, so runs don't pile up gigabytes in the temp folder.
-    struct TestDir {
+    pub(crate) struct TestDir {
         dir: PathBuf,
         _lock: std::sync::MutexGuard<'static, ()>,
     }
@@ -2723,7 +2727,7 @@ mod tests {
         }
     }
 
-    fn core() -> (dj_engine::Engine, Core, TestDir) {
+    pub(crate) fn core() -> (dj_engine::Engine, Core, TestDir) {
         let lock = CONFIG_DIR_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let dir = std::env::temp_dir().join(format!("dj-core-test-{}-{:?}", std::process::id(), std::thread::current().id()));
         let _ = std::fs::remove_dir_all(&dir);

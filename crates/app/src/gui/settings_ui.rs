@@ -165,6 +165,10 @@ fn settings(ui: &mut Ui, core: &mut Core, st: &mut UiState) {
     ui.checkbox(&mut core.settings.tempo_home, "After a mix, ease back to the new track's own tempo")
         .on_hover_text("A mix plays the new track at the old one's tempo. Afterwards it glides back to its own (0 %), 0.25 % a bar, too slowly to hear, so a set doesn't drift ever further from the songs' tempos (real DJs keep most tracks within 5 %). Moving its tempo fader stops it.");
     ui.checkbox(&mut core.settings.load_at_first_cue, "Load tracks at their first cue");
+    if cfg!(target_os = "macos") {
+        ui.checkbox(&mut core.settings.keep_awake, "Keep the Mac awake while dj runs")
+            .on_hover_text("No screen dimming, screen off or sleep in the middle of a set (as long as dj is open; closing the lid still sleeps).");
+    }
     ui.horizontal(|ui| {
         use crate::settings::CuePadMode;
         ui.label("Hot cue pads");

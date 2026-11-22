@@ -277,6 +277,9 @@ Fonts: Inter and JetBrains Mono, bundled under the SIL Open Font License (see
 
 ## Other features
 
+- **Awake**: on a Mac, dj keeps the screen on and the computer from sleeping while it runs
+  (the system's `caffeinate`, tied to dj: it ends when dj does). Settings → Decks → *Keep the
+  Mac awake while dj runs*; closing the lid still sleeps.
 - **Decks**: 4 decks (or 2). Key lock and transpose with
   [Signalsmith Stretch](https://signalsmith-audio.co.uk/code/stretch/) (MIT, vendored in
   `crates/signalsmith`): a phase vocoder that keeps drums tight and chords clean where a

@@ -404,7 +404,10 @@ fn midi_popup(ui: &Ui, core: &Core, st: &mut UiState) {
 
 /// The fader function and channel (0-based) an address controls, if any:
 /// `Mixer/CH2/EQ/Mid` -> (Mid, 1), `Deck/1/StemVocals` -> (Vocals, 0), `Deck/3/Tempo` -> (Tempo, 2).
+/// A mapping's fixed value (`Deck/1/StemDrums:0`) doesn't matter; the trim is the volume fader's
+/// (Ctrl-drag), the pitch fader the tempo's.
 pub fn fader_function(addr: &str) -> Option<(FaderMode, usize)> {
+    let addr = addr.split_once(':').map_or(addr, |(a, _)| a);
     let a = addr.trim_start_matches('/').to_ascii_lowercase();
     let parts: Vec<&str> = a.split('/').collect();
     let ch = |s: &str| s.parse::<usize>().ok().filter(|n| (1..=4).contains(n)).map(|n| n - 1);
@@ -412,7 +415,7 @@ pub fn fader_function(addr: &str) -> Option<(FaderMode, usize)> {
         ["mixer", c, rest @ ..] => {
             let ch = ch(c.strip_prefix("ch")?)?;
             let mode = match rest {
-                ["volume"] => FaderMode::Level,
+                ["volume"] | ["trim"] => FaderMode::Level,
                 ["eq", "high"] => FaderMode::High,
                 ["eq", "mid"] => FaderMode::Mid,
                 ["eq", "low"] => FaderMode::Low,
@@ -428,7 +431,7 @@ pub fn fader_function(addr: &str) -> Option<(FaderMode, usize)> {
                 "stembass" => FaderMode::Bass,
                 "stemvocals" => FaderMode::Vocals,
                 "stemother" => FaderMode::Other,
-                "tempo" | "temposlider" => FaderMode::Tempo,
+                "tempo" | "temposlider" | "pitch" => FaderMode::Tempo,
                 _ => return None,
             };
             Some((mode, ch))
@@ -800,6 +803,27 @@ mod tests {
     use crate::core::snap_tempo;
 
     #[test]
+    fn a_mapped_controller_switches_its_channel_fader() {
+        use crate::settings::{MapMode, MidiKind, MidiMapping, MidiSource};
+        let (_e, mut c, _config) = crate::core::tests::core();
+        let src = MidiSource { kind: MidiKind::Cc, channel: 0, number: 21 };
+        c.profile.mappings.push(MidiMapping { source: src, address: "Deck/2/StemDrumsLevel".into(), mode: MapMode::Absolute, invert: false, feedback: true });
+        c.handle_midi(&[0xb0, 21, 40]);
+        let ctx = eframe::egui::Context::default();
+        super::super::skin::install_fonts(&ctx);
+        let mut st = crate::gui::UiState::default();
+        assert_eq!(st.fader_mode[1], FaderMode::Level);
+        let mut out = ctx.run_ui(eframe::egui::RawInput::default(), |ui| {
+            let r = eframe::egui::Rect::from_min_size(eframe::egui::Pos2::ZERO, eframe::egui::Vec2::new(600.0, 500.0));
+            super::show(ui, &mut c, &mut st, r);
+        });
+        out.textures_delta.clear(); // (no GPU here to upload them to)
+        assert_eq!(st.fader_mode[1], FaderMode::Drums, "deck 2's fader now shows its drums");
+        assert_eq!(st.fader_mode[0], FaderMode::Level, "the others keep theirs");
+        assert!(st.fader_popup.is_some_and(|(m, ch, _)| m == FaderMode::Drums && ch == 1), "outlined");
+    }
+
+    #[test]
     fn midi_addresses_map_to_fader_functions() {
         assert_eq!(fader_function("Mixer/CH2/EQ/Mid"), Some((FaderMode::Mid, 1)));
         assert_eq!(fader_function("/Mixer/CH1/Volume"), Some((FaderMode::Level, 0)));
@@ -807,6 +831,9 @@ mod tests {
         assert_eq!(fader_function("Deck/1/StemVocals"), Some((FaderMode::Vocals, 0)));
         assert_eq!(fader_function("Deck/3/StemBassLevel"), Some((FaderMode::Bass, 2)));
         assert_eq!(fader_function("Deck/2/TempoSlider"), Some((FaderMode::Tempo, 1)));
+        assert_eq!(fader_function("Deck/2/Pitch"), Some((FaderMode::Tempo, 1)));
+        assert_eq!(fader_function("Mixer/CH3/Trim"), Some((FaderMode::Level, 2)), "the trim is on the volume fader");
+        assert_eq!(fader_function("Deck/1/StemDrums:0"), Some((FaderMode::Drums, 0)), "a fixed value doesn't matter");
         assert_eq!(fader_function("Deck/2/PlayPause"), None);
         assert_eq!(fader_function("Mixer/CH1/Cue"), None);
         assert_eq!(fader_function("Mixer/CH9/Volume"), None);
