@@ -2530,6 +2530,9 @@ impl Core {
                             self.decks[deck].loading = None;
                             self.decks[deck].error = Some(e.clone());
                             self.log(format!("Deck {}: {e}", deck + 1));
+                            if self.autodj.as_mut().is_some_and(|a| a.skip(&path)) {
+                                self.log(format!("Auto-DJ: skipped {} (it didn't load)", path.display()));
+                            }
                         }
                     }
                 }
@@ -2546,7 +2549,7 @@ impl Core {
                 self.library = v;
                 self.library_scanning = false;
                 self.library_rx = None;
-                let _ = crate::settings::save_json(&crate::settings::config_dir().join("library-cache.json"), &self.library);
+                let _ = crate::settings::save_json_later(&crate::settings::config_dir().join("library-cache.json"), &self.library);
                 if self.library.is_empty() && !self.settings.library_folders.is_empty() {
                     self.log("No music files found (MP3, WAV, AIFF, FLAC, Ogg, M4A) in the library folders");
                 } else {
@@ -2614,12 +2617,32 @@ impl Core {
         }
     }
 
+    /// Before quitting: everything saved, and a recording finished (its file complete).
+    pub fn prepare_to_quit(&mut self) {
+        if let Some(mut r) = self.recorder.take() {
+            self.send(Command::StopRecording);
+            if let Some(t) = r.thread.take() {
+                // (The writer finishes the WAV once the engine stops feeding it; not forever.)
+                let (tx, rx) = crossbeam_channel::bounded(1);
+                std::thread::spawn(move || {
+                    let _ = t.join();
+                    let _ = tx.send(());
+                });
+                let _ = rx.recv_timeout(std::time::Duration::from_secs(3));
+            }
+        }
+        self.stop_preparing();
+        self.save_all();
+        crate::settings::flush_writes();
+    }
+
     pub fn save_all(&mut self) {
         self.dirty_since = None;
         self.snapshot_plugin_states();
-        let _ = self.session.save();
-        let _ = self.settings.save();
-        let _ = self.trackdb.save();
+        // (Written in the background: a big track database never holds up the screen.)
+        let _ = self.session.save_later();
+        let _ = self.settings.save_later();
+        let _ = self.trackdb.save_later();
     }
 
     pub fn macro_label(&self, ch: usize, idx: usize) -> String {
@@ -2887,6 +2910,56 @@ pub(crate) mod tests {
         for t in &tracks {
             assert!(c.history.contains(t), "{} played", t.display());
         }
+    }
+
+    #[test]
+    fn auto_dj_with_a_big_crate_stays_quick_and_skips_tracks_that_dont_load() {
+        let (mut e, mut c, _config) = core();
+        let playing = kick_wav("big-crate-playing.wav", 40);
+        // A big library, all of it in the crate; the best next pick (first, a tempo like the
+        // playing track's) doesn't load.
+        let dir = playing.parent().unwrap().to_path_buf();
+        let broken = dir.join("big-crate-broken.wav");
+        std::fs::write(&broken, b"not audio").unwrap();
+        let mut library: Vec<dj_library::scan::Entry> =
+            (0..20_000).map(|k| dj_library::scan::Entry { path: dir.join(format!("folder/sub/track-{k:05}.wav")), ..Default::default() }).collect();
+        library.insert(0, dj_library::scan::Entry { path: broken.clone(), bpm: Some(120.0), ..Default::default() });
+        library.push(dj_library::scan::Entry { path: playing.clone(), bpm: Some(120.0), ..Default::default() });
+        c.library = library;
+        c.load_track(0, &playing);
+        let deadline = Instant::now() + std::time::Duration::from_secs(60);
+        while !(c.snap.decks[0].loaded && c.decks[0].info.is_some()) {
+            assert!(Instant::now() < deadline, "never loaded");
+            pump(&mut e, &mut c);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        c.deck_cmd(0, DeckCmd::Play);
+        while !c.snap.decks[0].playing {
+            assert!(Instant::now() < deadline, "never played");
+            pump(&mut e, &mut c);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        c.set_autodj(Some(c.library.iter().map(|e| e.path.clone()).collect()));
+        // Picking from 20 000 tracks: well under a frame's worth of a second, even unoptimised.
+        let t = Instant::now();
+        pump(&mut e, &mut c);
+        assert!(t.elapsed().as_millis() < 500, "a pick took {} ms", t.elapsed().as_millis());
+        assert_eq!(c.decks[1].loading.as_deref(), Some(broken.as_path()), "the best fit first");
+        // It doesn't load: skipped, and the next pick (a second later) loads another track.
+        let deadline = Instant::now() + std::time::Duration::from_secs(30);
+        while !c.status.iter().any(|(_, m)| m.contains("Auto-DJ: skipped")) {
+            assert!(Instant::now() < deadline, "never skipped: {:?}", c.status);
+            pump(&mut e, &mut c);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(c.autodj.as_ref().unwrap().played.contains(&broken));
+        let deadline = Instant::now() + std::time::Duration::from_secs(30);
+        while c.decks[1].loading.as_deref().is_none_or(|p| p == broken) {
+            assert!(Instant::now() < deadline, "never picked again: {:?}", c.status);
+            pump(&mut e, &mut c);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        c.set_autodj(None);
     }
 
     #[test]

@@ -212,7 +212,9 @@ impl App {
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        let frame = Instant::now();
         self.core.tick();
+        let tick_ms = frame.elapsed().as_millis();
         let ctx = ui.ctx().clone();
         self.autoscale(&ctx);
         self.handle_keys(&ctx);
@@ -295,15 +297,28 @@ impl eframe::App for App {
             self.core.save_all();
         }
         ctx.request_repaint_after(Duration::from_millis(16));
+        // A frame that held up the screen (the beach ball): say how long, and how much of it was
+        // dj's own work (the rest is drawing), so it can be found.
+        let ms = frame.elapsed().as_millis();
+        if ms > 250 {
+            eprintln!("slow frame: {ms} ms (dj's work {tick_ms} ms)");
+        }
     }
 
     fn save(&mut self, _storage: &mut dyn eframe::Storage) {
         self.core.save_all();
+    }
+
+    /// Quitting: save, finish a recording, and leave at once (see `quit_now`).
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.core.prepare_to_quit();
+        crate::quit_now();
     }
 }
 
 impl Drop for App {
     fn drop(&mut self) {
         self.core.save_all();
+        crate::settings::flush_writes();
     }
 }

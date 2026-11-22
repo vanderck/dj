@@ -35,6 +35,65 @@ pub fn load_json<T: DeserializeOwned + Default>(path: &Path) -> T {
     std::fs::read_to_string(path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
 }
 
+/// Files written in the background, in order (see [`save_json_later`]).
+enum WriteJob {
+    Write(PathBuf, Vec<u8>),
+    Flush(std::sync::mpsc::Sender<()>),
+}
+
+fn writer() -> std::sync::mpsc::Sender<WriteJob> {
+    static TX: std::sync::OnceLock<std::sync::Mutex<std::sync::mpsc::Sender<WriteJob>>> =
+        std::sync::OnceLock::new();
+    let tx = TX.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<WriteJob>();
+        std::thread::Builder::new()
+            .name("save".into())
+            .spawn(move || {
+                for job in rx {
+                    match job {
+                        WriteJob::Write(path, bytes) => {
+                            if let Err(e) = write_atomic(&path, &bytes) {
+                                eprintln!("saving {}: {e}", path.display());
+                            }
+                        }
+                        WriteJob::Flush(done) => {
+                            let _ = done.send(());
+                        }
+                    }
+                }
+            })
+            .expect("spawn save");
+        std::sync::Mutex::new(tx)
+    });
+    tx.lock().unwrap_or_else(|p| p.into_inner()).clone()
+}
+
+fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    if let Some(d) = path.parent() {
+        std::fs::create_dir_all(d)?;
+    }
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(tmp, path)
+}
+
+/// Save as JSON in the background (the disk never holds up the screen); in order, so the
+/// newest save of a file is the one that stays. See [`flush_writes`].
+pub fn save_json_later<T: Serialize>(path: &Path, v: &T) -> anyhow::Result<()> {
+    let bytes = serde_json::to_vec_pretty(v)?;
+    writer()
+        .send(WriteJob::Write(path.to_path_buf(), bytes))
+        .map_err(|_| anyhow::anyhow!("the save thread has stopped"))
+}
+
+/// Wait (a few seconds at most) until every background save is on disk.
+pub fn flush_writes() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    if writer().send(WriteJob::Flush(tx)).is_ok() {
+        let _ = rx.recv_timeout(std::time::Duration::from_secs(10));
+    }
+}
+
 pub fn save_json<T: Serialize>(path: &Path, v: &T) -> anyhow::Result<()> {
     if let Some(d) = path.parent() {
         std::fs::create_dir_all(d)?;
@@ -263,6 +322,11 @@ impl Settings {
     pub fn save(&self) -> anyhow::Result<()> {
         save_json(&Self::path(), self)
     }
+
+    /// Save in the background (see [`save_json_later`]).
+    pub fn save_later(&self) -> anyhow::Result<()> {
+        save_json_later(&Self::path(), self)
+    }
 }
 
 // ------------------------------------------------------------ MIDI mappings
@@ -386,6 +450,11 @@ impl TrackDb {
         save_json(&Self::path(), self)
     }
 
+    /// Save in the background (see [`save_json_later`]).
+    pub fn save_later(&self) -> anyhow::Result<()> {
+        save_json_later(&Self::path(), self)
+    }
+
     pub fn key(p: &Path) -> String {
         p.to_string_lossy().into_owned()
     }
@@ -394,6 +463,22 @@ impl TrackDb {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn background_saves_land_in_order_and_flush_waits_for_them() {
+        let dir = std::env::temp_dir().join(format!("dj-save-{}", std::process::id()));
+        let f = dir.join("x.json");
+        for n in 0..50u32 {
+            save_json_later(&f, &n).unwrap();
+        }
+        flush_writes();
+        assert_eq!(
+            std::fs::read_to_string(&f).unwrap(),
+            "49",
+            "the newest save stays"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn collective_settings_move_to_dj() {

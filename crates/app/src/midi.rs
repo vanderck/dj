@@ -35,6 +35,33 @@ pub fn list_ports() -> (Vec<String>, Vec<String>) {
     (ins, outs)
 }
 
+/// The MIDI ports, for the settings: listed in the background every couple of seconds (asking
+/// CoreMIDI opens a client, which is slow: doing it every frame stalled the screen).
+pub fn ports_cached() -> (Vec<String>, Vec<String>) {
+    struct Cache {
+        ports: (Vec<String>, Vec<String>),
+        at: Option<Instant>,
+        busy: bool,
+    }
+    static CACHE: Mutex<Cache> = Mutex::new(Cache {
+        ports: (Vec::new(), Vec::new()),
+        at: None,
+        busy: false,
+    });
+    let mut c = CACHE.lock().unwrap_or_else(|p| p.into_inner());
+    if !c.busy && c.at.is_none_or(|t| t.elapsed() > Duration::from_secs(2)) {
+        c.busy = true;
+        std::thread::spawn(|| {
+            let ports = list_ports();
+            let mut c = CACHE.lock().unwrap_or_else(|p| p.into_inner());
+            c.ports = ports;
+            c.at = Some(Instant::now());
+            c.busy = false;
+        });
+    }
+    c.ports.clone()
+}
+
 impl Midi {
     pub fn new(settings: &Settings) -> Self {
         let (tx, rx) = unbounded();

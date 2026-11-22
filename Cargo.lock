@@ -987,6 +987,7 @@ dependencies = [
  "dj-vst3",
  "eframe",
  "hound",
+ "libc",
  "midir",
  "rfd",
  "rosc",

@@ -272,7 +272,9 @@ fn settings(ui: &mut Ui, core: &mut Core, st: &mut UiState) {
     });
 
     section(ui, "MIDI");
-    let (ins, outs) = crate::midi::list_ports();
+    let (ins, outs) = crate::midi::ports_cached();
+    ui.ctx()
+        .request_repaint_after(std::time::Duration::from_millis(500));
     ui.label(RichText::new("Inputs (none ticked = all)").small());
     for p in ins {
         let mut on = core.settings.midi_inputs.contains(&p);

@@ -242,6 +242,11 @@ impl Session {
         save_json(&Self::path(), self)
     }
 
+    /// Save in the background (see `settings::save_json_later`).
+    pub fn save_later(&self) -> anyhow::Result<()> {
+        crate::settings::save_json_later(&Self::path(), self)
+    }
+
     pub fn global_quantize(&self) -> Option<f64> {
         self.quantize_on.then(|| QUANTIZE_VALUES[self.quantize.min(QUANTIZE_VALUES.len() - 1)].0)
     }
