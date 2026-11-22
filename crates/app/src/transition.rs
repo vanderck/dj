@@ -265,6 +265,8 @@ pub struct Limits {
     pub start_before: usize,
     /// The bar of the new track at its cue (where it waits), if it's on a bar line.
     pub cue_bar: Option<usize>,
+    /// You chose that cue: the new track comes in from it (every candidate starts it there).
+    pub cue_only: bool,
     /// The bar of its drop cue (a hot cue named "Drop"), to cut in on.
     pub drop_cue_bar: Option<usize>,
     /// The bars of its other cue points (phrase starts): places it can come in.
@@ -468,6 +470,7 @@ pub fn search(out: &Bars, inc: &Bars, lim: &Limits) -> Vec<Candidate> {
     // (a build), its drops (to cut in on), its intro end.
     let mut entries: Vec<usize> = Vec::new();
     entries.extend(lim.cue_bar);
+    let cue_only = lim.cue_only && lim.cue_bar.is_some();
     entries.extend(lim.drop_cue_bar);
     entries.extend(lim.in_cues.iter().copied());
     entries.push(0);
@@ -479,6 +482,9 @@ pub fn search(out: &Bars, inc: &Bars, lim: &Limits) -> Vec<Candidate> {
                 entries.push(d - back);
             }
         }
+    }
+    if cue_only {
+        entries.retain(|b| Some(*b) == lim.cue_bar);
     }
     entries.sort_unstable();
     entries.dedup();
@@ -565,6 +571,7 @@ mod tests {
             short_from: 0,
             start_before: usize::MAX,
             cue_bar: None,
+            cue_only: false,
             drop_cue_bar: None,
             in_cues: vec![],
             blend: true,
@@ -646,6 +653,21 @@ mod tests {
                 assert_ne!((a.in_bar, a.bars, a.technique), (b.in_bar, b.bars, b.technique), "alternatives differ");
             }
         }
+    }
+
+    #[test]
+    fn a_cue_you_chose_is_where_the_new_track_comes_in() {
+        // The new track's drop at bar 32 (bass from there) draws a mix to it; your cue is bar 8.
+        let out = track(96, [&[(0, 96)], &[(0, 80)], &[], &[(0, 96)]]);
+        let inc = track(128, [&[(0, 128)], &[(32, 128)], &[], &[(0, 128)]]);
+        let mut lim = limits(40, 80);
+        lim.cue_bar = Some(8);
+        let free = search(&out, &inc, &lim);
+        assert!(free.iter().any(|c| c.in_bar != 8), "otherwise it may start elsewhere");
+        lim.cue_only = true;
+        let found = search(&out, &inc, &lim);
+        assert!(!found.is_empty());
+        assert!(found.iter().all(|c| c.in_bar == 8), "{found:?}");
     }
 
     #[test]

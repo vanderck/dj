@@ -157,6 +157,7 @@ fn mixlab() {
         short_from: 0,
         start_before: usize::MAX,
         cue_bar: None,
+        cue_only: false,
         drop_cue_bar: None,
         in_cues: vec![],
         blend: true,
