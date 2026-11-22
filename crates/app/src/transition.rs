@@ -19,8 +19,9 @@ pub const OTHER: usize = 3;
 /// A part counts as playing in a bar above this level (relative to the track's peak).
 pub const PRESENT: f32 = 0.08;
 
-/// A track, bar by bar. Bar 0 starts at the grid's beat 0.
-#[derive(Clone, Debug, Default)]
+/// A track, bar by bar. Bar 0 starts at the grid's beat 0. (Kept on disk in a track's mix
+/// profile, without what is worked out from the rest: see `crate::profile`.)
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Bars {
     /// Track time of bar 0 and the length of a bar, in seconds.
     pub start: f64,
@@ -36,12 +37,17 @@ pub struct Bars {
     pub energy: Vec<f32>,
     /// The song's sections from All-In-One, when found (see [`Bars::with_sections`]): the label
     /// of each bar ("intro", "verse", "chorus", "break", "outro"…), and the bars where one starts.
+    #[serde(skip)]
     pub labels: Vec<&'static str>,
+    #[serde(skip)]
     pub section_starts: Vec<usize>,
     /// Sections, worked out once (see [`Bars::finished`]).
-    drop_bars: Vec<usize>,
-    intro: usize,
-    outro: usize,
+    #[serde(skip)]
+    pub(crate) drop_bars: Vec<usize>,
+    #[serde(skip)]
+    pub(crate) intro: usize,
+    #[serde(skip)]
+    pub(crate) outro: usize,
 }
 
 impl Bars {

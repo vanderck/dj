@@ -889,6 +889,25 @@ pub fn cues_from_sections(sections: &[(f64, &str)], grid: &BeatGrid, found: &[Cu
     cues
 }
 
+/// How to move a grid after [`check_beats`]: half a beat (on the offbeats) and whole beats (bars
+/// on the wrong beat), unless hot cues on whole beats, most of them on a bar's first beat
+/// (Mixed In Key's phrase starts), say the grid's bars are right. Returns (half, bars, cues
+/// confirm the bars); beat 0 moves `half + bars` beats later.
+pub fn grid_shift(check: &BeatCheck, beat_at: impl Fn(f64) -> f64, cues: &[Option<Cue>]) -> (f64, f64, bool) {
+    let half = if check.offbeat { 0.5 } else { 0.0 };
+    let on_beats: Vec<i64> = cues
+        .iter()
+        .flatten()
+        .filter(|c| c.kind == CueKind::Hot && c.secs > 0.1)
+        .map(|c| beat_at(c.secs) - half)
+        .filter(|b| (b - b.round()).abs() < 0.1)
+        .map(|b| b.round() as i64)
+        .collect();
+    let cues_say_bars = on_beats.len() >= 2 && on_beats.iter().filter(|b| b.rem_euclid(4) == 0).count() * 2 > on_beats.len();
+    let bars = check.bar_shift.filter(|_| !cues_say_bars).unwrap_or(0) as f64;
+    (half, bars, cues_say_bars)
+}
+
 /// How a beat grid fits the beats a model hears (All-In-One: beat times, and how surely each
 /// starts a bar).
 #[derive(Clone, Debug, PartialEq)]
