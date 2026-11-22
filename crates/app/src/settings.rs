@@ -355,6 +355,8 @@ pub enum MapMode {
     Toggle,
     /// Relative encoder (two's complement around 64); sent as a step.
     Relative,
+    /// Relative encoder centred on 64 (65 = +1, 63 = −1: Pioneer jog wheels and browse knobs).
+    RelativeCentred,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

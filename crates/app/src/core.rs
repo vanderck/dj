@@ -82,6 +82,8 @@ pub struct DeckUi {
     pub track: Option<Arc<dj_engine::track::Track>>,
     /// Bar/beat last reported over OSC.
     last_beat: i64,
+    /// A jog wheel nudging the playing track: until when (it stops shortly after the wheel does).
+    jog_until: Option<Instant>,
 }
 
 enum LoadJob {
@@ -122,7 +124,7 @@ pub fn addr_kind(addr: &str) -> Kind {
         | "wallclock" | "sync" | "record" | "quantizeon" | "bypassall" | "stemdrums" | "stembass"
         | "stemvocals" | "stemother" | "acapella" | "instrumental" => Kind::Switch,
         "cue" | "backspin" | "phaseminus" | "phaseplus" | "trigger" => Kind::Hold,
-        "beatskip" | "barskip" | "loopmovebeat" | "loopmovebar" | "pitchstep" | "bpmstep" | "browse" => Kind::Step,
+        "beatskip" | "barskip" | "loopmovebeat" | "loopmovebar" | "pitchstep" | "bpmstep" | "browse" | "jog" => Kind::Step,
         "phasebend" | "bend" => Kind::Bend,
         "quantize" | "speed" | "output" | "lane" | "pattern" => Kind::Index,
         _ if SLIP_LOOPS.iter().any(|(n, _)| n.eq_ignore_ascii_case(last)) => Kind::Hold,
@@ -239,6 +241,10 @@ pub struct Core {
     pub last_touched: Option<String>,
     /// Last address a MIDI mapping changed, and when (the mixer shows that fader function).
     pub midi_touched: Option<(String, std::time::Instant)>,
+    /// 14-bit controls (faders that send a coarse CC 0–31 and then its fine half, CC + 32): the
+    /// last coarse value per channel and CC, and whether a fine half has been seen for it.
+    cc_coarse: [[u8; 32]; 16],
+    cc_fine: [[bool; 32]; 16],
     pub status: VecDeque<(Instant, String)>,
     pub osc_in: Option<Receiver<(String, Vec<OscType>)>>,
     pub osc_out: Option<crate::osc::Sender>,
@@ -336,6 +342,8 @@ impl Core {
             learn: false,
             last_touched: None,
             midi_touched: None,
+            cc_coarse: [[0; 32]; 16],
+            cc_fine: [[false; 32]; 16],
             status: VecDeque::new(),
             osc_in: None,
             osc_out: None,
@@ -1760,6 +1768,12 @@ impl Core {
             ["phaseplus"] => Some(DeckCmd::PhaseBend(if pressed { 1.0 } else { 0.0 })),
             ["phasebend"] => f.map(|v| DeckCmd::PhaseBend(v.signum() as f64 * (v != 0.0) as i32 as f64)),
             ["phasereset"] if trig => Some(DeckCmd::PhaseReset),
+            ["jog"] => {
+                if let Some(&n) = ints.first() {
+                    self.jog(d, n);
+                }
+                None
+            }
             ["bend"] => {
                 // Tempo bend on the master deck (±2 BPM while held).
                 f.map(|v| DeckCmd::BpmBend(v.signum() as f64 * 2.0 * (v != 0.0) as i32 as f64))
@@ -2083,6 +2097,41 @@ impl Core {
 
     // ------------------------------------------------------------ MIDI input
 
+    /// Whether CC `n` (32–63) on `ch` is the fine half of a 14-bit control: CC `n - 32` is mapped
+    /// and `n` itself isn't (a controller that uses 32–63 as plain controls keeps them).
+    fn is_fine_half(&self, ch: u8, n: u8) -> bool {
+        let src = |number: u8| MidiSource { kind: MidiKind::Cc, channel: ch, number };
+        let mapped = |number: u8| self.profile.mappings.iter().any(|m| m.source == src(number));
+        self.cc_fine[ch as usize][(n - 32) as usize] || (mapped(n - 32) && !mapped(n))
+    }
+
+    /// A jog wheel turned `ticks` (relative; about 720 a turn): playing, it nudges the track
+    /// (faster or slower while the wheel turns, like a turntable's platter edge); paused, it moves
+    /// through the track, about 4 beats a turn.
+    pub fn jog(&mut self, d: usize, ticks: i32) {
+        if ticks == 0 || d >= NUM_DECKS {
+            return;
+        }
+        if self.snap.decks[d].playing {
+            if self.decks[d].jog_until.is_none() {
+                self.deck_cmd(d, DeckCmd::PhaseBend(ticks.signum() as f64));
+            }
+            self.decks[d].jog_until = Some(Instant::now() + Duration::from_millis(JOG_HOLD_MS));
+        } else {
+            self.deck_cmd(d, DeckCmd::Skip(ticks as f64 / JOG_TICKS_PER_BEAT));
+        }
+    }
+
+    /// The jog nudge ends once the wheel has stopped.
+    fn jog_tick(&mut self) {
+        for d in 0..NUM_DECKS {
+            if self.decks[d].jog_until.is_some_and(|t| Instant::now() >= t) {
+                self.decks[d].jog_until = None;
+                self.deck_cmd(d, DeckCmd::PhaseBend(0.0));
+            }
+        }
+    }
+
     pub(crate) fn handle_midi(&mut self, msg: &[u8]) {
         if msg.is_empty() {
             return;
@@ -2092,7 +2141,24 @@ impl Core {
         let (src, value) = match (status, msg.get(1), msg.get(2)) {
             (0x90, Some(&n), Some(&v)) => (MidiSource { kind: MidiKind::Note, channel: ch, number: n }, v as f32 / 127.0),
             (0x80, Some(&n), _) => (MidiSource { kind: MidiKind::Note, channel: ch, number: n }, 0.0),
-            (0xb0, Some(&n), Some(&v)) => (MidiSource { kind: MidiKind::Cc, channel: ch, number: n }, v as f32 / 127.0),
+            (0xb0, Some(&n), Some(&v)) => {
+                let (c, n7) = (ch as usize, n as usize);
+                if n7 < 32 {
+                    self.cc_coarse[c][n7] = v;
+                    if self.cc_fine[c][n7] {
+                        return; // a 14-bit control: it moves when its fine half arrives
+                    }
+                    (MidiSource { kind: MidiKind::Cc, channel: ch, number: n }, v as f32 / 127.0)
+                } else if (32..64).contains(&n7) && self.is_fine_half(ch, n) {
+                    // The fine half of a 14-bit control: the full value, on the coarse CC's mapping.
+                    let coarse = n7 - 32;
+                    self.cc_fine[c][coarse] = true;
+                    let full = ((self.cc_coarse[c][coarse] as u32) << 7 | v as u32) as f32 / 16383.0;
+                    (MidiSource { kind: MidiKind::Cc, channel: ch, number: coarse as u8 }, full)
+                } else {
+                    (MidiSource { kind: MidiKind::Cc, channel: ch, number: n }, v as f32 / 127.0)
+                }
+            }
             (0xe0, Some(&lsb), Some(&msb)) => {
                 (MidiSource { kind: MidiKind::PitchBend, channel: ch, number: 0 }, ((msb as u32) << 7 | lsb as u32) as f32 / 16383.0)
             }
@@ -2132,8 +2198,12 @@ impl Core {
                         self.route(&m.address, &[OscType::Int(!cur as i32)]);
                     }
                 }
-                (MapMode::Relative, _) => {
-                    let step = if raw < 64 { raw as i32 } else { raw as i32 - 128 };
+                (MapMode::Relative | MapMode::RelativeCentred, _) => {
+                    let step = match m.mode {
+                        MapMode::RelativeCentred => raw as i32 - 64,
+                        _ if raw < 64 => raw as i32,
+                        _ => raw as i32 - 128,
+                    };
                     if kind == Kind::Value {
                         // Relative encoder on a knob: nudge the current value.
                         let cur = self.value_state(&m.address).unwrap_or(0.5);
@@ -2585,6 +2655,7 @@ impl Core {
         for m in self.midi.poll() {
             self.handle_midi(&m);
         }
+        self.jog_tick();
 
         // VST3 latency changes and in-plugin edits.
         for ch in 0..NUM_DECKS {
@@ -2657,6 +2728,11 @@ impl Core {
         }
     }
 }
+
+/// A jog wheel: how long a nudge outlasts the last tick, and ticks per beat when moving through a
+/// paused track (Pioneer jogs send about 720 a turn: some 4 beats, like a record).
+const JOG_HOLD_MS: u64 = 80;
+const JOG_TICKS_PER_BEAT: f64 = 180.0;
 
 /// Default cue palette (cues set in Perform).
 pub const CUE_COLORS: [[u8; 3]; 8] = [
@@ -3906,6 +3982,64 @@ pub(crate) mod tests {
         assert!(c.route("Deck/1/Quantize:6", &[]));
         assert_eq!(c.session.decks[0].quantize, dj_engine::deck::Quantize::Beats(0.5));
         pump(&mut e, &mut c);
+    }
+
+    #[test]
+    fn fourteen_bit_faders_and_centred_jogs() {
+        let (mut e, mut c, _config) = core();
+        let map = |c: &mut Core, ch: u8, number: u8, address: &str, mode: MapMode| {
+            c.profile.mappings.push(MidiMapping { source: MidiSource { kind: MidiKind::Cc, channel: ch, number }, address: address.into(), mode, invert: false, feedback: false });
+        };
+        // A 14-bit fader: coarse CC 19, fine CC 51 (Pioneer style).
+        map(&mut c, 0, 19, "Mixer/CH1/Volume", MapMode::Absolute);
+        c.handle_midi(&[0xb0, 19, 64]);
+        assert!((c.session.channels[0].params.volume - 64.0 / 127.0).abs() < 1e-6, "coarse until a fine half is seen");
+        c.handle_midi(&[0xb0, 51, 0]);
+        assert!((c.session.channels[0].params.volume - 8192.0 / 16383.0).abs() < 1e-6, "{}", c.session.channels[0].params.volume);
+        // From now on the coarse half waits for its fine half (no jump in between).
+        c.handle_midi(&[0xb0, 19, 32]);
+        assert!((c.session.channels[0].params.volume - 8192.0 / 16383.0).abs() < 1e-6);
+        c.handle_midi(&[0xb0, 51, 100]);
+        assert!((c.session.channels[0].params.volume - (32.0 * 128.0 + 100.0) / 16383.0).abs() < 1e-6);
+        // CC 32–63 mapped on their own stay plain controls.
+        map(&mut c, 0, 3, "Mixer/CH2/Volume", MapMode::Absolute);
+        map(&mut c, 0, 35, "Mixer/CH3/Volume", MapMode::Absolute);
+        c.handle_midi(&[0xb0, 35, 127]);
+        assert_eq!(c.session.channels[2].params.volume, 1.0);
+
+        // A jog wheel, centred on 64: paused, it moves through the track.
+        let path = kick_wav("jog.wav", 30);
+        c.load_track(0, &path);
+        let deadline = Instant::now() + std::time::Duration::from_secs(60);
+        while !(c.snap.decks[0].loaded && c.snap.decks[0].has_grid) {
+            assert!(Instant::now() < deadline, "never loaded");
+            pump(&mut e, &mut c);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        map(&mut c, 0, 33, "Deck/1/Jog", MapMode::RelativeCentred);
+        let before = c.snap.decks[0].beat;
+        for _ in 0..90 {
+            c.handle_midi(&[0xb0, 33, 66]); // +2 ticks each
+        }
+        pump(&mut e, &mut c);
+        let moved = c.snap.decks[0].beat - before;
+        assert!((moved - 1.0).abs() < 0.05, "180 ticks: a beat forward ({moved})");
+        for _ in 0..90 {
+            c.handle_midi(&[0xb0, 33, 62]); // −2 ticks each
+        }
+        pump(&mut e, &mut c);
+        assert!((c.snap.decks[0].beat - before).abs() < 0.05, "and back");
+        // Playing: a nudge while it turns, released once it stops.
+        c.deck_cmd(0, DeckCmd::Play);
+        while !c.snap.decks[0].playing {
+            assert!(Instant::now() < deadline, "never played");
+            pump(&mut e, &mut c);
+        }
+        c.handle_midi(&[0xb0, 33, 65]);
+        assert!(c.decks[0].jog_until.is_some());
+        std::thread::sleep(std::time::Duration::from_millis(JOG_HOLD_MS + 20));
+        c.tick();
+        assert!(c.decks[0].jog_until.is_none());
     }
 
     #[test]
