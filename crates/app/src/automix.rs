@@ -488,7 +488,8 @@ impl Core {
     /// drop cue).
     fn in_start_secs(&self, incoming: usize, how: MixHow) -> f64 {
         let i = &self.snap.decks[incoming];
-        let drop = (how == MixHow::Drop)
+        // (Not when you chose where it starts.)
+        let drop = (how == MixHow::Drop && !self.decks[incoming].cue_chosen)
             .then(|| self.drop_cue(incoming))
             .flatten()
             .and_then(|c| i.hot_cues.get(c as usize).copied().flatten());
@@ -532,10 +533,13 @@ impl Core {
         let cue_secs = if i.loop_on { i.loop_start_secs } else { i.position_secs };
         let cue_bar = ((cue_secs - start_i) / inc.bar_secs).round().max(0.0) as usize;
         let first_cue = i.hot_cues.iter().flatten().copied().fold(f64::MAX, f64::min);
-        let chosen = i.loop_on || (!i.playing && cue_secs > 0.1 && (cue_secs - first_cue).abs() > 0.1);
+        // A cue you pressed (a hot cue pad or the Cue button since it loaded, even its first cue)
+        // is where it comes in, also for a cut (rather than its Drop cue).
+        let pressed = self.decks[incoming].cue_chosen;
+        let chosen = pressed || i.loop_on || (!i.playing && cue_secs > 0.1 && (cue_secs - first_cue).abs() > 0.1);
         // The new vocals wait only for the old ones (see `plan_blend`), Now or Best.
         let vocals_out = false;
-        let drop_secs = self.drop_cue(incoming).and_then(|c| i.hot_cues.get(c as usize).copied().flatten());
+        let drop_secs = self.drop_cue(incoming).filter(|_| !pressed).and_then(|c| i.hot_cues.get(c as usize).copied().flatten());
         let drop_cue_bar = drop_secs.map(|t| ((t - start_i) / inc.bar_secs).round().max(0.0) as usize);
         // Nothing quick (under 20 s, or a cut) unless the old track is almost over; a cut you
         // asked for (Drop) wherever it fits.
@@ -552,6 +556,8 @@ impl Core {
             short_from,
             start_before,
             cue_bar: chosen.then_some(cue_bar),
+            // The cue you pressed: the mix starts the new track there.
+            cue_only: pressed,
             drop_cue_bar,
             in_cues: cb_i.iter().filter(|b| **b >= -0.1).map(|b| b.round().max(0.0) as usize).collect(),
             blend,
@@ -732,6 +738,7 @@ impl Core {
             short_from,
             start_before: short_from,
             cue_bar: in_cues.first().copied().or(Some(0)),
+            cue_only: false,
             drop_cue_bar: None,
             in_cues,
             blend: true,
@@ -770,6 +777,7 @@ impl Core {
                 short_from,
                 start_before: short_from,
                 cue_bar: Some(0),
+                cue_only: false,
                 drop_cue_bar: None,
                 in_cues: cb_i.iter().filter(|b| **b >= -0.1).map(|b| b.round().max(0.0) as usize).collect(),
                 blend: true,
@@ -1400,7 +1408,8 @@ impl Core {
         }
         if !m.released && beat >= release - 0.5 {
             // A drop starts from the incoming track's drop cue.
-            let to_cue = if m.plan.how == MixHow::Drop && m.plan.entry_secs.is_none() { self.drop_cue(i) } else { None };
+            // (Unless you chose where it starts: then from there.)
+            let to_cue = if m.plan.how == MixHow::Drop && m.plan.entry_secs.is_none() && !self.decks[i].cue_chosen { self.drop_cue(i) } else { None };
             let entry = m.plan.entry_secs;
             let external = m.external;
             self.automix.as_mut().unwrap().released = true;
