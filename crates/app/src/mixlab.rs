@@ -90,6 +90,8 @@ fn mixlab() {
         stems_prepared_dir: Some(PathBuf::from(env("MIX_PREPARED"))),
         // MIX_SECTIONS=0: without the songs' sections.
         song_sections: std::env::var("MIX_SECTIONS").map_or(true, |v| v != "0"),
+        // MIX_DETECTED_CUES=1: dj's own cue points instead of the tags'.
+        cue_points: if std::env::var("MIX_DETECTED_CUES").is_ok() { crate::settings::CuePoints::Detected } else { Default::default() },
         ..Default::default()
     };
     let mut c = Core::new(ctl, SR as f32, 512, settings, Session::default());
