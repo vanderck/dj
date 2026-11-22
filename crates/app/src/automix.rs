@@ -222,9 +222,9 @@ pub struct AutoDj {
     pub tracks: Vec<std::path::PathBuf>,
     /// The same, as a set (looked up every frame).
     set: std::collections::HashSet<std::path::PathBuf>,
-    /// When it last picked a next track: it picks at most once a second (a pick ranks the
-    /// whole list).
-    picked_at: Option<std::time::Instant>,
+    /// When it last picked a next track, for which playing deck and track: it picks again for
+    /// the same at most once a second (a pick ranks the whole list).
+    picked_at: Option<(std::time::Instant, usize, u64)>,
     /// Those played (or being played, or skipped).
     pub played: std::collections::HashSet<std::path::PathBuf>,
     /// When the waiting deck's track was loaded (deck, track id, when): it waits for its stems
@@ -1374,9 +1374,9 @@ impl Core {
                 let plan = self.plan_best(q, p, MixStyle::Auto);
                 self.start_mix(plan);
             }
-            None if a.picked_at.is_some_and(|t| t.elapsed().as_secs_f32() < 1.0) => {}
+            None if a.picked_at.is_some_and(|(t, d, id)| d == p && id == self.snap.decks[p].track_id && t.elapsed().as_secs_f32() < 1.0) => {}
             None => {
-                self.autodj.as_mut().unwrap().picked_at = Some(std::time::Instant::now());
+                self.autodj.as_mut().unwrap().picked_at = Some((std::time::Instant::now(), p, self.snap.decks[p].track_id));
                 match self.autodj_next(p) {
                 Some(next) => {
                     // Silent until the mix brings it in.
