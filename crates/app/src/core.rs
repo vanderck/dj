@@ -3220,6 +3220,10 @@ pub(crate) mod tests {
             if history.last().is_none_or(|h| !h.ends_with(&state)) {
                 history.push(format!("@{:.1} {state}", c.snap.clock.beat));
             }
+            // Once the set is going, the next track loads while one still plays (not after it ended).
+            if c.autodj.as_ref().is_some_and(|a| !a.played.is_empty()) && (0..2).any(|d| c.decks[d].loading.is_some()) {
+                assert!((0..2).any(|d| c.snap.decks[d].playing), "loaded after the music stopped\n{}", history.join("\n"));
+            }
             if was_mixing && c.automix.is_none() {
                 mixes += 1;
             }
