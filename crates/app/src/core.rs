@@ -218,6 +218,10 @@ pub struct Core {
     pub vst3_scanning: bool,
     vst3_rx: Option<Receiver<ScanCache>>,
     pub library: Vec<Entry>,
+    /// Preparing library tracks in the background (see `prepare_tracks`).
+    pub preparer: Option<crate::profile::Preparer>,
+    /// Tracks whose profile is in (or not, `None`) as read from disk, by path.
+    pub profiles: HashMap<PathBuf, Option<std::sync::Arc<crate::profile::Profile>>>,
     pub library_scanning: bool,
     library_rx: Option<Receiver<Vec<Entry>>>,
     pub browser_selected: Option<usize>,
@@ -248,6 +252,8 @@ pub struct Core {
     pub automix: Option<automix::AutoMix>,
     /// After a Now mix: the new track's vocals coming back on its next vocal phrase.
     pub vocal_return: Option<automix::VocalReturn>,
+    /// A deck whose mix profile is to be saved (deck, track, since).
+    profile_due: Option<(usize, u64, Instant)>,
     /// The deck easing back to its own tempo after a mix (see `tempo_home_tick`).
     pub tempo_home: Option<automix::TempoHome>,
     /// Echo-out inserts to remove once their tails have rung out: (channel, slot, clock beat).
@@ -337,6 +343,9 @@ impl Core {
             dirty_since: None,
             automix: None,
             vocal_return: None,
+            profile_due: None,
+            preparer: None,
+            profiles: HashMap::new(),
             tempo_home: None,
             echo_cleanup: Vec::new(),
             order_hinted: None,
@@ -642,6 +651,9 @@ impl Core {
                 if let Some(c) = cues {
                     self.apply_detected_cues(deck, c);
                 }
+                if !self.settings.song_sections {
+                    self.save_profile(deck);
+                }
             }
             Update::Sections { deck, track_id, found, cues } if current(self, deck, track_id) => {
                 if !found.sections.is_empty() {
@@ -651,6 +663,8 @@ impl Core {
                 if let Some(c) = cues {
                     self.apply_detected_cues(deck, c);
                 }
+                // (After the grid check moved it, if it did: the profile is the track as played.)
+                self.save_profile_soon(deck);
             }
             Update::NoStems { deck, track_id, error, cues } if current(self, deck, track_id) => {
                 self.decks[deck].stems_progress = None;
@@ -687,19 +701,7 @@ impl Core {
         let map = track.tempo_map.clone();
         let beat_at = |t: f64| map.as_ref().map_or_else(|| grid.beat_at(t), |m| m.beat_at(t));
         let Some(check) = dj_library::analysis::check_beats(beat_at, spb, &heard) else { return };
-        // Hot cues on whole beats, most on the first beat of a bar: the bars are confirmed.
-        let half = if check.offbeat { 0.5 } else { 0.0 };
-        let on_beats: Vec<i64> = info
-            .cues
-            .iter()
-            .flatten()
-            .filter(|c| c.kind == dj_engine::track::CueKind::Hot && c.secs > 0.1)
-            .map(|c| beat_at(c.secs) - half)
-            .filter(|b| (b - b.round()).abs() < 0.1)
-            .map(|b| b.round() as i64)
-            .collect();
-        let cues_say_bars = on_beats.len() >= 2 && on_beats.iter().filter(|b| b.rem_euclid(4) == 0).count() * 2 > on_beats.len();
-        let bars = check.bar_shift.filter(|_| !cues_say_bars).unwrap_or(0) as f64;
+        let (half, bars, cues_say_bars) = dj_library::analysis::grid_shift(&check, beat_at, &info.cues);
         let mine = info.grid_source == Some(GridSource::User);
         let pct = (check.agree * 100.0).round();
         let what = match (check.offbeat, bars != 0.0) {
@@ -723,6 +725,75 @@ impl Core {
         let fixed = dj_engine::track::BeatGrid { bpm: grid.bpm, anchor_secs: grid.anchor_secs + (half + bars) * spb };
         self.deck_cmd(d, DeckCmd::SetGrid(Some(fixed)));
         self.log(format!("Deck {}: grid corrected from the beats All-In-One hears: {what}", d + 1));
+    }
+
+    /// Keep a deck's mix profile once its track is fully analysed, so it can be suggested and
+    /// mixed while it isn't loaded. (A moment later when the grid was just corrected: the engine
+    /// has it then.)
+    fn save_profile_soon(&mut self, d: usize) {
+        self.profile_due = Some((d, self.decks[d].info.as_ref().map_or(0, |i| i.track_id), Instant::now()));
+    }
+
+    fn save_profile(&mut self, d: usize) {
+        let Some(info) = self.decks[d].info.as_ref() else { return };
+        let path = info.path.clone();
+        let Some((bars, cue_bars)) = self.deck_bars(d) else { return };
+        let sections = self.decks[d].sections.as_deref().cloned().unwrap_or_default();
+        let p = crate::profile::Profile::new(&path, self.snap.decks[d].track_bpm, &bars, cue_bars, &sections);
+        if let Err(e) = crate::profile::write(&self.settings.stems_prepared_dir(), &path, &p) {
+            eprintln!("profile: {e}");
+        }
+        self.profiles.insert(path, Some(std::sync::Arc::new(p)));
+    }
+
+    /// Prepare tracks for mixing in the background: stems, sections and mix profiles (see
+    /// `profile::prepare_track`), already prepared ones skipped.
+    pub fn prepare_tracks(&mut self, paths: Vec<PathBuf>) {
+        if let Some(p) = self.preparer.take() {
+            p.stop();
+        }
+        let n = paths.len();
+        let tracks = paths.into_iter().map(|p| (p.clone(), self.trackdb.tracks.get(&TrackDb::key(&p)).cloned())).collect();
+        let demucs = self.settings.stems_demucs.clone().filter(|p| p.exists());
+        if demucs.is_none() {
+            self.log("Preparing without HT-Demucs: mix profiles only (no stems or sections). Download it in Settings → Stems.");
+        }
+        self.preparer = Some(crate::profile::Preparer::start(tracks, demucs, self.settings.stems_prepared_dir()));
+        self.log(format!("Preparing {n} tracks in the background"));
+    }
+
+    pub fn stop_preparing(&mut self) {
+        if let Some(p) = &self.preparer {
+            p.stop();
+        }
+    }
+
+    fn prepare_tick(&mut self) {
+        if let Some((d, id, at)) = self.profile_due {
+            if at.elapsed().as_millis() > 300 {
+                self.profile_due = None;
+                if self.decks[d].info.as_ref().is_some_and(|i| i.track_id == id) {
+                    self.save_profile(d);
+                }
+            }
+        }
+        let Some(st) = self.preparer.as_ref().map(|p| p.state()) else { return };
+        if st.finished {
+            self.preparer = None;
+            // Profiles read before may have changed.
+            self.profiles.clear();
+            let failed = if st.failed > 0 { format!(", {} failed (see the terminal)", st.failed) } else { String::new() };
+            self.log(format!("Prepared {} of {} tracks ({} already were){failed}", st.prepared, st.total, st.done - st.prepared - st.failed));
+        }
+    }
+
+    /// A library track's mix profile, if it has one (read from disk once).
+    pub fn profile(&mut self, path: &Path) -> Option<std::sync::Arc<crate::profile::Profile>> {
+        if !self.profiles.contains_key(path) {
+            let p = crate::profile::read(&self.settings.stems_prepared_dir(), path).map(std::sync::Arc::new);
+            self.profiles.insert(path.to_path_buf(), p);
+        }
+        self.profiles.get(path).cloned().flatten()
     }
 
     /// Save what loading detected (grid, energy, cue points from the mix) so the next load and
@@ -2519,6 +2590,7 @@ impl Core {
         }
 
         self.automix_tick();
+        self.prepare_tick();
         self.feedback_state();
         self.midi_feedback();
 
@@ -2740,6 +2812,38 @@ mod tests {
         }
         w.finalize().unwrap();
         path
+    }
+
+    #[test]
+    fn tracks_are_prepared_in_the_background() {
+        let (mut e, mut c, _config) = core();
+        let path = kick_wav("prepare-me.wav", 30);
+        c.prepare_tracks(vec![path.clone(), path.with_file_name("missing.wav")]);
+        let deadline = Instant::now() + std::time::Duration::from_secs(600);
+        while c.preparer.is_some() {
+            assert!(Instant::now() < deadline, "never finished");
+            pump(&mut e, &mut c);
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(c.status.iter().any(|(_, m)| m.contains("Prepared 1 of 2 tracks") && m.contains("1 failed")), "{:?}", c.status);
+        let p = c.profile(&path).expect("a mix profile");
+        assert!(p.stems && (p.bpm - 120.0).abs() < 0.5, "stems {} bpm {}", p.stems, p.bpm);
+        assert!((14..=15).contains(&p.bars().len()), "30 s at 120 BPM: 15 bars (from its first beat): {}", p.bars().len());
+        // Then it loads with its stems ready (prepared), and preparing again skips it.
+        c.load_track(0, &path);
+        let deadline = Instant::now() + std::time::Duration::from_secs(60);
+        while c.decks[0].stems_source.is_none() {
+            assert!(Instant::now() < deadline, "stems never came");
+            pump(&mut e, &mut c);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(c.decks[0].stems_source.as_deref(), Some("prepared stems"));
+        c.prepare_tracks(vec![path.clone()]);
+        while c.preparer.is_some() {
+            pump(&mut e, &mut c);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(c.status.iter().any(|(_, m)| m.contains("Prepared 0 of 1 tracks (1 already were)")), "{:?}", c.status);
     }
 
     #[test]

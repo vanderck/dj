@@ -11,6 +11,7 @@ mod gui;
 mod midi;
 mod model;
 mod osc;
+mod profile;
 mod settings;
 mod stems;
 mod syndicate_map;
@@ -176,17 +177,19 @@ fn download_demucs() -> i32 {
     }
 }
 
-/// `--prepare-stems`: run Demucs over files and folders (recursively), skipping
-/// tracks that are already prepared. Returns the exit code.
+/// `--prepare-stems`: prepare files and folders (recursively) for mixing, as the library's
+/// Prepare does: stems (HT-Demucs), sections and mix profiles, skipping tracks that are already
+/// prepared. Returns the exit code.
 fn prepare_stems(paths: &[String]) -> i32 {
     use std::io::Write;
     let settings = Settings::load();
-    let mut demucs_cache = stems::DemucsCache::default();
+    let mut caches = (stems::DemucsCache::default(), stems::StructureCache::default());
     let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
     let Some(model) = settings.stems_demucs.clone() else {
         eprintln!("No Demucs model. Download it in Settings → Stems, or run: dj --download-demucs");
         return 2;
     };
+    let trackdb = settings::TrackDb::load();
     if paths.is_empty() {
         eprintln!("{USAGE}");
         return 2;
@@ -225,13 +228,15 @@ fn prepare_stems(paths: &[String]) -> i32 {
                 print!("\r{label}  {pct:3}%");
                 let _ = std::io::stdout().flush();
             }
+            true
         };
-        match stems::prepare_file(f, &model, threads, &mut demucs_cache, &dir, &mut progress) {
-            Ok(stems::Prepared::Done(_)) => {
+        let overrides = trackdb.tracks.get(&settings::TrackDb::key(f));
+        match profile::prepare_track(f, overrides, Some(&model), &dir, threads, &mut caches, &mut progress) {
+            Ok(profile::Prepared::Done { sections, .. }) => {
                 done += 1;
-                println!("\r{label}  done");
+                println!("\r{label}  done{}", if sections { "" } else { " (no sections)" });
             }
-            Ok(stems::Prepared::AlreadyPrepared) => {
+            Ok(profile::Prepared::Already) => {
                 skipped += 1;
                 println!("\r{label}  already prepared");
             }

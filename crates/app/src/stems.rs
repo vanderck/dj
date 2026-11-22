@@ -583,42 +583,50 @@ pub fn download(url: &str, dest: &Path, progress: &mut dyn FnMut(u64, Option<u64
     fs::rename(&tmp, dest).map_err(|e| format!("{}: {e}", dest.display()))
 }
 
-/// What [`prepare_file`] did.
-#[derive(Debug, PartialEq, Eq)]
-pub enum Prepared {
-    Done(String),
-    AlreadyPrepared,
-}
-
-/// Separate one file with Demucs into the prepared-stems folder `dir`, unless it is already
-/// there (for `dj --prepare-stems`). `progress` gets 0..=1.
-pub fn prepare_file(
+/// A track's stems for preparing it: its prepared stems, else separated with HT-Demucs (and
+/// kept) when there's a model, else none. Also whether they were separated now.
+pub fn stems_for(
+    audio: &dj_engine::track::AudioData,
     path: &Path,
-    model: &Path,
+    demucs: Option<&Path>,
     threads: usize,
     cache: &mut DemucsCache,
     dir: &Path,
-    progress: &mut dyn FnMut(f32),
-) -> Result<Prepared, String> {
-    let audio = dj_library::decode(path).map_err(|e| format!("decoding: {e}"))?;
-    let key = content_key(&audio.frames, audio.sample_rate);
-    if find_prepared(dir, path, &audio.frames, audio.sample_rate, 0).is_some() {
-        return Ok(Prepared::AlreadyPrepared);
+    progress: &mut dyn FnMut(f32) -> bool,
+) -> Result<(Option<StemData>, bool), String> {
+    if let Some(s) = find_prepared(dir, path, &audio.frames, audio.sample_rate, 0) {
+        return Ok((Some(s), false));
     }
-    let (buffers, name) = cache
-        .separate(model, threads, &audio.frames, audio.sample_rate, &mut |p| {
-            progress(p);
-            true
-        })
-        .map_err(|e| e.to_string())?;
-    let stems = StemData::from_f32(
-        0,
-        &buffers[CoreStem::Drums as usize],
-        &buffers[CoreStem::Bass as usize],
-        &buffers[CoreStem::Vocals as usize],
-    );
-    cache::write(dir, key, &stems).map_err(|e| format!("writing {}: {e}", dir.display()))?;
-    Ok(Prepared::Done(name))
+    let Some(model) = demucs.filter(|m| m.exists()) else { return Ok((None, false)) };
+    let (buffers, _) = match cache.separate(model, threads, &audio.frames, audio.sample_rate, progress) {
+        Ok(x) => x,
+        Err(OfflineError::Cancelled) => return Err("stopped".into()),
+        Err(e) => return Err(format!("Demucs: {e}")),
+    };
+    let stems = StemData::from_f32(0, &buffers[CoreStem::Drums as usize], &buffers[CoreStem::Bass as usize], &buffers[CoreStem::Vocals as usize]);
+    cache::write(dir, content_key(&audio.frames, audio.sample_rate), &stems).map_err(|e| format!("writing {}: {e}", dir.display()))?;
+    Ok((Some(stems), true))
+}
+
+/// A track's sections and beats for preparing it: kept ones, else found with All-In-One (and
+/// kept). Empty when that fails.
+pub fn structure_for(audio: &dj_engine::track::AudioData, stems: &StemData, dir: &Path, threads: usize, model: &mut StructureCache) -> Structure {
+    let file = dir.join(format!("{:016x}.sections", content_key(&audio.frames, audio.sample_rate)));
+    if let Some(s) = read_structure(&file) {
+        return s;
+    }
+    match model.analyze(threads, audio, stems) {
+        Ok(s) => {
+            if let Err(e) = write_structure(&file, &s) {
+                eprintln!("sections: {e}");
+            }
+            s
+        }
+        Err(e) => {
+            eprintln!("sections: {e}");
+            Structure::default()
+        }
+    }
 }
 
 mod cache {
@@ -817,7 +825,7 @@ mod tests {
 
     #[cfg(any(feature = "stems-onnx", feature = "stems-onnx-dynamic"))]
     #[test]
-    fn prepare_file_separates_once() {
+    fn stems_for_preparing_are_separated_once() {
         let dir = std::env::temp_dir().join(format!("dj-prepare-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
@@ -832,9 +840,10 @@ mod tests {
         w.finalize().unwrap();
         let model = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../stems-core/tests/data/demucs_test.onnx"));
         let mut cache = DemucsCache::default();
-        let mut prepare = || prepare_file(&song, model, 2, &mut cache, &dir.join("prepared"), &mut |_| {});
-        assert_eq!(prepare(), Ok(Prepared::Done("HT-Demucs".into())));
-        assert_eq!(prepare(), Ok(Prepared::AlreadyPrepared));
+        let audio = dj_library::decode(&song).unwrap();
+        let mut prepare = || stems_for(&audio, &song, Some(model), 2, &mut cache, &dir.join("prepared"), &mut |_| true).map(|(s, new)| (s.is_some(), new));
+        assert_eq!(prepare(), Ok((true, true)), "separated");
+        assert_eq!(prepare(), Ok((true, false)), "then kept");
         let _ = fs::remove_dir_all(&dir);
     }
 

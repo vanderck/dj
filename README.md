@@ -71,6 +71,15 @@ Every track is separated into **drums, bass, vocals and other** with HT-Demucs, 
 after it loads (`crates/stems-core`). The deck plays the full mix until the stems are ready; its
 header shows the progress until they're there.
 
+**Prepare the library ahead of time.** The library's *Prepare* button gets the tracks it lists
+(all of them, a search, or History) ready to mix, in the background on half the cores: their
+stems (HT-Demucs), sections and beats (All-In-One) and a *mix profile* (each bar's parts,
+phrases, energy and sections, as the transition search sees them), all kept in the prepared
+stems folder. A prepared track loads ready to mix, and Fits can score how it would mix with the
+playing track. Already prepared tracks are skipped; the button shows the progress and stops it.
+`dj --prepare-stems FOLDER` does the same from the terminal. A track that has been on a deck
+gets its profile then too, so the library fills up as you play.
+
 **Where stems come from**, in this order:
 
 1. **Prepared stems**: made earlier by Demucs (on load, or with `dj --prepare-stems FOLDER` before
