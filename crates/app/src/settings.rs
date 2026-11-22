@@ -90,6 +90,8 @@ pub struct Settings {
     pub default_loop_beats: f64,
     pub skip_beats: f64,
     pub load_at_first_cue: bool,
+    /// Keep the computer awake while dj runs: no screen off or sleep (macOS).
+    pub keep_awake: bool,
     /// Bring every track to the same loudness (measured at load), so a mix doesn't jump.
     pub match_loudness: bool,
     pub osc_enabled: bool,
@@ -193,6 +195,7 @@ impl Default for Settings {
             default_loop_beats: 4.0,
             skip_beats: 16.0,
             load_at_first_cue: true,
+            keep_awake: true,
             match_loudness: true,
             osc_enabled: true,
             osc_port: 9090,
