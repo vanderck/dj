@@ -110,9 +110,9 @@ impl Profile {
 pub enum Prepared {
     /// Already prepared (as far as the settings allow).
     Already,
-    /// Done: whether stems were separated now, whether it has sections, and its key if it was
-    /// detected now (no key tag).
-    Done { separated: bool, sections: bool, key: Option<dj_library::key::Key> },
+    /// Done: whether stems were separated now, whether it has sections, its key if it was
+    /// detected now (no key tag), and its detected grid if the heard beats corrected its tempo.
+    Done { separated: bool, sections: bool, key: Option<dj_library::key::Key>, grid: Option<dj_engine::track::BeatGrid> },
 }
 
 /// Prepare a track for mixing ahead of time, as loading it on a deck would: its grid (checked
@@ -139,8 +139,14 @@ pub fn prepare_track(
     // The grid as a deck would play it: corrected from the heard beats (unless it's yours or
     // follows a tempo map).
     let mine = lt.grid_source == Some(dj_library::GridSource::User);
-    if !mine && lt.track.tempo_map.is_none() {
-        let heard: Vec<(f64, f32)> = found.beats.iter().map(|b| (b.secs, b.downbeat)).collect();
+    let heard: Vec<(f64, f32)> = found.beats.iter().map(|b| (b.secs, b.downbeat)).collect();
+    // A detected tempo the heard beats steadily disagree with: theirs.
+    let retempo = (lt.grid_source == Some(dj_library::GridSource::Detected) && lt.track.tempo_map.is_none())
+        .then(|| dj_library::analysis::tempo_from_beats(&grid, &heard))
+        .flatten();
+    if let Some(g) = retempo {
+        grid = g;
+    } else if !mine && lt.track.tempo_map.is_none() {
         if let Some(check) = dj_library::analysis::check_beats(|t| grid.beat_at(t), grid.seconds_per_beat(), &heard) {
             let (half, bars, _) = dj_library::analysis::grid_shift(&check, |t| grid.beat_at(t), &lt.track.cues);
             grid.anchor_secs += (half + bars) * grid.seconds_per_beat();
@@ -149,7 +155,7 @@ pub fn prepare_track(
     let wave = stems.as_ref().map(|s| StemWave::compute(&audio.frames, audio.sample_rate, s));
     let profile = Profile::build(path, &lt.waveform, wave.as_ref(), grid, audio.duration_secs(), &lt.track.cues, lt.tags.energy, &found.sections).ok_or("too short")?;
     write(dir, path, &profile).map_err(|e| format!("writing the profile: {e}"))?;
-    Ok(Prepared::Done { separated, sections: !found.sections.is_empty(), key: lt.detected.key.map(|(k, _)| k) })
+    Ok(Prepared::Done { separated, sections: !found.sections.is_empty(), key: lt.detected.key.map(|(k, _)| k), grid: retempo })
 }
 
 #[cfg(test)]
@@ -183,9 +189,18 @@ mod tests {
 /// Preparing a list of tracks in the background (the library's Prepare).
 pub struct Preparer {
     state: std::sync::Arc<std::sync::Mutex<PrepState>>,
-    /// Keys detected (tracks without a key tag), for the app to keep.
-    keys: std::sync::Arc<std::sync::Mutex<Vec<(PathBuf, dj_library::key::Key)>>>,
+    /// Keys and corrected grids found, for the app to keep.
+    found: std::sync::Arc<std::sync::Mutex<Vec<Found>>>,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// What preparing a track found for the app to keep: its key (no key tag), and its detected
+/// grid when the heard beats corrected its tempo.
+#[derive(Clone, Debug)]
+pub struct Found {
+    pub path: PathBuf,
+    pub key: Option<dj_library::key::Key>,
+    pub grid: Option<dj_engine::track::BeatGrid>,
 }
 
 /// How far a [`Preparer`] is.
@@ -209,8 +224,8 @@ impl Preparer {
         use std::sync::atomic::Ordering;
         let state = std::sync::Arc::new(std::sync::Mutex::new(PrepState { total: tracks.len(), ..Default::default() }));
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let keys = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let (st, sp, ks) = (state.clone(), stop.clone(), keys.clone());
+        let found = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (st, sp, ks) = (state.clone(), stop.clone(), found.clone());
         let threads = std::thread::available_parallelism().map(|n| (n.get() / 2).max(1)).unwrap_or(2);
         std::thread::Builder::new()
             .name("prepare".into())
@@ -238,9 +253,11 @@ impl Preparer {
                     if let Err(e) = &r {
                         eprintln!("prepare {}: {e}", path.display());
                     }
-                    if let Ok(Prepared::Done { key: Some(k), .. }) = &r {
-                        if let Ok(mut ks) = ks.lock() {
-                            ks.push((path.clone(), *k));
+                    if let Ok(Prepared::Done { key, grid, .. }) = &r {
+                        if key.is_some() || grid.is_some() {
+                            if let Ok(mut ks) = ks.lock() {
+                                ks.push(Found { path: path.clone(), key: *key, grid: *grid });
+                            }
                         }
                     }
                     set(&|s| {
@@ -255,12 +272,12 @@ impl Preparer {
                 set(&|s| s.finished = true);
             })
             .expect("spawn prepare");
-        Self { state, stop, keys }
+        Self { state, stop, found }
     }
 
-    /// The keys detected since the last call.
-    pub fn take_keys(&self) -> Vec<(PathBuf, dj_library::key::Key)> {
-        self.keys.lock().map(|mut k| std::mem::take(&mut *k)).unwrap_or_default()
+    /// What was found since the last call.
+    pub fn take_found(&self) -> Vec<Found> {
+        self.found.lock().map(|mut k| std::mem::take(&mut *k)).unwrap_or_default()
     }
 
     pub fn state(&self) -> PrepState {

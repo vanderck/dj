@@ -45,6 +45,9 @@ pub struct Request {
     pub demucs: Option<PathBuf>,
     /// Detect cue points with the stems once they are ready (see `Update::Done`).
     pub detect_cues: bool,
+    /// The grid was detected: the beats All-In-One hears may correct its tempo (see
+    /// `analysis::tempo_from_beats`), and cue points go on the corrected grid.
+    pub tempo_from_beats: bool,
     /// Folder of prepared stems (from Demucs, on load or with `--prepare-stems`); checked
     /// first and never evicted.
     pub prepared: Option<PathBuf>,
@@ -184,7 +187,7 @@ fn run(job: Request, wanted: &[AtomicU64; NUM_DECKS], tx: &Sender<Update>, demuc
     let then_sections = |stems: Arc<StemData>| {
         if job.sections {
             let file = job.prepared.as_ref().map(|dir| dir.join(format!("{prepared_key:016x}.sections")));
-            let _ = sections.send(SectionJob { deck, track: job.track.clone(), stems, file, threads: (threads / 2).max(1), detect_cues: job.detect_cues });
+            let _ = sections.send(SectionJob { deck, track: job.track.clone(), stems, file, threads: (threads / 2).max(1), detect_cues: job.detect_cues, tempo_from_beats: job.tempo_from_beats });
         }
     };
     if let Some(dir) = &job.prepared {
@@ -241,6 +244,7 @@ struct SectionJob {
     threads: usize,
     /// Detect cue points too, on the sections.
     detect_cues: bool,
+    tempo_from_beats: bool,
 }
 
 /// Find a track's sections with All-In-One (kept next to its prepared stems, as they take a
@@ -269,6 +273,9 @@ fn sections(job: &SectionJob, tx: &Sender<Update>, model: &mut StructureCache) {
     // them (without sections, as detected).
     let cues = match (job.detect_cues, job.track.grid) {
         (true, Some(grid)) => {
+            // (On the grid the deck will have.)
+            let heard: Vec<(f64, f32)> = found.beats.iter().map(|b| (b.secs, b.downbeat)).collect();
+            let grid = job.tempo_from_beats.then(|| dj_library::analysis::tempo_from_beats(&grid, &heard)).flatten().unwrap_or(grid);
             let audio = &job.track.audio;
             let env = dj_library::analysis::Envelope::compute(audio);
             let detected = dj_library::analysis::detect_cues(audio, &env, &grid, Some(&job.stems));
@@ -729,7 +736,7 @@ mod tests {
     }
 
     fn req(track: Arc<Track>, demucs: Option<PathBuf>, detect_cues: bool, prepared: Option<PathBuf>) -> Request {
-        Request { deck: 0, track, path: PathBuf::from("/nonexistent/song.wav"), demucs, detect_cues, prepared, sections: false }
+        Request { deck: 0, track, path: PathBuf::from("/nonexistent/song.wav"), demucs, detect_cues, tempo_from_beats: false, prepared, sections: false }
     }
 
     #[test]
@@ -800,6 +807,7 @@ mod tests {
             path: dir.join("song.wav"),
             demucs,
             detect_cues: false,
+            tempo_from_beats: false,
             prepared: Some(dir.join("prepared")),
         };
         let w = StemsWorker::new();
