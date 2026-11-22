@@ -41,6 +41,11 @@ const NOW_SECS: f64 = 32.0;
 /// The shortest and longest blend the search tries, in bars.
 const MIN_MIX_BARS: usize = 8;
 const MAX_MIX_BARS: usize = 128;
+/// No mix is shorter than this (seconds at the tempo the old track plays at; a cut counts as
+/// short)…
+pub const MIN_MIX_SECS: f64 = 20.0;
+/// …unless the old track ends within this.
+pub const SHORT_MIX_NEAR_END_SECS: f64 = 30.0;
 /// In the playing track's last minute, Mix doesn't ask: it mixes at the best moment left.
 const LAST_MINUTE_SECS: f64 = 60.0;
 /// Stem order: drums, bass, vocals, other.
@@ -302,7 +307,8 @@ fn stems_at(p: f64, vocals_out: bool, best: bool) -> ([f32; 4], [f32; 4]) {
     i[VOCALS] = if vocals_out {
         0.0
     } else if best {
-        smooth((p - 0.75) / 0.25)
+        // (In full by seven eighths: before the old track's volume closes.)
+        smooth((p - 0.75) / 0.125)
     } else {
         1.0
     };
@@ -350,6 +356,34 @@ impl Core {
             _ => (0..self.deck_count()).filter(|&o| audible(o)).max_by(|&a, &b| {
                 self.session.channels[a].params.volume.total_cmp(&self.session.channels[b].params.volume)
             }),
+        }
+    }
+
+    /// Whether the track on deck `d` ends within `secs` (at the tempo it plays at).
+    pub fn ends_within(&self, d: usize, secs: f64) -> bool {
+        let v = &self.snap.decks[d];
+        (v.duration_secs - v.position_secs) / v.speed.max(0.01) < secs
+    }
+
+    /// The shortest mix out of deck `d` ([`MIN_MIX_SECS`] at the tempo it plays at, in bars of
+    /// `out`, its bars), and its bar from which quicker mixes and cuts are allowed (less than
+    /// [`SHORT_MIX_NEAR_END_SECS`] of it left).
+    pub fn mix_floor(&self, d: usize, out: &crate::transition::Bars) -> (usize, usize) {
+        let v = &self.snap.decks[d];
+        let speed = v.speed.max(0.01);
+        let min_bars = (MIN_MIX_SECS * speed / out.bar_secs.max(0.01)).ceil() as usize;
+        let near_end = v.duration_secs - SHORT_MIX_NEAR_END_SECS * speed;
+        let short_from = ((near_end - out.start) / out.bar_secs.max(0.01)).ceil().max(0.0) as usize;
+        (min_bars, short_from)
+    }
+
+    /// Auto picked a cut (Drop): only in the old track's last 30 s; before that, an EQ blend
+    /// (the fixed plans, without a beat grid to search with).
+    fn quick_only_near_end(&self, (how, why): (MixHow, String), style: MixStyle, outgoing: usize) -> (MixHow, String) {
+        if how == MixHow::Drop && style == MixStyle::Auto && !self.ends_within(outgoing, SHORT_MIX_NEAR_END_SECS) {
+            (MixHow::Eq, format!("{why}, but a cut only in a track's last {SHORT_MIX_NEAR_END_SECS:.0} s"))
+        } else {
+            (how, why)
         }
     }
 
@@ -478,7 +512,9 @@ impl Core {
         // are far apart; only then it cuts.
         let can_blend = !stretch && (stems || !clash);
         let (blend, cut) = match style {
-            MixStyle::Auto => (can_blend, !can_blend),
+            // (A cut is quick: only in the old track's last 30 s. Before that, Auto blends 20 s or
+            // more even where it would rather cut; it doesn't wait for the end to cut.)
+            MixStyle::Auto => (true, !can_blend),
             MixStyle::Stems | MixStyle::Eq => (true, false),
             MixStyle::Drop => (false, true),
         };
@@ -501,10 +537,20 @@ impl Core {
         let vocals_out = false;
         let drop_secs = self.drop_cue(incoming).and_then(|c| i.hot_cues.get(c as usize).copied().flatten());
         let drop_cue_bar = drop_secs.map(|t| ((t - start_i) / inc.bar_secs).round().max(0.0) as usize);
+        // Nothing quick (under 20 s, or a cut) unless the old track is almost over; a cut you
+        // asked for (Drop) wherever it fits.
+        let (min_bars, short_from) = self.mix_floor(outgoing, &out);
+        // Best starts while 30 s of the old track is left, and is over before it ends (the very
+        // end only when nothing earlier fits).
+        let start_before = if when == MixWhen::Best { short_from } else { usize::MAX };
+        let short_from = if style == MixStyle::Drop { 0 } else { short_from };
         let lim = Limits {
             earliest,
             latest,
             lengths,
+            min_bars,
+            short_from,
+            start_before,
             cue_bar: chosen.then_some(cue_bar),
             drop_cue_bar,
             in_cues: cb_i.iter().filter(|b| **b >= -0.1).map(|b| b.round().max(0.0) as usize).collect(),
@@ -542,6 +588,9 @@ impl Core {
                 if let (Some(b), Some(w)) = (blend.as_mut(), self.decks[incoming].stem_wave.as_deref()) {
                     let spb_i = inc.bar_secs / 4.0;
                     breathe_in(b, w, entry_secs.unwrap_or(inc.secs(c.in_bar as f64)) + lead_in * spb_i, spb_i);
+                }
+                if let Some(b) = blend.as_mut() {
+                    b.fully_in_before_fade();
                 }
                 // Techniques, only when the music calls for them:
                 // a high-pass sweep when the old track is still full as it has to go (EQ: no stems
@@ -674,10 +723,14 @@ impl Core {
             _ => false,
         };
         let in_cues: Vec<usize> = profile.cue_bars.iter().filter(|b| **b >= -0.1 && (*b - b.round()).abs() < 0.1).map(|b| b.round().max(0.0) as usize).collect();
+        let (min_bars, short_from) = self.mix_floor(d, &out);
         let lim = Limits {
             earliest: now,
             latest: out.len(),
             lengths: (MIN_MIX_BARS / 4..=MAX_MIX_BARS / 4).map(|k| 4 * k).collect(),
+            min_bars,
+            short_from,
+            start_before: short_from,
             cue_bar: in_cues.first().copied().or(Some(0)),
             drop_cue_bar: None,
             in_cues,
@@ -708,10 +761,14 @@ impl Core {
         let best = |first: usize, then: usize| -> Option<f32> {
             let ((out, _), (inc, cb_i)) = (self.deck_bars(first)?, self.deck_bars(then)?);
             let stems = out.stems.is_some() && inc.stems.is_some();
+            let (min_bars, short_from) = self.mix_floor(first, &out);
             let lim = Limits {
                 earliest: 0,
                 latest: out.len(),
                 lengths: (MIN_MIX_BARS / 4..=MAX_MIX_BARS / 4).map(|k| 4 * k).collect(),
+                min_bars,
+                short_from,
+                start_before: short_from,
                 cue_bar: Some(0),
                 drop_cue_bar: None,
                 in_cues: cb_i.iter().filter(|b| **b >= -0.1).map(|b| b.round().max(0.0) as usize).collect(),
@@ -754,7 +811,7 @@ impl Core {
             return p;
         }
         let o = &self.snap.decks[outgoing];
-        let (how, why_how) = self.resolve_style(style, incoming, outgoing, MixWhen::Now);
+        let (how, why_how) = self.quick_only_near_end(self.resolve_style(style, incoming, outgoing, MixWhen::Now), style, outgoing);
         // A paused deck needs a moment to start in sync: one bar more. And the new track may
         // start a few beats before the mix (its lead-in), which must still be ahead.
         let lead_in = self.lead_in(incoming, self.in_start_secs(incoming, how));
@@ -772,7 +829,8 @@ impl Core {
             return MixPlan { incoming, outgoing, mode: MixWhen::Now, how, start_beat, length_beats: DROP_BEATS, reason: reason.into(), why_how, blend: None, lead_in, ..MixPlan::plain() };
         }
         let bar_s = 4.0 * 60.0 / o.bpm.max(1.0);
-        let bars = (NOW_SECS / bar_s).floor().clamp(8.0, 16.0);
+        let floor = if self.ends_within(outgoing, SHORT_MIX_NEAR_END_SECS) { 0.0 } else { (MIN_MIX_SECS / bar_s).ceil() };
+        let bars = (NOW_SECS / bar_s).floor().clamp(8.0, 16.0).max(floor);
         let blend = self.analyse(incoming, outgoing, next_bar, bars as usize, false);
         MixPlan { incoming, outgoing, mode: MixWhen::Now, how, start_beat: next_bar, length_beats: bars * 4.0, reason: format!("{bars:.0} bars, {on}"), why_how, blend, lead_in, ..MixPlan::plain() }
     }
@@ -820,13 +878,15 @@ impl Core {
         }
         match best {
             Some((_, start_beat, reason)) => {
-                let (how, why_how) = self.resolve_style(style, incoming, outgoing, MixWhen::Best);
+                let (how, why_how) = self.quick_only_near_end(self.resolve_style(style, incoming, outgoing, MixWhen::Best), style, outgoing);
                 if how == MixHow::Drop {
                     let lead_in = self.lead_in(incoming, self.in_start_secs(incoming, how));
                     return MixPlan { incoming, outgoing, mode: MixWhen::Best, how, start_beat, length_beats: DROP_BEATS, reason, why_how, blend: None, lead_in, ..MixPlan::plain() };
                 }
                 // How long: from the energy step and the new track's intro.
                 let (bars, why_len) = self.best_length(incoming, outgoing, start_beat, end_beat);
+                // At least 20 s (at the tempo it plays at).
+                let bars = bars.max((MIN_MIX_SECS / (4.0 * 60.0 / o.bpm.max(1.0))).ceil() as usize);
                 let reason = if why_len.is_empty() { format!("{bars} bars · {reason}") } else { format!("{bars} bars ({why_len}) · {reason}") };
                 let blend = self.analyse(incoming, outgoing, start_beat, bars, false);
                 let lead_in = self.lead_in(incoming, self.in_start_secs(incoming, how));
@@ -1263,7 +1323,9 @@ impl Core {
                 let stems_settled = self.snap.decks[q].stems_ready || self.decks[q].stems_missing.is_some();
                 let sections_in = !self.settings.song_sections || self.decks[q].sections.is_some() || self.decks[q].stems_missing.is_some();
                 let ready = stems_settled && sections_in && !cues_pending;
-                if !(ready || since.elapsed().as_secs() >= AUTODJ_WAIT_SECS || self.mix_is_urgent(p)) {
+                // (Without waiting any longer in the playing track's last 90 s: the mix has to start
+                // while 30 s of it is left, and last 20 s or more.)
+                if !(ready || since.elapsed().as_secs() >= AUTODJ_WAIT_SECS || self.ends_within(p, 90.0)) {
                     return;
                 }
                 if self.mix_target(q) != Some(p) {
@@ -1557,6 +1619,34 @@ impl Blend {
         (i, o)
     }
 
+    /// The new track fully in before the old one's volume closes (over the mix's last bar):
+    /// every part it brings in is at full by then. New vocals still waiting for the old ones
+    /// take over earlier, the old vocals leaving as they come in (never one on top of the other).
+    pub fn fully_in_before_fade(&mut self) {
+        let done = (self.bars as f64 - 1.0).max(0.25);
+        for s in 0..4 {
+            let Some(at) = self.in_at[s] else { continue };
+            if s == BASS {
+                // (A switch, at the swap.)
+                self.in_at[s] = Some(at.min(done));
+                continue;
+            }
+            if at + self.in_ramp[s] <= done + 1e-9 {
+                continue;
+            }
+            let ramp = self.in_ramp[s].min(2.0).min(done);
+            let at = (done - ramp).max(0.0);
+            self.in_at[s] = Some(at);
+            self.in_ramp[s] = ramp.max(0.25);
+            if s == VOCALS {
+                let end = self.out_at[VOCALS].map_or(at, |e| e.min(at));
+                self.out_at[VOCALS] = Some(end);
+                self.out_ramp[VOCALS] = self.out_ramp[VOCALS].min(end).max(0.25);
+                self.notes.push(format!("new vocals take over at bar {}, all in before the old track fades", at as usize + 1));
+            }
+        }
+    }
+
     /// The swap as a fraction of the mix (for the EQ style).
     pub fn swap_fraction(&self) -> f64 {
         self.swap / self.bars as f64
@@ -1592,7 +1682,8 @@ pub fn breathe_out(b: &mut Blend, w: &crate::stems::StemWave, start: f64, spb: f
     };
     // How loud the singing is around there (the louder half of the beats).
     let from = ((end - b.out_ramp[VOCALS]) * 4.0 - 8.0).max(0.0);
-    let to = (end * 4.0 + 4.0).min(b.bars as f64 * 4.0 - 4.0);
+    // (Gone before the new vocals come in.)
+    let to = (end * 4.0 + 4.0).min(b.bars as f64 * 4.0 - 4.0).min(b.in_at[VOCALS].map_or(f64::MAX, |x| (x * 4.0).max(end * 4.0)));
     if to <= from {
         return;
     }
@@ -1641,7 +1732,8 @@ pub fn breathe_in(b: &mut Blend, w: &crate::stems::StemWave, start: f64, spb: f6
     }
     let quiet = |k: f64| level(k) < 0.25 * sung;
     // A line starts on beat k: singing there, a pause just before (never earlier than planned).
-    let line = (from as usize + 1..=(from + 8.0).min(total - 1.0) as usize).map(|k| k as f64).find(|k| !quiet(*k) && quiet(k - 1.0));
+    // (In full before the old track's volume closes over the last bar.)
+    let line = (from as usize + 1..=(from + 8.0).min(total - 4.0).max(0.0) as usize).map(|k| k as f64).find(|k| !quiet(*k) && quiet(k - 1.0));
     if let Some(k) = line {
         b.in_at[VOCALS] = Some((k - 1.0) / 4.0);
         b.in_ramp[VOCALS] = 0.25;
@@ -1801,7 +1893,9 @@ pub fn plan_blend(inc: &[Vec<f32>; 4], out: &[Vec<f32>; 4], bars: usize, vocals_
         out_ramp[VOCALS] = r;
         notes.insert(1.min(notes.len()), format!("keys clash: melodies switch at bar {}", swap as usize + 1));
     }
-    Blend { bars, in_at, in_ramp, out_at, out_ramp, swap, notes }
+    let mut b = Blend { bars, in_at, in_ramp, out_at, out_ramp, swap, notes };
+    b.fully_in_before_fade();
+    b
 }
 
 #[cfg(test)]
@@ -1885,6 +1979,31 @@ mod tests {
     }
 
     #[test]
+    fn the_new_track_is_all_in_before_the_old_volume_closes() {
+        // Old vocals sing to the end: the new ones can't wait for them past the last bar.
+        let full = lv([ALL, ALL, ALL, ALL]);
+        for clash in [false, true] {
+            let b = plan_blend(&full, &full, 16, false, clash);
+            let (i, o) = b.levels(15.0, false);
+            assert_eq!(i, [1.0; 4], "clash {clash}: all in at the last bar, where the volume closes ({:?})", b);
+            assert_eq!(o[VOCALS], 0.0, "the old vocals gone by then");
+            // Never both singers at once.
+            for k in 0..=64 {
+                let (i, o) = b.levels(k as f64 / 4.0, false);
+                assert!(i[VOCALS] == 0.0 || o[VOCALS] == 0.0, "bar {}: {i:?} {o:?}", k as f64 / 4.0);
+            }
+        }
+        // Short mixes too.
+        for bars in [2, 4, 8, 12] {
+            let full: [Vec<f32>; 4] = std::array::from_fn(|_| vec![0.5; bars]);
+            let b = plan_blend(&full, &full, bars, false, false);
+            assert_eq!(b.levels(bars as f64 - 1.0, false).0, [1.0; 4], "{bars} bars: {b:?}");
+        }
+        // Without a plan (no stems analysed): the new vocals are in by seven eighths.
+        assert_eq!(stems_at(0.875, false, true).0, [1.0; 4]);
+    }
+
+    #[test]
     fn new_vocals_wait_for_the_old_ones() {
         let inc = lv([ALL, ALL, ALL, ALL]);
         let out = lv([ALL, ALL, &[(0, 11)], ALL]);
@@ -1960,10 +2079,13 @@ mod tests {
         assert_eq!(b.in_at[DRUMS], Some(0.0), "drums at once: {:?}", b.notes);
         assert!(b.swap <= 2.0, "the bass right away: {}", b.swap);
         assert!(b.levels(8.0, false).0[VOCALS] >= 0.99, "vocals in (no old vocals)");
-        // With old vocals through the whole mix, the new ones wait to the end.
+        // With old vocals through the whole mix, the new ones wait as long as they can: they're
+        // in full by the last bar (where the old volume closes), the old ones gone as they come.
         let sung = lvn(24, [&[], &[], &[(0, 24)], &[(0, 24)]]);
         let b = plan_blend(&inc, &sung, 24, false, false);
-        assert!(b.in_at[VOCALS].unwrap() >= 23.5);
+        let at = b.in_at[VOCALS].unwrap();
+        assert!(at >= 20.0 && at + b.in_ramp[VOCALS] <= 23.0, "{b:?}");
+        assert!(b.out_at[VOCALS].unwrap() <= at, "{b:?}");
     }
 
     #[test]
