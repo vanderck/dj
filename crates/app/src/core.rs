@@ -248,6 +248,8 @@ pub struct Core {
     pub automix: Option<automix::AutoMix>,
     /// After a Now mix: the new track's vocals coming back on its next vocal phrase.
     pub vocal_return: Option<automix::VocalReturn>,
+    /// The deck easing back to its own tempo after a mix (see `tempo_home_tick`).
+    pub tempo_home: Option<automix::TempoHome>,
     /// Echo-out inserts to remove once their tails have rung out: (channel, slot, clock beat).
     pub echo_cleanup: Vec<(usize, usize, f64)>,
     /// The two tracks the deck-order tip was last worked out for.
@@ -335,6 +337,7 @@ impl Core {
             dirty_since: None,
             automix: None,
             vocal_return: None,
+            tempo_home: None,
             echo_cleanup: Vec::new(),
             order_hinted: None,
             pickup: HashMap::new(),
@@ -3091,6 +3094,48 @@ mod tests {
             }
         }
         pump(e, c);
+    }
+
+    #[test]
+    fn after_a_mix_the_new_track_eases_back_to_its_own_tempo() {
+        let (mut e, mut c, _config) = core();
+        mix_setup(&mut e, &mut c);
+        // The new track is 1.25 % faster than the playing one: the mix plays it at 120.
+        c.deck_cmd(1, DeckCmd::SetGrid(Some(dj_engine::track::BeatGrid { bpm: 121.5, anchor_secs: 0.0 })));
+        pump(&mut e, &mut c);
+        let plan = c.plan_now(1, 0, crate::settings::MixStyle::Eq);
+        c.start_mix(plan);
+        run_mix(&mut e, &mut c, |_, _| {});
+        assert!(c.tempo_home.is_some(), "it eases home");
+        assert!((c.snap.decks[1].bpm - 120.0).abs() < 0.05, "the mix ended at the old tempo: {}", c.snap.decks[1].bpm);
+        // Then 0.25 % a bar at most, until it's at its own tempo (5 bars).
+        let (mut last, mut beat) = (c.snap.decks[1].bpm, c.snap.clock.beat);
+        let start = beat;
+        while c.tempo_home.is_some() {
+            pump(&mut e, &mut c);
+            let (bpm, b) = (c.snap.decks[1].bpm, c.snap.clock.beat);
+            assert!(bpm >= last - 1e-9, "only towards its own tempo");
+            assert!(bpm - last <= 121.5 * 0.0025 * ((b - beat) / 4.0).max(0.25) + 0.01, "{last} → {bpm} in {} beats", b - beat);
+            (last, beat) = (bpm, b);
+            assert!(b - start < 64.0, "never got home");
+        }
+        pump(&mut e, &mut c);
+        assert!((c.snap.decks[1].bpm - 121.5).abs() < 0.01 && c.snap.decks[1].tempo_fader == 0.0, "{}", c.snap.decks[1].bpm);
+        assert!(c.status.iter().any(|(_, m)| m.contains("back at its own tempo")));
+        assert!(c.snap.clock.beat - start > 16.0, "slowly: {} beats", c.snap.clock.beat - start);
+
+        // Moving its tempo fader stops it.
+        c.tempo_home = Some(automix::TempoHome::new(1, c.snap.decks[1].track_id));
+        c.deck_cmd(1, DeckCmd::Tempo(0.3));
+        for _ in 0..20 {
+            pump(&mut e, &mut c);
+        }
+        c.deck_cmd(1, DeckCmd::Tempo(0.25));
+        for _ in 0..20 {
+            pump(&mut e, &mut c);
+        }
+        assert!(c.tempo_home.is_none(), "yours from there");
+        assert!((c.snap.decks[1].tempo_fader - 0.25).abs() < 1e-9);
     }
 
     #[test]

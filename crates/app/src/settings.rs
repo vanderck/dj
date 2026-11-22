@@ -84,6 +84,8 @@ pub struct Settings {
     pub deck_count: usize,
     pub tempo_range: TempoRange,
     pub keylock_on_load: bool,
+    /// After a mix, the new track eases back to its own tempo (it plays at the old one's).
+    pub tempo_home: bool,
     pub tape_stop_ms: f64,
     pub default_loop_beats: f64,
     pub skip_beats: f64,
@@ -186,6 +188,7 @@ impl Default for Settings {
             deck_count: 4,
             tempo_range: TempoRange::Pct10,
             keylock_on_load: true,
+            tempo_home: true,
             tape_stop_ms: 25.0,
             default_loop_beats: 4.0,
             skip_beats: 16.0,
