@@ -22,8 +22,10 @@ pub enum Update {
     /// No stems for this track: none prepared and no HT-Demucs model, or it failed (`error`, to
     /// report). `cues`: cue points detected from the mix instead, when the request asked for them.
     NoStems { deck: usize, track_id: u64, error: Option<String>, cues: Option<Vec<Cue>> },
-    /// The track's sections (intro, verse, chorus…), found with its stems after `Done`.
-    Sections { deck: usize, track_id: u64, found: Arc<Structure> },
+    /// The track's sections (intro, verse, chorus…), found with its stems after `Done` (empty if
+    /// that failed); `cues`: cue points on them, when the request asked for cue points (they wait
+    /// for the sections then).
+    Sections { deck: usize, track_id: u64, found: Arc<Structure>, cues: Option<Vec<Cue>> },
 }
 
 pub use stems_core::structure::{Beat, Section};
@@ -157,7 +159,8 @@ impl StemWave {
 fn done(job: &Request, tx: &Sender<Update>, stems: StemData, source: String) -> Arc<StemData> {
     let audio = &job.track.audio;
     let wave = Arc::new(StemWave::compute(&audio.frames, audio.sample_rate, &stems));
-    let cues = match (job.detect_cues, job.track.grid) {
+    // (With sections coming, cue points wait for them.)
+    let cues = match (job.detect_cues && !job.sections, job.track.grid) {
         (true, Some(grid)) => {
             let env = dj_library::analysis::Envelope::compute(audio);
             Some(dj_library::analysis::detect_cues(audio, &env, &grid, Some(&stems)))
@@ -181,7 +184,7 @@ fn run(job: Request, wanted: &[AtomicU64; NUM_DECKS], tx: &Sender<Update>, demuc
     let then_sections = |stems: Arc<StemData>| {
         if job.sections {
             let file = job.prepared.as_ref().map(|dir| dir.join(format!("{prepared_key:016x}.sections")));
-            let _ = sections.send(SectionJob { deck, track: job.track.clone(), stems, file, threads: (threads / 2).max(1) });
+            let _ = sections.send(SectionJob { deck, track: job.track.clone(), stems, file, threads: (threads / 2).max(1), detect_cues: job.detect_cues });
         }
     };
     if let Some(dir) = &job.prepared {
@@ -236,6 +239,8 @@ struct SectionJob {
     /// Where they are kept (next to the prepared stems).
     file: Option<PathBuf>,
     threads: usize,
+    /// Detect cue points too, on the sections.
+    detect_cues: bool,
 }
 
 /// Find a track's sections with All-In-One (kept next to its prepared stems, as they take a
@@ -255,12 +260,25 @@ fn sections(job: &SectionJob, tx: &Sender<Update>, model: &mut StructureCache) {
                 }
                 Err(e) => {
                     eprintln!("sections: {e}");
-                    return;
+                    Structure::default()
                 }
             }
         }
     };
-    let _ = tx.send(Update::Sections { deck: job.deck, track_id: job.track.id, found: Arc::new(found) });
+    // Cue points: detected from the sound and stems, then placed on the sections and named after
+    // them (without sections, as detected).
+    let cues = match (job.detect_cues, job.track.grid) {
+        (true, Some(grid)) => {
+            let audio = &job.track.audio;
+            let env = dj_library::analysis::Envelope::compute(audio);
+            let detected = dj_library::analysis::detect_cues(audio, &env, &grid, Some(&job.stems));
+            let secs: Vec<(f64, &str)> = found.sections.iter().map(|s| (s.start, s.label)).collect();
+            let on_sections = dj_library::analysis::cues_from_sections(&secs, &grid, &detected);
+            Some(if on_sections.len() >= 2 { on_sections } else { detected })
+        }
+        _ => None,
+    };
+    let _ = tx.send(Update::Sections { deck: job.deck, track_id: job.track.id, found: Arc::new(found), cues });
 }
 
 /// As text: a line per section, "section start end label", and per beat, "beat secs downbeat".

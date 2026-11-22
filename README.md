@@ -160,6 +160,12 @@ dj reads, from MP3, WAV, AIFF, FLAC, Ogg/Opus and M4A files:
   Break, Vocal, Outro or Phrase. With stems (Demucs), drums, bass and vocals are
   measured directly, so a drop is where drums and bass come in and a vocal cue
   where the singing starts; bars follow the actual beats (live tempo drift).
+  With song sections on (Settings → Stems), the cue points wait for the
+  sections and go on them instead: one per section, on its nearest bar, named
+  after it (Intro, Verse, Chorus, Bridge, Break, Inst, Solo, Outro), and a
+  section that starts where a drop was detected is that **Drop** (the auto
+  mix cuts in on a drop cue). Up to 8: intro, drops, choruses, breaks and
+  outro first, then bridges, instrumentals and verses.
   Settings → Library → *Cue points*: Mixed In Key's (detect only for tracks
   without cues) or dj's detection for every track. For one track that already
   has cues, right-click the deck's number → *Detect cue points*: a detected

@@ -540,7 +540,8 @@ impl Core {
             demucs: self.settings.stems_demucs.clone().filter(|p| p.exists()),
             detect_cues,
             prepared: Some(self.settings.stems_prepared_dir()),
-            sections: self.settings.song_sections && self.decks[d].sections.is_none(),
+            // (Again when cue points are wanted: they're placed on the sections, kept on disk.)
+            sections: self.settings.song_sections && (self.decks[d].sections.is_none() || detect_cues),
         });
     }
 
@@ -639,9 +640,14 @@ impl Core {
                     self.apply_detected_cues(deck, c);
                 }
             }
-            Update::Sections { deck, track_id, found } if current(self, deck, track_id) => {
-                self.decks[deck].sections = Some(Arc::new(found.sections.clone()));
+            Update::Sections { deck, track_id, found, cues } if current(self, deck, track_id) => {
+                if !found.sections.is_empty() {
+                    self.decks[deck].sections = Some(Arc::new(found.sections.clone()));
+                }
                 self.check_grid_with_beats(deck, &found.beats);
+                if let Some(c) = cues {
+                    self.apply_detected_cues(deck, c);
+                }
             }
             Update::NoStems { deck, track_id, error, cues } if current(self, deck, track_id) => {
                 self.decks[deck].stems_progress = None;
@@ -2755,7 +2761,7 @@ mod tests {
             pump(e, c);
             c.snap.decks[0].beat
         };
-        c.on_stems_update(Update::Sections { deck: 0, track_id: id, found: found.clone() });
+        c.on_stems_update(Update::Sections { deck: 0, track_id: id, found: found.clone(), cues: None });
         assert!(c.status.iter().any(|(_, m)| m.contains("corrected") && m.contains("bars start")), "{:?}", c.status);
         // Now the heard downbeat at 0.5 s is a bar's first beat (the deck sits at 0 s).
         let at_half = beat_now(&mut e, &mut c) + 1.0;
@@ -2766,10 +2772,10 @@ mod tests {
             c.decks[0].info.as_mut().unwrap().cues[i] = Some(Cue { kind: CueKind::Hot, secs: g.secs_at_beat(t * 2.0), end_secs: None, name: String::new(), color: [0; 3] });
         }
         c.status.clear();
-        c.on_stems_update(Update::Sections { deck: 0, track_id: id, found });
+        c.on_stems_update(Update::Sections { deck: 0, track_id: id, found, cues: None });
         assert!(!c.status.iter().any(|(_, m)| m.contains("corrected")), "{:?}", c.status);
         assert!((beat_now(&mut e, &mut c) - g.beat_at(0.0)).abs() < 0.05, "grid kept");
-        assert_eq!(c.decks[0].sections.as_deref().map(|s| s.len()), Some(0));
+        assert_eq!(c.decks[0].sections, None, "no sections found: none shown");
     }
 
     #[test]
