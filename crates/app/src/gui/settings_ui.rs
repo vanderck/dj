@@ -490,11 +490,13 @@ fn mapping(ui: &mut Ui, core: &mut Core) {
                         MapMode::Absolute => "Absolute",
                         MapMode::Toggle => "Toggle",
                         MapMode::Relative => "Relative",
+                        MapMode::RelativeCentred => "Relative (64)",
                     })
                     .show_ui(ui, |ui| {
                         changed |= ui.selectable_value(&mut m.mode, MapMode::Absolute, "Absolute").changed();
                         changed |= ui.selectable_value(&mut m.mode, MapMode::Toggle, "Toggle").changed();
                         changed |= ui.selectable_value(&mut m.mode, MapMode::Relative, "Relative").changed();
+                        changed |= ui.selectable_value(&mut m.mode, MapMode::RelativeCentred, "Relative (64)").changed();
                     });
                 changed |= ui.checkbox(&mut m.feedback, "").changed();
                 if ui.small_button("✕").clicked() {
