@@ -7,6 +7,7 @@
 pub mod analysis;
 pub mod crates;
 pub mod key;
+pub mod keydetect;
 pub mod loudness;
 pub mod scan;
 pub mod tags;
@@ -244,6 +245,8 @@ pub struct TrackOverrides {
     pub locked: bool,
     /// Estimated energy (tracks without an energy tag).
     pub energy: Option<u8>,
+    /// Detected key (tracks without a key tag).
+    pub key: Option<key::Key>,
 }
 
 /// What `load` should detect.
@@ -270,6 +273,8 @@ pub struct Detected {
     pub grid_fix: Option<(f64, f64)>,
     /// The tempo changes through the track: it plays by a measured tempo map.
     pub tempo_map: bool,
+    /// The key was detected now (no key tag), and how sure that is (0..1).
+    pub key: Option<(key::Key, f64)>,
 }
 
 /// Decode + read tags + build waveform. Runs on a worker thread.
@@ -323,6 +328,16 @@ pub fn load(path: &Path, overrides: Option<&TrackOverrides>, match_loudness: boo
         }
         if tags.energy.is_none() {
             tags.energy = o.energy;
+        }
+        if tags.key.is_none() {
+            tags.key = o.key;
+        }
+    }
+    // No key tag (nor one detected before): from the audio.
+    if tags.key.is_none() {
+        if let Some((k, sure)) = keydetect::detect(&audio) {
+            tags.key = Some(k);
+            detected.key = Some((k, sure));
         }
     }
 
@@ -413,6 +428,35 @@ pub fn load_sample(path: &Path) -> Result<Arc<AudioData>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_track_without_a_key_tag_gets_its_key_from_the_audio() {
+        // A minor, as a 16-bit WAV without tags.
+        let song = keydetect::tests::song(&[[33, 57, 60, 64], [38, 57, 62, 65], [40, 56, 59, 64], [33, 57, 60, 64]]);
+        let sr = song.sample_rate;
+        let pcm: Vec<u8> = song.frames.iter().flat_map(|f| [f[0], f[1]]).flat_map(|v| ((v * 32000.0) as i16).to_le_bytes()).collect();
+        let mut fmt = Vec::new();
+        for b in [&1u16.to_le_bytes()[..], &2u16.to_le_bytes(), &sr.to_le_bytes(), &(sr * 4).to_le_bytes(), &4u16.to_le_bytes(), &16u16.to_le_bytes()] {
+            fmt.extend_from_slice(b);
+        }
+        let chunk = |id: &[u8], b: &[u8]| [id, &(b.len() as u32).to_le_bytes(), b].concat();
+        let body = [b"WAVE".to_vec(), chunk(b"fmt ", &fmt), chunk(b"data", &pcm)].concat();
+        let wav = [b"RIFF".to_vec(), (body.len() as u32).to_le_bytes().to_vec(), body].concat();
+        let dir = std::env::temp_dir().join(format!("dj-key-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("a-minor.wav");
+        std::fs::write(&p, &wav).unwrap();
+
+        let am = key::Key { pitch: 9, minor: true };
+        let t = load(&p, None, false, DetectOptions::default()).unwrap();
+        assert_eq!(t.tags.key, Some(am));
+        assert_eq!(t.detected.key.map(|(k, _)| k), Some(am), "detected now: to be saved");
+        // Saved: the next load takes it as it was (and doesn't detect again).
+        let saved = TrackOverrides { key: Some(key::Key { pitch: 0, minor: false }), ..Default::default() };
+        let t = load(&p, Some(&saved), false, DetectOptions::default()).unwrap();
+        assert_eq!((t.tags.key, t.detected.key), (saved.key, None));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn decodes_wav_and_reads_id3_chunk() {

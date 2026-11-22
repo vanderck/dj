@@ -110,8 +110,9 @@ impl Profile {
 pub enum Prepared {
     /// Already prepared (as far as the settings allow).
     Already,
-    /// Done: whether stems were separated now, and whether it has sections.
-    Done { separated: bool, sections: bool },
+    /// Done: whether stems were separated now, whether it has sections, and its key if it was
+    /// detected now (no key tag).
+    Done { separated: bool, sections: bool, key: Option<dj_library::key::Key> },
 }
 
 /// Prepare a track for mixing ahead of time, as loading it on a deck would: its grid (checked
@@ -148,7 +149,7 @@ pub fn prepare_track(
     let wave = stems.as_ref().map(|s| StemWave::compute(&audio.frames, audio.sample_rate, s));
     let profile = Profile::build(path, &lt.waveform, wave.as_ref(), grid, audio.duration_secs(), &lt.track.cues, lt.tags.energy, &found.sections).ok_or("too short")?;
     write(dir, path, &profile).map_err(|e| format!("writing the profile: {e}"))?;
-    Ok(Prepared::Done { separated, sections: !found.sections.is_empty() })
+    Ok(Prepared::Done { separated, sections: !found.sections.is_empty(), key: lt.detected.key.map(|(k, _)| k) })
 }
 
 #[cfg(test)]
@@ -182,6 +183,8 @@ mod tests {
 /// Preparing a list of tracks in the background (the library's Prepare).
 pub struct Preparer {
     state: std::sync::Arc<std::sync::Mutex<PrepState>>,
+    /// Keys detected (tracks without a key tag), for the app to keep.
+    keys: std::sync::Arc<std::sync::Mutex<Vec<(PathBuf, dj_library::key::Key)>>>,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -206,7 +209,8 @@ impl Preparer {
         use std::sync::atomic::Ordering;
         let state = std::sync::Arc::new(std::sync::Mutex::new(PrepState { total: tracks.len(), ..Default::default() }));
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let (st, sp) = (state.clone(), stop.clone());
+        let keys = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (st, sp, ks) = (state.clone(), stop.clone(), keys.clone());
         let threads = std::thread::available_parallelism().map(|n| (n.get() / 2).max(1)).unwrap_or(2);
         std::thread::Builder::new()
             .name("prepare".into())
@@ -234,6 +238,11 @@ impl Preparer {
                     if let Err(e) = &r {
                         eprintln!("prepare {}: {e}", path.display());
                     }
+                    if let Ok(Prepared::Done { key: Some(k), .. }) = &r {
+                        if let Ok(mut ks) = ks.lock() {
+                            ks.push((path.clone(), *k));
+                        }
+                    }
                     set(&|s| {
                         s.done += 1;
                         match &r {
@@ -246,7 +255,12 @@ impl Preparer {
                 set(&|s| s.finished = true);
             })
             .expect("spawn prepare");
-        Self { state, stop }
+        Self { state, stop, keys }
+    }
+
+    /// The keys detected since the last call.
+    pub fn take_keys(&self) -> Vec<(PathBuf, dj_library::key::Key)> {
+        self.keys.lock().map(|mut k| std::mem::take(&mut *k)).unwrap_or_default()
     }
 
     pub fn state(&self) -> PrepState {

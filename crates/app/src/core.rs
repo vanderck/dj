@@ -675,6 +675,9 @@ impl Core {
             cues_pending: lt.detected.cues_pending && self.settings.stems_enabled,
         };
         self.save_detected(&lt);
+        if let Some((k, sure)) = lt.detected.key {
+            self.log(format!("Deck {}: no key tag; {} from the audio ({:.0} % sure)", d + 1, self.key_text(Some(k)), sure * 100.0));
+        }
         self.decks[d].track = Some(lt.track.clone());
         self.send(Command::DeckMode { deck: d as u8, mode: DeckMode::Track });
         if self.settings.stems_enabled {
@@ -842,6 +845,14 @@ impl Core {
             }
         }
         let Some(st) = self.preparer.as_ref().map(|p| p.state()) else { return };
+        // Keys found while preparing (tracks without a key tag): kept, and shown in the library.
+        for (path, k) in self.preparer.as_ref().map(|p| p.take_keys()).unwrap_or_default() {
+            self.trackdb.tracks.entry(TrackDb::key(&path)).or_default().key = Some(k);
+            if let Some(e) = self.library.iter_mut().find(|e| e.path == path && e.key.is_none()) {
+                e.key = Some(k);
+            }
+            self.mark_dirty();
+        }
         if st.finished {
             self.preparer = None;
             // Profiles read before may have changed, and with them the scores.
@@ -865,7 +876,7 @@ impl Core {
     /// the library have it; untagged library entries show the detected BPM and energy.
     fn save_detected(&mut self, lt: &LoadedTrack) {
         let det = &lt.detected;
-        if !det.grid && det.energy.is_none() && !det.cues {
+        if !det.grid && det.energy.is_none() && !det.cues && det.key.is_none() {
             return;
         }
         let key = TrackDb::key(&lt.path);
@@ -880,7 +891,13 @@ impl Core {
         if det.cues {
             o.cues = Some(lt.track.cues.to_vec());
         }
+        if let Some((k, _)) = det.key {
+            o.key = Some(k);
+        }
         if let Some(e) = self.library.iter_mut().find(|e| e.path == lt.path) {
+            if e.key.is_none() {
+                e.key = det.key.map(|(k, _)| k);
+            }
             if e.bpm.is_none() {
                 e.bpm = lt.track.grid.map(|g| g.bpm);
             }
@@ -891,15 +908,18 @@ impl Core {
         self.mark_dirty();
     }
 
-    /// Library entries without BPM / energy tags get the values detected earlier.
+    /// Library entries without BPM / energy / key tags get the values detected earlier.
     fn fill_detected(&self, library: &mut [dj_library::scan::Entry]) {
-        for e in library.iter_mut().filter(|e| e.bpm.is_none() || e.energy.is_none()) {
+        for e in library.iter_mut().filter(|e| e.bpm.is_none() || e.energy.is_none() || e.key.is_none()) {
             if let Some(o) = self.trackdb.tracks.get(&TrackDb::key(&e.path)) {
                 if e.bpm.is_none() && o.grid_detected {
                     e.bpm = o.grid.map(|g| g.bpm);
                 }
                 if e.energy.is_none() {
                     e.energy = o.energy;
+                }
+                if e.key.is_none() {
+                    e.key = o.key;
                 }
             }
         }
