@@ -834,6 +834,52 @@ pub fn detect_cues(audio: &AudioData, env: &Envelope, grid: &BeatGrid, stems: Op
         .collect()
 }
 
+/// How a beat grid fits the beats a model hears (All-In-One: beat times, and how surely each
+/// starts a bar).
+#[derive(Clone, Debug, PartialEq)]
+pub struct BeatCheck {
+    /// The share of the heard beats that fall on the grid's beats (within 40 ms).
+    pub agree: f64,
+    /// The grid's beats fall between the heard ones: move beat 0 half a beat later (`bar_shift`
+    /// counts from there).
+    pub offbeat: bool,
+    /// The heard bars start this many beats after the grid's (1–3): move beat 0 that many beats
+    /// later.
+    pub bar_shift: Option<i64>,
+}
+
+/// Check a grid (`beat_at`: its beat at a time; `spb`: seconds per beat) against heard beats
+/// (`(secs, downbeat 0..1)`). `None` with too few beats to tell.
+pub fn check_beats(beat_at: impl Fn(f64) -> f64, spb: f64, beats: &[(f64, f32)]) -> Option<BeatCheck> {
+    if beats.len() < 32 || spb <= 0.0 {
+        return None;
+    }
+    let tol = 0.04 / spb;
+    let resid = |b: f64| b - b.round();
+    let on = beats.iter().filter(|(t, _)| resid(beat_at(*t)).abs() < tol).count();
+    let half = beats.iter().filter(|(t, _)| resid(beat_at(*t) - 0.5).abs() < tol).count();
+    let n = beats.len() as f64;
+    let offbeat = half as f64 > 0.6 * n && (on as f64) < 0.2 * n;
+    let shift = if offbeat { 0.5 } else { 0.0 };
+    // Bars: the mean downbeat strength on each beat of the bar (beats on the grid).
+    let (mut sum, mut count) = ([0.0f64; 4], [0usize; 4]);
+    for (t, d) in beats {
+        let b = beat_at(*t) - shift;
+        if resid(b).abs() < tol {
+            let k = (b.round() as i64).rem_euclid(4) as usize;
+            sum[k] += *d as f64;
+            count[k] += 1;
+        }
+    }
+    let mean: Vec<f64> = (0..4).map(|k| if count[k] >= 8 { sum[k] / count[k] as f64 } else { 0.0 }).collect();
+    let best = (0..4).max_by(|a, b| mean[*a].total_cmp(&mean[*b])).unwrap_or(0);
+    let second = (0..4).filter(|k| *k != best).map(|k| mean[k]).fold(0.0, f64::max);
+    // (All-In-One's downbeat activations peak around 0.5: what counts is how clearly one beat
+    // of the bar stands out.)
+    let sure = mean[best] >= 0.2 && mean[best] >= 2.0 * second;
+    Some(BeatCheck { agree: on.max(half) as f64 / n, offbeat, bar_shift: (sure && best != 0).then_some(best as i64) })
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -1014,5 +1060,31 @@ pub(crate) mod tests {
         let steady_track = track(124.0, 0.5, &[(true, true, true, false); 64]);
         let env = Envelope::compute(&steady_track);
         assert_eq!(tempo_map(&env, &BeatGrid { bpm: 124.0, anchor_secs: 0.5 }), None);
+    }
+
+    #[test]
+    fn heard_beats_check_the_grid() {
+        // 120 BPM; heard beats every 0.5 s from 0.25 s, bars starting on the 2nd of them.
+        let heard: Vec<(f64, f32)> = (0..200).map(|k| (0.25 + 0.5 * k as f64, if k % 4 == 1 { 0.9 } else { 0.1 })).collect();
+        let check = |anchor: f64| {
+            let g = BeatGrid { bpm: 120.0, anchor_secs: anchor };
+            check_beats(|t| g.beat_at(t), 0.5, &heard).unwrap()
+        };
+        // On the beats, bars from the first: the heard bars are a beat later.
+        let c = check(0.25);
+        assert_eq!((c.agree, c.offbeat, c.bar_shift), (1.0, false, Some(1)));
+        // Already on the bars.
+        assert_eq!(check(0.75).bar_shift, None);
+        // Half a beat off: the beats fall between; the bars are still found.
+        let c = check(0.5);
+        assert!(c.offbeat && c.agree == 1.0, "{c:?}");
+        assert_eq!(c.bar_shift, None, "half a beat later, beat 0 is at 0.75 s: a downbeat");
+        let c = check(0.0);
+        assert!(c.offbeat && c.bar_shift == Some(1), "beat 0 at 0.25 s after the move: {c:?}");
+        // No clear downbeats: the bars are left alone.
+        let flat: Vec<(f64, f32)> = heard.iter().map(|(t, _)| (*t, 0.3)).collect();
+        let g = BeatGrid { bpm: 120.0, anchor_secs: 0.25 };
+        assert_eq!(check_beats(|t| g.beat_at(t), 0.5, &flat).unwrap().bar_shift, None);
+        assert_eq!(check_beats(|t| g.beat_at(t), 0.5, &heard[..10]), None, "too few to tell");
     }
 }

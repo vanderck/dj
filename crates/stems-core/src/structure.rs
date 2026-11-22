@@ -38,10 +38,19 @@ pub struct Section {
     pub label: &'static str,
 }
 
+/// A beat the model hears: when (seconds) and how surely it starts a bar (0..1).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Beat {
+    pub secs: f64,
+    pub downbeat: f32,
+}
+
 /// What the model finds in a track.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Structure {
     pub sections: Vec<Section>,
+    /// The beats, picked from the activations (see [`beats`]).
+    pub beats: Vec<Beat>,
     /// Beat and downbeat activations (0..1), 100 per second.
     pub beat: Vec<f32>,
     pub downbeat: Vec<f32>,
@@ -232,6 +241,41 @@ pub fn mono_44k(frames: impl Iterator<Item = [f32; 2]>, rate: u32) -> Vec<f32> {
     }
 }
 
+/// Beats from the activations (100 a second): peaks above 0.3 that are the highest within
+/// ±80 ms, timed between frames by the peak's shape; each with the strongest downbeat activation
+/// within ±20 ms.
+pub fn beats(beat: &[f32], downbeat: &[f32]) -> Vec<Beat> {
+    let n = beat.len();
+    let half = 8;
+    (1..n.saturating_sub(1))
+        .filter(|&i| {
+            let v = beat[i];
+            v >= 0.3
+                && beat[i.saturating_sub(half)..(i + half + 1).min(n)]
+                    .iter()
+                    .all(|&w| w <= v)
+                && beat[i - 1] < v
+        })
+        .map(|i| {
+            let (a, b, c) = (beat[i - 1] as f64, beat[i] as f64, beat[i + 1] as f64);
+            let d = a - 2.0 * b + c;
+            let off = if d < 0.0 {
+                (0.5 * (a - c) / d).clamp(-0.5, 0.5)
+            } else {
+                0.0
+            };
+            let db = downbeat[i.saturating_sub(2)..(i + 3).min(downbeat.len())]
+                .iter()
+                .copied()
+                .fold(0.0, f32::max);
+            Beat {
+                secs: (i as f64 + off) / FPS,
+                downbeat: db,
+            }
+        })
+        .collect()
+}
+
 #[cfg(any(feature = "onnx", feature = "onnx-dynamic"))]
 pub use model::StructureModel;
 
@@ -299,10 +343,12 @@ mod model {
             let functions: Vec<Vec<f32>> = (0..LABELS.len())
                 .map(|k| function[k * t..k * t + frames].to_vec())
                 .collect();
+            let (beat, downbeat) = (sig(flat("beat")?), sig(flat("downbeat")?));
             Ok(Structure {
                 sections: sections(&section[..frames], &functions),
-                beat: sig(flat("beat")?),
-                downbeat: sig(flat("downbeat")?),
+                beats: beats(&beat, &downbeat),
+                beat,
+                downbeat,
             })
         }
     }
@@ -319,6 +365,35 @@ mod tests {
         for f in &fb {
             let sum: f32 = f.iter().map(|(_, w)| w).sum();
             assert!((sum - 1.0).abs() < 1e-4, "normalised");
+        }
+    }
+
+    #[test]
+    fn beats_are_the_activation_peaks() {
+        // Beats every 50 frames (0.5 s), peaking a third of a frame late; every 4th a downbeat.
+        let n = 1000;
+        let bump =
+            |i: usize, k: usize| (-(((i as f32) - (50 * k) as f32 - 0.33) / 2.0).powi(2)).exp();
+        let beat: Vec<f32> = (0..n)
+            .map(|i| (1..20).map(|k| bump(i, k)).sum::<f32>() * 0.9)
+            .collect();
+        let down: Vec<f32> = (0..n)
+            .map(|i| {
+                (1..20)
+                    .filter(|k| k % 4 == 0)
+                    .map(|k| bump(i, k))
+                    .sum::<f32>()
+                    * 0.8
+            })
+            .collect();
+        let b = beats(&beat, &down);
+        assert_eq!(b.len(), 19);
+        for (k, x) in b.iter().enumerate() {
+            assert!(
+                (x.secs - (k + 1) as f64 * 0.5 - 0.0033).abs() < 0.001,
+                "{x:?}"
+            );
+            assert_eq!(x.downbeat > 0.5, (k + 1) % 4 == 0, "{x:?}");
         }
     }
 

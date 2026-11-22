@@ -96,6 +96,15 @@ first time; the result is kept next to the prepared stems (`<key>.sections`). Th
 progress strip has a notch where each section starts: hover it for the name. The auto mix uses
 them (see below). Settings → Stems → *Find song sections* turns it off.
 
+**Grids checked by ear.** All-In-One also hears the beats and which of them start a bar (kept
+with the sections). Once they're in, dj checks the deck's grid against them and says so in the
+status line ("grid checked: 100 % of the beats All-In-One hears are on it"). Two mistakes it
+corrects, for that load: a grid half a beat off (on the offbeats: a track without kicks to
+place it), and bars that start on the wrong beat, unless the cue points (Mixed In Key's, on
+phrase starts) put the bars where the grid has them. A grid you set yourself, or one that
+follows a tempo map, is only reported on; one that doesn't follow the beats at all (under half
+agree) gets a "check its BPM".
+
 **Playing with stems**: each stem's level can be put on its channel fader (Drums / Bass / Vocals /
 Other, in the fader popup), and the popup's *Stems* group turns them all back to the plain mix. Stems are mixed where the deck reads audio, before key lock, loops, slip and hot
 cues, so there is no added latency. MIDI and OSC: `Deck/N/StemDrums` … `StemOther` (switches),
