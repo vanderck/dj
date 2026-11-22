@@ -311,7 +311,13 @@ fn strip(ui: &mut Ui, core: &mut Core, st: &mut UiState, ch: usize, rect: Rect) 
     // The fader: volume, an EQ band, the filter, a stem or the deck's tempo.
     let track = Rect::from_min_max(Pos2::new(r.left() + 4.0, chip.bottom() + 8.0), Pos2::new(r.right() - 4.0, r.bottom()));
     let level = mode == FaderMode::Level;
-    let meter = if level { view.post_peak[0].max(view.post_peak[1]) } else { 0.0 };
+    // The volume meter for volume; for a stem, that stem's own level (as it reaches the channel
+    // fader: times its volume).
+    let meter = match mode.stem() {
+        _ if level => view.post_peak[0].max(view.post_peak[1]),
+        Some(i) => core.snap.decks[ch].stem_peaks[i] * if p.mute { 0.0 } else { p.volume },
+        None => 0.0,
+    };
     // Muted (over MIDI or the channel menu) is volume off: the fader shows it at the bottom.
     let shown = if level && p.mute { 0.0 } else { t.value };
     let (resp, mut new) = vfader(ui, track, shown, mode_color, meter, t.centred);
@@ -821,6 +827,30 @@ mod tests {
         assert_eq!(st.fader_mode[1], FaderMode::Drums, "deck 2's fader now shows its drums");
         assert_eq!(st.fader_mode[0], FaderMode::Level, "the others keep theirs");
         assert!(st.fader_popup.is_some_and(|(m, ch, _)| m == FaderMode::Drums && ch == 1), "outlined");
+    }
+
+    #[test]
+    fn a_stem_fader_shows_that_stems_meter() {
+        let (_e, mut c, _config) = crate::core::tests::core();
+        let ctx = eframe::egui::Context::default();
+        super::super::skin::install_fonts(&ctx);
+        let mut st = crate::gui::UiState::default();
+        st.fader_mode[0] = FaderMode::Drums;
+        c.session.channels[0].params.volume = 1.0;
+        let mut shapes = |c: &mut crate::core::Core, peaks: [f32; 4]| {
+            c.snap.decks[0].stem_peaks = peaks;
+            let mut out = ctx.run_ui(eframe::egui::RawInput::default(), |ui| {
+                let r = eframe::egui::Rect::from_min_size(eframe::egui::Pos2::ZERO, eframe::egui::Vec2::new(600.0, 500.0));
+                super::show(ui, c, &mut st, r);
+            });
+            out.textures_delta.clear(); // (no GPU here to upload them to)
+            out.shapes.len()
+        };
+        let quiet = shapes(&mut c, [0.0; 4]);
+        let other_stems = shapes(&mut c, [0.0, 0.8, 0.8, 0.8]);
+        let drums = shapes(&mut c, [0.8, 0.0, 0.0, 0.0]);
+        assert_eq!(other_stems, quiet, "only the drums' level shows on a drums fader");
+        assert!(drums > quiet, "its meter is drawn ({drums} vs {quiet} shapes)");
     }
 
     #[test]

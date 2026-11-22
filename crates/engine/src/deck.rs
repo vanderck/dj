@@ -230,6 +230,9 @@ pub struct DeckView {
     pub stems_ready: bool,
     /// Requested per-stem gains in [`crate::track::Stem`] order.
     pub stem_gains: [f32; NUM_STEMS],
+    /// Each stem's peak level as heard (after its gain), [`crate::track::Stem`] order; 0 without
+    /// stems.
+    pub stem_peaks: [f32; NUM_STEMS],
 }
 
 pub struct Deck {
@@ -281,6 +284,8 @@ pub struct Deck {
     stem_target: [f32; NUM_STEMS],
     /// Smoothed per-stem gains actually applied (avoids clicks on mute).
     stem_gain: [f32; NUM_STEMS],
+    /// Per-stem peak meters (see [`DeckView::stem_peaks`]).
+    stem_meter: [f32; NUM_STEMS],
 }
 
 /// Time constant for stem gain changes.
@@ -340,6 +345,7 @@ impl Deck {
             stems: None,
             stem_target: [1.0; NUM_STEMS],
             stem_gain: [1.0; NUM_STEMS],
+            stem_meter: [0.0; NUM_STEMS],
         }
     }
 
@@ -526,6 +532,7 @@ impl Deck {
             phase_error: self.last_phase_error,
             stems_ready: self.stems.is_some(),
             stem_gains: self.stem_target,
+            stem_peaks: self.stem_meter,
         }
     }
 
@@ -1172,6 +1179,42 @@ impl Deck {
     }
 
     /// Render one block. `out` is overwritten.
+    /// The stem meters: each stem's peak over what this block played (from track frame `from` to
+    /// where it is now), after its gain, falling like the channel meters (0.9 a block).
+    fn meter_stems(&mut self, stems: Option<&crate::track::StemData>, frames: &[Frame], from: f64, n: usize) {
+        for m in self.stem_meter.iter_mut() {
+            *m *= 0.9;
+        }
+        let Some(st) = stems else {
+            self.stem_meter = [0.0; NUM_STEMS];
+            return;
+        };
+        if self.motor <= 0.0 {
+            return;
+        }
+        let len = frames.len().min(st.drums.len()).min(st.bass.len()).min(st.vocals.len());
+        let (a, b) = (from.min(self.pos).max(0.0) as usize, (from.max(self.pos).ceil() as usize).min(len));
+        if b <= a {
+            return;
+        }
+        // (At most about a block's worth of frames looked at, whatever the speed.)
+        let stride = (b - a).div_ceil(n.max(64)).max(1);
+        let mut peak = [0.0f32; NUM_STEMS];
+        for i in (a..b).step_by(stride) {
+            let (d, ba, v) = (st.drums[i], st.bass[i], st.vocals[i]);
+            for c in 0..2 {
+                let (d, ba, v) = (d[c] as f32 * st.scale, ba[c] as f32 * st.scale, v[c] as f32 * st.scale);
+                let o = frames[i][c] - d - ba - v;
+                for (p, x) in peak.iter_mut().zip([d, ba, v, o]) {
+                    *p = p.max(x.abs());
+                }
+            }
+        }
+        for s in 0..NUM_STEMS {
+            self.stem_meter[s] = self.stem_meter[s].max(peak[s] * self.stem_gain[s]);
+        }
+    }
+
     pub fn process(&mut self, out: &mut [Frame], ctx: &DeckCtx) {
         let Some(track) = self.track.clone() else {
             out.fill([0.0; 2]);
@@ -1179,6 +1222,7 @@ impl Deck {
         };
         let frames = &track.audio.frames[..];
         let stems = self.stems.clone();
+        let meter_from = self.pos;
         let stem_coeff = (1.0 - (-1.0 / (STEM_SMOOTH_SECS * self.out_rate)).exp()) as f32;
         let len = frames.len() as f64;
         let sr = track.audio.sample_rate as f64;
@@ -1376,5 +1420,6 @@ impl Deck {
                 self.pos = 0.0;
             }
         }
+        self.meter_stems(stems.as_deref(), frames, meter_from, n);
     }
 }

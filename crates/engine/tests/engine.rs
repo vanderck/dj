@@ -670,3 +670,31 @@ fn a_playing_deck_takes_the_clock_when_nobody_has_it() {
     assert!((s.clock.bpm - 122.0).abs() < 0.01, "{}", s.clock.bpm);
     assert!((s.decks[1].bpm - 122.0).abs() < 0.01, "kept its tempo: {}", s.decks[1].bpm);
 }
+
+#[test]
+fn each_stem_has_a_meter() {
+    let (mut e, mut c) = setup();
+    let (track, stems) = stem_track(50);
+    send(&mut c, Command::Load { deck: 0, track, start_at_first_cue: false });
+    send(&mut c, Command::GlobalQuantize(None));
+    deck(&mut c, 0, DeckCmd::Play);
+    run(&mut e, 20);
+    assert_eq!(e.snapshot().decks[0].stem_peaks, [0.0; 4], "no stems: no stem meters");
+    send(&mut c, Command::AttachStems { deck: 0, stems });
+    run(&mut e, 20);
+    let p = e.snapshot().decks[0].stem_peaks;
+    // Bass 0.4, vocals 0.3, no drums, nothing else (16-bit stems: a little noise in "other").
+    assert!((p[Stem::Bass as usize] - 0.4).abs() < 0.02, "{p:?}");
+    assert!((p[Stem::Vocals as usize] - 0.3).abs() < 0.02, "{p:?}");
+    assert!(p[Stem::Drums as usize] < 0.001 && p[Stem::Other as usize] < 0.01, "{p:?}");
+    // A stem turned down: its meter falls; the others stay.
+    deck(&mut c, 0, DeckCmd::StemGain { stem: Stem::Vocals as u8, gain: 0.0 });
+    run(&mut e, 80);
+    let p = e.snapshot().decks[0].stem_peaks;
+    assert!(p[Stem::Vocals as usize] < 0.01, "{p:?}");
+    assert!((p[Stem::Bass as usize] - 0.4).abs() < 0.02, "{p:?}");
+    // Paused: they fall too.
+    deck(&mut c, 0, DeckCmd::Pause);
+    run(&mut e, 200);
+    assert!(e.snapshot().decks[0].stem_peaks.iter().all(|x| *x < 0.01));
+}
