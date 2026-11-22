@@ -259,6 +259,19 @@ pub struct Suggestion {
     pub why: String,
 }
 
+/// After a mix that shifted the new track's key to fit, it goes back to its own key on its next
+/// phrase line (a transposed track plays through the time-stretcher, which smears it a little).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct KeyHome {
+    pub deck: usize,
+    pub track_id: u64,
+    /// Its own key (semitones), and the shifted one it plays at until then.
+    pub to: f64,
+    pub from: f64,
+    /// The deck's beat (its own grid) of that phrase line.
+    pub at: f64,
+}
+
 /// After a mix the new track plays at the old one's tempo; it eases back to its own.
 #[derive(Clone, Copy, Debug)]
 pub struct TempoHome {
@@ -1149,6 +1162,22 @@ impl Core {
         }
     }
 
+    /// Back to its own key once it reaches the phrase line (see [`KeyHome`]); a key you set
+    /// yourself meanwhile, or another track loaded, stays.
+    fn key_home_tick(&mut self) {
+        let Some(kh) = self.key_home else { return };
+        let v = self.snap.decks[kh.deck];
+        if v.track_id != kh.track_id || !v.loaded || (v.semitones - kh.from).abs() > 1e-6 {
+            self.key_home = None;
+            return;
+        }
+        if v.beat >= kh.at {
+            self.key_home = None;
+            self.deck_cmd(kh.deck, DeckCmd::Semitones(kh.to));
+            self.log(format!("Deck {} is back in its own key", kh.deck + 1));
+        }
+    }
+
     /// Ease the new track's tempo back to its own, once it leads the clock.
     fn tempo_home_tick(&mut self) {
         let Some(mut th) = self.tempo_home else { return };
@@ -1382,6 +1411,7 @@ impl Core {
     pub(super) fn automix_tick(&mut self) {
         self.vocal_return_tick();
         self.tempo_home_tick();
+        self.key_home_tick();
         self.order_hint_tick();
         let now = self.snap.clock.beat;
         let due: Vec<_> = self.echo_cleanup.iter().copied().filter(|e| now >= e.2).collect();
@@ -1594,6 +1624,18 @@ impl Core {
                     track_id: vi.track_id,
                     at_clock: self.snap.clock.beat + (b - vi.beat),
                     level: in_stems[VOCALS],
+                });
+            }
+            // Its own key again, on its next phrase line (8 bars of its grid, a bar away at
+            // least), if the mix shifted it to fit.
+            if let Some(m) = self.automix.as_ref().filter(|m| m.plan.transpose != 0) {
+                let at = ((vi.beat + 4.0) / 32.0).ceil() * 32.0;
+                self.key_home = vi.has_grid.then_some(KeyHome {
+                    deck: i,
+                    track_id: vi.track_id,
+                    to: m.in_semitones,
+                    from: m.in_semitones + m.plan.transpose as f64,
+                    at,
                 });
             }
             self.automix = None;
