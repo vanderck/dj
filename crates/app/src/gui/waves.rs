@@ -49,7 +49,7 @@ fn draw_lane(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, lane: Rec
             p.rect_stroke(lane, CornerRadius::same(4), Stroke::new(2.0, color), egui::StrokeKind::Inside);
             if ctx.input(|i| i.pointer.any_released()) {
                 if let Some(path) = egui::DragAndDrop::take_payload::<PathBuf>(&ctx) {
-                    core.load_track(d, &path);
+                    core.request_load(d, &path);
                 }
             }
         }

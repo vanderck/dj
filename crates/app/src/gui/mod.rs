@@ -291,6 +291,7 @@ impl eframe::App for App {
 
         fx::windows(&ctx, &mut self.core, &mut self.ui);
         settings_ui::windows(&ctx, &mut self.core, &mut self.ui);
+        load_alert(&ctx, &mut self.core);
 
         if self.last_save.elapsed() > Duration::from_secs(60) {
             self.last_save = Instant::now();
@@ -320,5 +321,71 @@ impl Drop for App {
     fn drop(&mut self) {
         self.core.save_all();
         crate::settings::flush_writes();
+    }
+}
+
+/// Loading onto a deck that's playing: asked first (Return loads, Escape or a click outside keeps
+/// the deck as it is; on a controller, LOAD again for the same track loads it).
+fn load_alert(ctx: &egui::Context, core: &mut Core) {
+    let Some((d, path)) = core.pending_load.clone() else { return };
+    let playing = core.decks[d].info.as_ref().map(|i| i.title()).unwrap_or_default();
+    let new = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let mut answer = None;
+    let modal = egui::Modal::new(egui::Id::new("load-alert")).show(ctx, |ui| {
+        ui.set_width(380.0);
+        ui.label(egui::RichText::new(format!("Deck {} is playing", d + 1)).strong().size(16.0).color(skin::DECK[d]));
+        ui.add_space(6.0);
+        ui.label(format!("Load \"{new}\" onto it? \"{playing}\" stops."));
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            if ui.button(egui::RichText::new("Load").strong()).clicked() {
+                answer = Some(true);
+            }
+            if ui.button("Cancel").clicked() {
+                answer = Some(false);
+            }
+        });
+    });
+    if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+        answer = Some(true);
+    }
+    if modal.should_close() {
+        answer = answer.or(Some(false));
+    }
+    match answer {
+        Some(true) => core.confirm_load(),
+        Some(false) => core.cancel_load(),
+        None => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use eframe::egui;
+
+    fn frame(ctx: &egui::Context, c: &mut crate::core::Core, key: Option<egui::Key>) {
+        let mut input = egui::RawInput::default();
+        if let Some(key) = key {
+            input.events.push(egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() });
+        }
+        let mut out = ctx.run_ui(input, |ui| super::load_alert(ui.ctx(), c));
+        out.textures_delta.clear(); // (no GPU here to upload them to)
+    }
+
+    #[test]
+    fn the_load_alert_loads_on_return_and_keeps_the_deck_on_escape() {
+        let (_e, mut c, _config) = crate::core::tests::core();
+        let ctx = egui::Context::default();
+        super::skin::install_fonts(&ctx);
+        let path = std::path::PathBuf::from("/music/next.wav");
+        c.pending_load = Some((0, path.clone()));
+        frame(&ctx, &mut c, None);
+        assert!(c.pending_load.is_some(), "shown, waiting");
+        frame(&ctx, &mut c, Some(egui::Key::Escape));
+        assert!(c.pending_load.is_none() && c.decks[0].loading.is_none(), "Escape: nothing loads");
+        c.pending_load = Some((0, path.clone()));
+        frame(&ctx, &mut c, Some(egui::Key::Enter));
+        assert!(c.pending_load.is_none());
+        assert_eq!(c.decks[0].loading.as_deref(), Some(path.as_path()), "Return: it loads");
     }
 }

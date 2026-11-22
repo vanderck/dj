@@ -32,7 +32,7 @@ fn accept_drop(ui: &mut Ui, core: &mut Core, d: usize, rect: Rect) {
                     let lane = core.session.decks[d].sampler.selected_lane;
                     core.load_sample(d, lane, &p);
                 } else {
-                    core.load_track(d, &p);
+                    core.request_load(d, &p);
                 }
             }
         }
