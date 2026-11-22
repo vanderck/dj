@@ -252,7 +252,7 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
         button(ui, rr, label, style, bold(17.0 * k.min(1.35)))
     };
     let play_style = if v.playing { Style::Fill(color) } else if v.play_pending { Style::Outline(color, true) } else { Style::Outline(color, false) };
-    let resp = big_btn(ui, if v.playing { "Pause" } else if v.play_pending { "Wait…" } else { "Play" }, play_style, 1.0);
+    let resp = big_btn(ui, if v.playing { PAUSE } else if v.play_pending { "Wait…" } else { PLAY }, play_style, 1.0);
     learnable(core, &resp, &a("PlayPause"));
     if resp.clicked() {
         act_i(core, &a("PlayPause"), 1);
@@ -624,7 +624,7 @@ pub fn compact(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: R
     let resp = button(
         ui,
         play_r,
-        if playing { "Pause" } else { "Play" },
+        if playing { PAUSE } else { PLAY },
         if playing { Style::Fill(color) } else { Style::Outline(color, false) },
         bold(15.0),
     );
@@ -665,7 +665,7 @@ fn sampler(ui: &mut Ui, core: &mut Core, d: usize, rect: Rect) {
     badge_menu(ui, core, d, badge, 20.0);
     ui.painter().text(Pos2::new(badge.right() + 12.0, badge.center().y), Align2::LEFT_CENTER, format!("Sampler · {}", sm.name), bold(16.0), TEXT);
     let pr = Rect::from_min_size(Pos2::new(r.right() - 90.0, r.top()), Vec2::new(90.0, hh));
-    let resp = button(ui, pr, if sv.playing { "Pause" } else { "Play" }, if sv.playing { Style::Fill(color) } else { Style::Outline(color, false) }, bold(15.0));
+    let resp = button(ui, pr, if sv.playing { PAUSE } else { PLAY }, if sv.playing { Style::Fill(color) } else { Style::Outline(color, false) }, bold(15.0));
     learnable(core, &resp, &format!("Deck/{n}/Sampler/PlayPause"));
     if resp.clicked() {
         act_i(core, &format!("Deck/{n}/Sampler/PlayPause"), 1);
