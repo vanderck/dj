@@ -834,6 +834,61 @@ pub fn detect_cues(audio: &AudioData, env: &Envelope, grid: &BeatGrid, stems: Op
         .collect()
 }
 
+/// Cue points from a song's sections (All-In-One: start in seconds and label: "intro",
+/// "verse", "chorus", "bridge", "break", "inst", "solo", "outro"), each on the grid's bar nearest
+/// its start, named after it. Sections that repeat a label in a row are one. The cues detected
+/// from the sound (`found`) name what the labels don't say: a section starting where a drop was
+/// found (within a bar) is that drop, and drops between sections are kept. At most 8: the intro,
+/// drops, choruses, breaks and outro first, then bridges, instrumentals and verses.
+pub fn cues_from_sections(sections: &[(f64, &str)], grid: &BeatGrid, found: &[Cue]) -> Vec<Cue> {
+    let spb = grid.seconds_per_beat();
+    let on_bar = |t: f64| {
+        let b = grid.beat_at(t);
+        grid.secs_at_beat((b / 4.0).round() * 4.0).max(0.0)
+    };
+    let style = |label: &str| -> Option<(&'static str, [u8; 3], u8)> {
+        Some(match label {
+            "intro" => ("Intro", Section::Intro.color(), 7),
+            "chorus" => ("Chorus", [0xec, 0x48, 0x99], 5),
+            "break" => ("Break", Section::Break.color(), 5),
+            "outro" => ("Outro", Section::Outro.color(), 5),
+            "bridge" => ("Bridge", [0x14, 0xb8, 0xa6], 3),
+            "inst" => ("Inst", Section::Phrase.color(), 2),
+            "solo" => ("Solo", [0xea, 0xb3, 0x08], 2),
+            "verse" => ("Verse", Section::Vocal.color(), 1),
+            _ => return None,
+        })
+    };
+    let drops: Vec<f64> = found.iter().filter(|c| c.name == "Drop").map(|c| c.secs).collect();
+    let near_drop = |t: f64| drops.iter().any(|d| (d - t).abs() <= 4.0 * spb + 0.01);
+    let mut cues: Vec<(Cue, u8)> = Vec::new();
+    let mut last = "";
+    for &(start, label) in sections {
+        if label == last {
+            continue;
+        }
+        last = label;
+        let Some((name, color, rank)) = style(label) else { continue };
+        let secs = on_bar(start);
+        if cues.iter().any(|(c, _)| (c.secs - secs).abs() < 0.01) {
+            continue;
+        }
+        let (name, color, rank) = if label != "intro" && near_drop(secs) { ("Drop", Section::Drop.color(), 6) } else { (name, color, rank) };
+        cues.push((Cue { kind: CueKind::Hot, secs, end_secs: None, name: name.into(), color }, rank));
+    }
+    // Drops the sections don't start on.
+    for d in &drops {
+        if !cues.iter().any(|(c, _)| (c.secs - d).abs() <= 4.0 * spb + 0.01) {
+            cues.push((Cue { kind: CueKind::Hot, secs: *d, end_secs: None, name: "Drop".into(), color: Section::Drop.color() }, 6));
+        }
+    }
+    cues.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.secs.total_cmp(&b.0.secs)));
+    cues.truncate(8);
+    let mut cues: Vec<Cue> = cues.into_iter().map(|(c, _)| c).collect();
+    cues.sort_by(|a, b| a.secs.total_cmp(&b.secs));
+    cues
+}
+
 /// How a beat grid fits the beats a model hears (All-In-One: beat times, and how surely each
 /// starts a bar).
 #[derive(Clone, Debug, PartialEq)]
@@ -1086,5 +1141,21 @@ pub(crate) mod tests {
         let g = BeatGrid { bpm: 120.0, anchor_secs: 0.25 };
         assert_eq!(check_beats(|t| g.beat_at(t), 0.5, &flat).unwrap().bar_shift, None);
         assert_eq!(check_beats(|t| g.beat_at(t), 0.5, &heard[..10]), None, "too few to tell");
+    }
+
+    #[test]
+    fn cues_come_from_the_sections() {
+        // 120 BPM: bars every 2 s. A section a little off a bar starts on the nearest one.
+        let g = BeatGrid { bpm: 120.0, anchor_secs: 0.0 };
+        let secs = [(0.0, "intro"), (16.3, "verse"), (31.8, "verse"), (48.1, "chorus"), (64.0, "break"), (80.2, "chorus"), (112.0, "outro"), (127.0, "end")];
+        let found = [Cue { kind: CueKind::Hot, secs: 48.0, end_secs: None, name: "Drop".into(), color: [0; 3] }];
+        let cues = cues_from_sections(&secs, &g, &found);
+        let got: Vec<(f64, &str)> = cues.iter().map(|c| (c.secs, c.name.as_str())).collect();
+        assert_eq!(got, vec![(0.0, "Intro"), (16.0, "Verse"), (48.0, "Drop"), (64.0, "Break"), (80.0, "Chorus"), (112.0, "Outro")]);
+        // More than 8 sections: verses give way first.
+        let many: Vec<(f64, &str)> = (0..12).map(|k| (16.0 * k as f64, ["verse", "chorus"][k % 2])).collect();
+        let cues = cues_from_sections(&many, &g, &[]);
+        assert_eq!(cues.len(), 8);
+        assert_eq!(cues.iter().filter(|c| c.name == "Chorus").count(), 6, "every chorus kept");
     }
 }
