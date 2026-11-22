@@ -254,9 +254,12 @@ One screen, laid out for 1600×1000 points and fitted to the window:
 - **Browser**: **Import folder** opens the system folder picker (every
   subfolder is included; on macOS this also grants access to an external
   drive); folders can also be typed in Settings → Library. Search, All tracks /
-  History, **Fits**: tracks whose key mixes
-  with the master deck and whose BPM is within ±5, best match first and
-  focused; Quantize and Menu (settings, recording, layout); Title, Artist, BPM,
+  History, **Fits** (what to play next): tracks whose key mixes with the
+  master deck and whose tempo is within 5 % of it, best first and focused:
+  the key, the tempo gap, the energy (level or a step up best), and for
+  prepared tracks (or ones that have been on a deck) how well dj would
+  actually mix them in from here, by the same transition search the auto mix
+  uses. Those have a green dot; hover one for how (length and reasons); Quantize and Menu (settings, recording, layout); Title, Artist, BPM,
   Key (Camelot + musical), Match/Boost tag, Energy, Time, Genre; a deck badge marks loaded
   tracks; drag a row onto a deck or lane, or hover for load-to buttons.
 

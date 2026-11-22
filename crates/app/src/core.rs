@@ -222,6 +222,8 @@ pub struct Core {
     pub preparer: Option<crate::profile::Preparer>,
     /// Tracks whose profile is in (or not, `None`) as read from disk, by path.
     pub profiles: HashMap<PathBuf, Option<std::sync::Arc<crate::profile::Profile>>>,
+    /// How well library tracks mix after a deck's track: (deck track id, library path).
+    pub suggestions: HashMap<(u64, PathBuf), Option<automix::Suggestion>>,
     pub library_scanning: bool,
     library_rx: Option<Receiver<Vec<Entry>>>,
     pub browser_selected: Option<usize>,
@@ -346,6 +348,7 @@ impl Core {
             profile_due: None,
             preparer: None,
             profiles: HashMap::new(),
+            suggestions: HashMap::new(),
             tempo_home: None,
             echo_cleanup: Vec::new(),
             order_hinted: None,
@@ -780,8 +783,9 @@ impl Core {
         let Some(st) = self.preparer.as_ref().map(|p| p.state()) else { return };
         if st.finished {
             self.preparer = None;
-            // Profiles read before may have changed.
+            // Profiles read before may have changed, and with them the scores.
             self.profiles.clear();
+            self.suggestions.clear();
             let failed = if st.failed > 0 { format!(", {} failed (see the terminal)", st.failed) } else { String::new() };
             self.log(format!("Prepared {} of {} tracks ({} already were){failed}", st.prepared, st.total, st.done - st.prepared - st.failed));
         }
@@ -2812,6 +2816,38 @@ mod tests {
         }
         w.finalize().unwrap();
         path
+    }
+
+    #[test]
+    fn a_track_that_was_on_a_deck_can_be_scored_for_the_next_mix() {
+        let (mut e, mut c, _config) = core();
+        let next = kick_wav("next-up.wav", 60);
+        // On a deck once: its profile is kept (stems in, here without sections).
+        c.load_track(1, &next);
+        let deadline = Instant::now() + std::time::Duration::from_secs(60);
+        while c.decks[1].stems_source.is_none() {
+            assert!(Instant::now() < deadline, "stems never came");
+            pump(&mut e, &mut c);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        pump(&mut e, &mut c);
+        c.eject(1);
+        c.profiles.clear();
+        assert!(c.profile(&next).is_some_and(|p| p.stems), "profile kept on disk");
+        // Another track plays: how would `next` mix in after it?
+        c.load_track(0, &kick_wav("playing-now.wav", 90));
+        let deadline = Instant::now() + std::time::Duration::from_secs(60);
+        while !(c.snap.decks[0].loaded && c.decks[0].info.is_some() && c.decks[0].stem_wave.is_some()) {
+            assert!(Instant::now() < deadline, "never loaded");
+            pump(&mut e, &mut c);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        c.deck_cmd(0, DeckCmd::Play);
+        pump(&mut e, &mut c);
+        let s = c.mix_score(0, &next).expect("a profile, so a score");
+        assert!(s.score > 0.0 && s.why.contains("bars"), "{s:?}");
+        assert_eq!(c.mix_score_known(0, &next), Some(Some(s)), "cached");
+        assert_eq!(c.mix_score(0, &next.with_file_name("never-prepared.wav")), None);
     }
 
     #[test]

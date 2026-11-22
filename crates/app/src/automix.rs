@@ -169,6 +169,15 @@ pub struct VocalReturn {
     level: f32,
 }
 
+/// How well a library track would mix in (see [`Core::mix_score`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Suggestion {
+    /// The best transition's score (the search's: higher is better).
+    pub score: f32,
+    /// Its length and reasons, for the library.
+    pub why: String,
+}
+
 /// After a mix the new track plays at the old one's tempo; it eases back to its own.
 #[derive(Clone, Copy, Debug)]
 pub struct TempoHome {
@@ -556,6 +565,62 @@ impl Core {
         (!bars.is_empty()).then_some((bars, cues))
     }
 
+    /// How well a library track would mix in after deck `d` from where it is now: the best
+    /// transition the search finds with the track's mix profile (see `crate::profile`), its score
+    /// and why. `None` for a track without a profile (not prepared), or when deck `d` has no bars.
+    /// Cached per pair (deck track, library track).
+    pub fn mix_score(&mut self, d: usize, path: &std::path::Path) -> Option<Suggestion> {
+        let id = self.snap.decks[d].track_id;
+        let key = (id, path.to_path_buf());
+        if let Some(s) = self.suggestions.get(&key) {
+            return s.clone();
+        }
+        let s = self.compute_mix_score(d, path);
+        self.suggestions.insert(key, s.clone());
+        s
+    }
+
+    /// Whether [`Core::mix_score`] is known (cheap) for this pair.
+    pub fn mix_score_known(&self, d: usize, path: &std::path::Path) -> Option<Option<Suggestion>> {
+        self.suggestions.get(&(self.snap.decks[d].track_id, path.to_path_buf())).cloned()
+    }
+
+    fn compute_mix_score(&mut self, d: usize, path: &std::path::Path) -> Option<Suggestion> {
+        use crate::transition::{self as tr, Limits};
+        let profile = self.profile(path)?;
+        let (out, _) = self.deck_bars(d)?;
+        let inc = profile.bars();
+        let v = self.snap.decks[d];
+        let now = ((v.beat / 4.0).ceil().max(0.0) as usize).min(out.len().saturating_sub(1));
+        let entry_key = self.library.iter().find(|e| e.path == path).and_then(|e| e.key);
+        let clash = match (entry_key, self.deck_key(d)) {
+            (Some(a), Some(b)) => matches!(a.compat(b), dj_library::key::Compat::Clash | dj_library::key::Compat::Diagonal),
+            _ => false,
+        };
+        let in_cues: Vec<usize> = profile.cue_bars.iter().filter(|b| **b >= -0.1 && (*b - b.round()).abs() < 0.1).map(|b| b.round().max(0.0) as usize).collect();
+        let lim = Limits {
+            earliest: now,
+            latest: out.len(),
+            lengths: (MIN_MIX_BARS / 4..=MAX_MIX_BARS / 4).map(|k| 4 * k).collect(),
+            cue_bar: in_cues.first().copied().or(Some(0)),
+            drop_cue_bar: None,
+            in_cues,
+            blend: true,
+            cut: false,
+            keys_clash: clash,
+            vocals_out: false,
+            stems: out.stems.is_some() && inc.stems.is_some(),
+            hurry: false,
+        };
+        let best = tr::search(&out, &inc, &lim).into_iter().next()?;
+        let mut why = format!("{} bars", best.bars);
+        for n in best.notes.iter().take(3) {
+            why.push_str(" · ");
+            why.push_str(n);
+        }
+        Some(Suggestion { score: best.score, why })
+    }
+
     /// With two tracks loaded and nothing playing: which order mixes clearly better (the deck to
     /// play first, then the other), from the best transition each way.
     pub fn mix_order_hint(&self) -> Option<(usize, usize)> {
@@ -714,7 +779,7 @@ impl Core {
     }
 
     /// A deck's energy (tag, else dj's estimate).
-    fn deck_energy(&self, d: usize) -> Option<u8> {
+    pub(crate) fn deck_energy(&self, d: usize) -> Option<u8> {
         let info = self.decks[d].info.as_ref()?;
         info.tags.energy.or_else(|| self.trackdb.tracks.get(&TrackDb::key(&info.path)).and_then(|o| o.energy))
     }

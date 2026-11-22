@@ -1,5 +1,6 @@
 //! Library browser.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use eframe::egui::{self, Align2, Color32, CornerRadius, Pos2, Rect, Sense, Ui, UiBuilder, Vec2};
@@ -39,7 +40,8 @@ const COLS: [(Option<Col>, &str, f32, bool); 10] = [
 ];
 
 /// Fits: tempo window around the reference deck's BPM.
-const FITS_BPM: f64 = 5.0;
+/// Fits: within 5 % of the playing tempo (real DJs keep 86 % of tracks within 5 % of their own).
+const FITS_PCT: f64 = 5.0;
 
 /// Key fit, best first; `None` = does not mix.
 fn key_rank(c: Compat) -> Option<u8> {
@@ -53,13 +55,30 @@ fn key_rank(c: Compat) -> Option<u8> {
 
 /// Lower is better: the key fit first, then the tempo distance (each key step outweighs the
 /// whole ±5 BPM window).
-fn fit_score(e: &Entry, reference: dj_library::key::Key, ref_bpm: Option<f64>) -> f64 {
+/// How well a track fits after the playing one, lower is better: the key (same, then
+/// relative/adjacent, then a boost), the tempo gap (per %), and the energy (level or a step up
+/// best; down or a big jump less so).
+fn fit_score(e: &Entry, reference: dj_library::key::Key, ref_bpm: Option<f64>, ref_energy: Option<u8>) -> f64 {
     let rank = e.key.and_then(|k| key_rank(k.compat(reference))).unwrap_or(9) as f64;
-    let bpm = match (ref_bpm, e.bpm) {
-        (Some(r), Some(b)) => (b - r).abs(),
+    let tempo = match (ref_bpm, e.bpm) {
+        (Some(r), Some(b)) => 100.0 * (b / r - 1.0).abs(),
         _ => 0.0,
     };
-    rank * 2.0 * FITS_BPM + bpm
+    let energy = match (ref_energy, e.energy) {
+        (Some(a), Some(b)) => match b as i32 - a as i32 {
+            0 | 1 => 0.0,
+            2 | -1 => 1.5,
+            _ => 3.0,
+        },
+        _ => 0.5,
+    };
+    // (A key step outweighs the whole tempo window.)
+    rank * 5.0 + tempo + energy
+}
+
+/// How much a prepared track's mix score (see `Core::mix_score`) lifts it in Fits.
+fn mix_bonus(score: f32) -> f64 {
+    (score as f64 / 3.0).clamp(0.0, 8.0)
 }
 
 fn mmss(s: Option<f64>) -> String {
@@ -116,7 +135,9 @@ pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect) {
     };
     let w = pill_width(ui, &fits_label, 13.0) + 14.0;
     let fr = Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, bar_h));
-    let resp = ui.allocate_rect(fr, Sense::click()).on_hover_text(format!("Tracks that mix with the master deck: a compatible key and within ±{FITS_BPM:.0} BPM, best match first"));
+    let resp = ui.allocate_rect(fr, Sense::click()).on_hover_text(format!(
+        "What to play next: tracks in a compatible key within {FITS_PCT:.0} % of the master deck's tempo, best first: the key, the tempo, the energy (level or a step up), and for prepared tracks how well dj would actually mix them in (hover a track for how)"
+    ));
     let p = ui.painter();
     let rad = CornerRadius::same((bar_h / 2.0) as u8);
     p.rect_filled(fr, rad, if st.browser_harmonic { LIGHT } else if resp.hovered() { CTRL_HOVER } else { CTRL });
@@ -191,13 +212,36 @@ pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect) {
             let e = &lib[i];
             let key_ok = e.key.is_some_and(|k| key_rank(k.compat(rk)).is_some());
             let bpm_ok = match (ref_bpm, e.bpm) {
-                (Some(r), Some(b)) => (b - r).abs() <= FITS_BPM,
+                (Some(r), Some(b)) => 100.0 * (b / r - 1.0).abs() <= FITS_PCT,
                 (Some(_), None) => false,
                 (None, _) => true,
             };
             key_ok && bpm_ok && !loaded.contains(&e.path)
         });
-        rows.sort_by(|&a, &b| fit_score(&lib[a], rk, ref_bpm).total_cmp(&fit_score(&lib[b], rk, ref_bpm)));
+        let ref_energy = ref_deck.and_then(|d| core.deck_energy(d));
+        let base: HashMap<usize, f64> = rows.iter().map(|&i| (i, fit_score(&core.library[i], rk, ref_bpm, ref_energy))).collect();
+        rows.sort_by(|a, b| base[a].total_cmp(&base[b]));
+        // The best few by key, tempo and energy: how well they'd actually mix (prepared tracks),
+        // a few per frame so the list never stalls.
+        if let Some(d) = ref_deck {
+            let started = std::time::Instant::now();
+            let mut pending = false;
+            for &i in rows.iter().take(40) {
+                let path = core.library[i].path.clone();
+                if core.mix_score_known(d, &path).is_none() {
+                    if started.elapsed().as_millis() > 6 {
+                        pending = true;
+                        break;
+                    }
+                    core.mix_score(d, &path);
+                }
+            }
+            if pending {
+                ui.ctx().request_repaint();
+            }
+            let fit = |i: usize| base[&i] - core.mix_score_known(d, &core.library[i].path).flatten().map_or(0.0, |s| mix_bonus(s.score));
+            rows.sort_by(|&a, &b| fit(a).total_cmp(&fit(b)));
+        }
     }
     // Focus the best match whenever it changes (Fits switched on, another reference, ...).
     let best = if fits { rows.first().copied() } else { None };
@@ -280,8 +324,17 @@ pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect) {
             if best == Some(i) {
                 ui.painter().rect_stroke(rr, CornerRadius::same(8), egui::Stroke::new(1.5, GREEN), egui::StrokeKind::Inside);
             }
+            // Fits: how dj would mix a prepared track in, on hover; a green dot marks those.
+            let mix = if fits { ref_deck.and_then(|d| core.mix_score_known(d, &e.path).flatten()) } else { None };
+            let resp = match &mix {
+                Some(m) => resp.on_hover_text(format!("Mixes in well: {}", m.why)),
+                None => resp,
+            };
             let mut x = rr.left();
             let cell = |i: usize, x: f32| Rect::from_min_size(Pos2::new(x, rr.top()), Vec2::new(widths[i] - 10.0, rr.height()));
+            if mix.is_some() && !on_deck.iter().any(|(_, p)| *p == e.path) {
+                ui.painter().circle_filled(Pos2::new(x + 12.0, rr.center().y), 4.0, GREEN);
+            }
             // Deck badge.
             if let Some((d, _)) = on_deck.iter().find(|(_, p)| *p == e.path) {
                 let b = Rect::from_center_size(Pos2::new(x + 12.0, rr.center().y), Vec2::splat(20.0));
@@ -392,12 +445,25 @@ mod tests {
     #[test]
     fn fits_ranks_key_first_then_tempo() {
         let r = Key::parse("8A").unwrap();
-        let same_far = fit_score(&entry("8A", 128.0), r, Some(124.0));
-        let same_near = fit_score(&entry("8A", 124.5), r, Some(124.0));
-        let adjacent_exact = fit_score(&entry("9A", 124.0), r, Some(124.0));
-        let boost = fit_score(&entry("10A", 124.0), r, Some(124.0));
+        let same_far = fit_score(&entry("8A", 128.0), r, Some(124.0), None);
+        let same_near = fit_score(&entry("8A", 124.5), r, Some(124.0), None);
+        let adjacent_exact = fit_score(&entry("9A", 124.0), r, Some(124.0), None);
+        let boost = fit_score(&entry("10A", 124.0), r, Some(124.0), None);
         assert!(same_near < same_far && same_far < adjacent_exact && adjacent_exact < boost);
         assert_eq!(key_rank(Key::parse("8B").unwrap().compat(r)), Some(1)); // relative
         assert_eq!(key_rank(Key::parse("3A").unwrap().compat(r)), None); // clash
+    }
+
+    #[test]
+    fn fits_prefers_energy_level_or_a_step_up_and_tracks_that_mix_well() {
+        let r = Key::parse("8A").unwrap();
+        let with = |energy: u8| fit_score(&Entry { energy: Some(energy), ..entry("8A", 124.0) }, r, Some(124.0), Some(6));
+        assert_eq!(with(6), with(7), "level or one up");
+        assert!(with(7) < with(5) && with(5) < with(9), "down a little, then a jump");
+        // A prepared track that mixes in well comes ahead of one a little closer in tempo.
+        let near = fit_score(&entry("8A", 124.0), r, Some(124.0), None);
+        let prepared = fit_score(&entry("8A", 125.5), r, Some(124.0), None) - mix_bonus(15.0);
+        assert!(prepared < near, "{prepared} vs {near}");
+        assert_eq!(mix_bonus(-3.0), 0.0);
     }
 }
