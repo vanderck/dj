@@ -384,7 +384,7 @@ pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect) {
                             let lane = core.session.decks[d].sampler.selected_lane;
                             core.load_sample(d, lane, &e.path);
                         } else {
-                            core.load_track(d, &e.path);
+                            core.request_load(d, &e.path);
                         }
                     }
                 }
@@ -397,7 +397,7 @@ pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect) {
                 let d = (0..core.deck_count())
                     .find(|&d| !core.snap.decks[d].playing && core.session.decks[d].mode == DeckMode::Track)
                     .unwrap_or(0);
-                core.load_track(d, &e.path);
+                core.request_load(d, &e.path);
             }
             if resp.drag_started() {
                 egui::DragAndDrop::set_payload::<PathBuf>(&ctx, e.path.clone());

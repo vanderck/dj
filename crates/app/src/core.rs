@@ -244,6 +244,8 @@ pub struct Core {
     pub last_touched: Option<String>,
     /// Last address a MIDI mapping changed, and when (the mixer shows that fader function).
     pub midi_touched: Option<(String, std::time::Instant)>,
+    /// A track asked onto a deck that's playing: it waits for you to confirm (deck, track).
+    pub pending_load: Option<(usize, PathBuf)>,
     /// 14-bit controls (faders that send a coarse CC 0–31 and then its fine half, CC + 32): the
     /// last coarse value per channel and CC, and whether a fine half has been seen for it.
     cc_coarse: [[u8; 32]; 16],
@@ -345,6 +347,7 @@ impl Core {
             learn: false,
             last_touched: None,
             midi_touched: None,
+            pending_load: None,
             cc_coarse: [[0; 32]; 16],
             cc_fine: [[false; 32]; 16],
             status: VecDeque::new(),
@@ -522,6 +525,37 @@ impl Core {
     }
 
     // ------------------------------------------------------------ tracks
+
+    /// Load a track you asked for (the browser, a drop, a controller's LOAD): onto a deck that's
+    /// playing only once you confirm (the alert on screen, or LOAD pressed again for the same
+    /// track). dj's own loads (Auto-DJ, the session) call `load_track` directly.
+    pub fn request_load(&mut self, d: usize, path: &Path) {
+        if d >= NUM_DECKS {
+            return;
+        }
+        if self.snap.decks[d].playing {
+            if self.pending_load.as_ref().is_some_and(|(pd, pp)| *pd == d && pp == path) {
+                self.confirm_load();
+                return;
+            }
+            self.pending_load = Some((d, path.to_path_buf()));
+            self.log(format!("Deck {} is playing: load anyway? (confirm, or press LOAD again)", d + 1));
+            return;
+        }
+        self.pending_load = None;
+        self.load_track(d, path);
+    }
+
+    /// The alert answered: load it after all.
+    pub fn confirm_load(&mut self) {
+        if let Some((d, p)) = self.pending_load.take() {
+            self.load_track(d, &p);
+        }
+    }
+
+    pub fn cancel_load(&mut self) {
+        self.pending_load = None;
+    }
 
     pub fn load_track(&mut self, d: usize, path: &Path) {
         if d >= NUM_DECKS {
@@ -1820,13 +1854,13 @@ impl Core {
             // Load a file: `Deck/N/Load s /path/to/track.mp3`.
             ["load"] => {
                 if let Some(OscType::String(path)) = args.first() {
-                    self.load_track(d, Path::new(path));
+                    self.request_load(d, Path::new(path));
                 }
                 None
             }
             ["loadselected"] if trig => {
                 if let Some(e) = self.browser_selected.and_then(|i| self.library.get(i)).map(|e| e.path.clone()) {
-                    self.load_track(d, &e);
+                    self.request_load(d, &e);
                 }
                 None
             }
@@ -4150,6 +4184,43 @@ pub(crate) mod tests {
         assert_eq!(c.loop_size[1], size * 2.0);
         c.handle_midi(&[0xb1, 46, 127]);
         assert_eq!(c.loop_size[1], size);
+    }
+
+    #[test]
+    fn loading_onto_a_playing_deck_asks_first() {
+        let (mut e, mut c, _config) = core();
+        let (a, b) = (kick_wav("alert-a.wav", 30), kick_wav("alert-b.wav", 30));
+        // A deck that isn't playing: straight in.
+        c.request_load(0, &a);
+        assert!(c.pending_load.is_none() && c.decks[0].loading.as_deref() == Some(a.as_path()));
+        let deadline = Instant::now() + std::time::Duration::from_secs(60);
+        while !(c.snap.decks[0].loaded && c.decks[0].info.is_some()) {
+            assert!(Instant::now() < deadline, "never loaded");
+            pump(&mut e, &mut c);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        c.deck_cmd(0, DeckCmd::Play);
+        while !c.snap.decks[0].playing {
+            assert!(Instant::now() < deadline, "never played");
+            pump(&mut e, &mut c);
+        }
+        // Playing: it waits for an answer, the deck plays on.
+        c.request_load(0, &b);
+        assert_eq!(c.pending_load, Some((0, b.clone())));
+        assert!(c.decks[0].loading.is_none());
+        c.cancel_load();
+        assert!(c.pending_load.is_none() && c.decks[0].loading.is_none());
+        // A controller's LOAD (the browser's selection): asked; LOAD again for the same track loads.
+        c.library = vec![dj_library::scan::Entry { path: b.clone(), ..Default::default() }];
+        c.browser_selected = Some(0);
+        assert!(c.route("Deck/1/LoadSelected", &[OscType::Float(1.0)]));
+        assert_eq!(c.pending_load, Some((0, b.clone())));
+        assert!(c.route("Deck/1/LoadSelected", &[OscType::Float(1.0)]));
+        assert!(c.pending_load.is_none());
+        assert_eq!(c.decks[0].loading.as_deref(), Some(b.as_path()), "confirmed");
+        // dj's own loads (Auto-DJ, the session) don't ask.
+        c.load_track(1, &a);
+        assert!(c.pending_load.is_none());
     }
 
     #[test]
