@@ -2,7 +2,7 @@
 //! browser, footer.
 
 mod browser;
-mod deck;
+pub(crate) mod deck;
 mod fx;
 mod mixer;
 mod settings_ui;
@@ -66,6 +66,8 @@ pub struct UiState {
     /// Which deck is shown large on the left (0 or 2) and right (1 or 3).
     pub focus: [usize; 2],
     pub lane_zoom: f32,
+    /// What Now and Best would do, shown in the Mix popup (worked out again every second).
+    pub mix_preview: Option<deck::MixPreview>,
 }
 
 impl Default for UiState {
@@ -95,6 +97,7 @@ impl Default for UiState {
             browser_asc: true,
             focus: [0, 1],
             lane_zoom: 1.0,
+            mix_preview: None,
         }
     }
 }

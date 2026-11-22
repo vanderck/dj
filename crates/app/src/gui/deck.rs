@@ -11,7 +11,9 @@ use dj_library::key::Compat;
 
 use super::skin::*;
 use super::{act, act_f, act_i, learnable, UiState};
+use crate::core::automix::{MixHow, MixPlan};
 use crate::core::Core;
+use crate::settings::MixStyle;
 
 fn mmss_remain(s: f64) -> String {
     let s = s.max(0.0);
@@ -264,7 +266,7 @@ pub fn big(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect)
     }
     if mixable {
         let rr = Rect::from_min_size(Pos2::new(x, y), Vec2::new(big_w, bh));
-        mix_button(ui, core, d, rr, bold(17.0 * k.min(1.35)));
+        mix_button(ui, core, st, d, rr, bold(17.0 * k.min(1.35)));
     }
 
     // ---------------------------------------------------------- hot cues
@@ -604,7 +606,7 @@ pub fn compact(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: R
     let swap_r = next(80.0 * k);
     let mix_r = mix.then(|| next(80.0 * k));
     if let Some(mix_r) = mix_r {
-        mix_button(ui, core, d, mix_r, bold(14.0));
+        mix_button(ui, core, st, d, mix_r, bold(14.0));
     }
     let resp = button(ui, swap_r, if k < 0.85 { "⇄" } else { "⇄ Swap" }, Style::Outline(Color32::from_gray(110), false), bold(14.0))
         .on_hover_text("Show this deck in the large view");
@@ -828,10 +830,40 @@ fn mix_shown(core: &Core, d: usize) -> bool {
     core.automix.as_ref().is_some_and(|m| m.plan.incoming == d) || core.mix_target(d).is_some()
 }
 
+/// What Now and Best would do for a deck, with the remembered style (shown in the Mix popup).
+pub struct MixPreview {
+    deck: usize,
+    style: MixStyle,
+    at: std::time::Instant,
+    now: MixPlan,
+    best: MixPlan,
+}
+
+/// The Mix popup's choice of how, and what each means.
+const MIX_STYLES: [(&str, MixStyle, &str); 3] = [
+    ("Auto", MixStyle::Auto, "dj measures both tracks and picks Stems, EQ or Drop"),
+    ("Blend", MixStyle::Stems, "Always a blend: the stems swap one by one, or an EQ blend without stems"),
+    ("Drop", MixStyle::Drop, "No blend: the new track cuts in on the beat, from its drop cue if it has one"),
+];
+
+/// "in 3 bars · Stems · 16 bars · keys clash": when a plan starts and how it mixes.
+pub(crate) fn plan_summary(core: &Core, plan: &MixPlan) -> String {
+    let bars = ((plan.start_beat - core.snap.decks[plan.outgoing].beat) / 4.0).ceil().max(0.0);
+    let mut parts = vec![if bars <= 1.0 { "on the next bar".to_string() } else { format!("in {bars:.0} bars") }, plan.how.name(core.external_routing()).to_string()];
+    if plan.how != MixHow::Drop {
+        parts.push(format!("{:.0} bars", plan.length_beats / 4.0));
+    }
+    if !plan.why_how.is_empty() {
+        parts.push(plan.why_how.clone());
+    }
+    parts.join(" · ")
+}
+
 /// Mix: bring this deck (silent, looping at a cue) into the playing track. Asks "Now" or
-/// "Best" unless the playing track ends within a minute; while a mix waits or runs, shows its
-/// state and a tap cancels it.
-fn mix_button(ui: &mut Ui, core: &mut Core, d: usize, rect: Rect, font: egui::FontId) {
+/// "Best", each with what it would do, and how (Auto, Blend or Drop, remembered); in the
+/// playing track's last minute it doesn't ask. While a mix waits or runs, shows its state and a
+/// tap cancels it.
+fn mix_button(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect, font: egui::FontId) {
     if let Some(m) = core.automix.as_ref().filter(|m| m.plan.incoming == d) {
         let bars = ((m.plan.start_beat - core.mix_beat()) / 4.0).ceil();
         let label = if bars > 0.0 { format!("Mix in {bars:.0}") } else { "Mixing…".to_string() };
@@ -842,14 +874,14 @@ fn mix_button(ui: &mut Ui, core: &mut Core, d: usize, rect: Rect, font: egui::Fo
         return;
     }
     let Some(out) = core.mix_target(d) else { return };
-    let resp = button(ui, rect, "Mix", Style::Outline(GREEN, true), font)
-        .on_hover_text(if core.external_routing() {
-            format!("Drop in, in sync with deck {}; you fade on your mixer", out + 1)
-        } else {
-            format!("Mix into deck {} (syncs this deck)", out + 1)
-        });
-    // dj measures both tracks and picks how to mix (stems and EQ together, or a cut).
-    let style = crate::settings::MixStyle::Auto;
+    let style = core.settings.mix_style;
+    let how = MIX_STYLES.iter().find(|s| s.1 == style).map_or("Auto", |s| s.0);
+    let label = if style == MixStyle::Auto { "Mix".to_string() } else { format!("Mix · {how}") };
+    let resp = button(ui, rect, &label, Style::Outline(GREEN, true), font).on_hover_text(if core.external_routing() {
+        format!("Drop in, in sync with deck {}; you fade on your mixer", out + 1)
+    } else {
+        format!("Mix into deck {} (syncs this deck)", out + 1)
+    });
     if core.mix_is_urgent(out) {
         // The playing track's last minute: no question, the best moment left (no rush: the mix
         // may run past its end, which fades on its own).
@@ -859,19 +891,40 @@ fn mix_button(ui: &mut Ui, core: &mut Core, d: usize, rect: Rect, font: egui::Fo
         }
         return;
     }
-    const W: f32 = 220.0;
+    const W: f32 = 300.0;
     egui::Popup::from_toggle_button_response(&resp)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .width(W)
         .show(|ui| {
-            for title in ["Now", "Best"] {
-                let (r, _) = ui.allocate_exact_size(Vec2::new(W, 56.0), Sense::hover());
-                if button(ui, r, title, Style::Dark, bold(20.0)).clicked() {
+            let style = core.settings.mix_style;
+            // What each would do (a Best plan searches the whole track: once a second).
+            let stale = st.mix_preview.as_ref().is_none_or(|p| p.deck != d || p.style != style || p.at.elapsed().as_secs_f32() > 1.0);
+            if stale {
+                st.mix_preview = Some(MixPreview { deck: d, style, at: std::time::Instant::now(), now: core.plan_now(d, out, style), best: core.plan_best(d, out, style) });
+            }
+            let preview = st.mix_preview.as_ref().unwrap();
+            let rows = [("Now", plan_summary(core, &preview.now)), ("Best", plan_summary(core, &preview.best))];
+            for (title, summary) in rows {
+                let (r, _) = ui.allocate_exact_size(Vec2::new(W, 60.0), Sense::hover());
+                if button(ui, r, "", Style::Dark, bold(20.0)).clicked() {
                     let plan = if title == "Now" { core.plan_now(d, out, style) } else { core.plan_best(d, out, style) };
                     core.start_mix(plan);
                     ui.close();
                 }
+                let p = ui.painter();
+                p.text(Pos2::new(r.left() + 14.0, r.center().y - 9.0), Align2::LEFT_CENTER, title, bold(20.0), TEXT);
+                let summary = fit_text(ui, &summary, sans(12.0), W - 28.0);
+                ui.painter().text(Pos2::new(r.left() + 14.0, r.center().y + 13.0), Align2::LEFT_CENTER, summary, sans(12.0), TEXT_DIM);
                 ui.add_space(6.0);
+            }
+            // How: remembered, for Auto-DJ too.
+            let (row, _) = ui.allocate_exact_size(Vec2::new(W, 30.0), Sense::hover());
+            let w = (W - 2.0 * 6.0) / 3.0;
+            for (i, (name, s, tip)) in MIX_STYLES.into_iter().enumerate() {
+                let r = Rect::from_min_size(Pos2::new(row.left() + i as f32 * (w + 6.0), row.top()), Vec2::new(w, 30.0));
+                if pill(ui, r, name, style == s).on_hover_text(tip).clicked() {
+                    core.set_mix_style(s);
+                }
             }
         });
 }

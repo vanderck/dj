@@ -3331,6 +3331,27 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn mix_style_is_remembered_and_the_popup_says_what_each_does() {
+        use crate::settings::MixStyle;
+        let (mut e, mut c, _config) = core();
+        mix_setup(&mut e, &mut c);
+        assert_eq!(c.settings.mix_style, MixStyle::Auto);
+        c.set_mix_style(MixStyle::Drop);
+        assert_eq!(c.settings.mix_style, MixStyle::Drop);
+        assert!(c.dirty_since.is_some(), "saved");
+        let drop = c.plan_now(1, 0, c.settings.mix_style);
+        assert_eq!(drop.how, automix::MixHow::Drop);
+        let s = crate::gui::deck::plan_summary(&c, &drop);
+        assert!(s.starts_with("in ") || s.starts_with("on the next bar"), "{s}");
+        assert!(s.ends_with(" · Drop"), "a cut has no length: {s}");
+        // Blend: stems when both decks have them, else EQ, and the blend's length.
+        let blend = c.plan_now(1, 0, MixStyle::Stems);
+        assert_ne!(blend.how, automix::MixHow::Drop);
+        let s = crate::gui::deck::plan_summary(&c, &blend);
+        assert!(s.contains(&format!("{:.0} bars", blend.length_beats / 4.0)), "{s}");
+    }
+
+    #[test]
     fn the_beats_all_in_one_hears_correct_the_grid() {
         use crate::stems::{Beat, Structure, Update};
         let (mut e, mut c, _config) = core();
