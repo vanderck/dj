@@ -276,6 +276,8 @@ pub struct Core {
     profile_due: Option<(usize, u64, Instant)>,
     /// The deck easing back to its own tempo after a mix (see `tempo_home_tick`).
     pub tempo_home: Option<automix::TempoHome>,
+    /// A mix's key shift, undone on the new track's next phrase line.
+    pub key_home: Option<automix::KeyHome>,
     /// Echo-out inserts to remove once their tails have rung out: (channel, slot, clock beat).
     pub echo_cleanup: Vec<(usize, usize, f64)>,
     /// The two tracks the deck-order tip was last worked out for.
@@ -375,6 +377,7 @@ impl Core {
             profiles: HashMap::new(),
             suggestions: HashMap::new(),
             tempo_home: None,
+            key_home: None,
             echo_cleanup: Vec::new(),
             order_hinted: None,
             pickup: HashMap::new(),
@@ -3751,6 +3754,39 @@ pub(crate) mod tests {
         }
         assert!(c.tempo_home.is_none(), "yours from there");
         assert!((c.snap.decks[1].tempo_fader - 0.25).abs() < 1e-9);
+    }
+
+    #[test]
+    fn after_a_mix_the_transposed_track_goes_back_to_its_own_key() {
+        let (mut e, mut c, _config) = core();
+        mix_setup(&mut e, &mut c);
+        let mut plan = c.plan_now(1, 0, crate::settings::MixStyle::Eq);
+        plan.transpose = 1;
+        c.start_mix(plan);
+        pump(&mut e, &mut c);
+        assert_eq!(c.snap.decks[1].semitones, 1.0, "shifted to fit for the mix");
+        run_mix(&mut e, &mut c, |_, _| {});
+        let kh = c.key_home.expect("it goes home");
+        assert_eq!(c.snap.decks[1].semitones, 1.0, "still shifted when the mix ends");
+        assert!(kh.at % 32.0 == 0.0 && kh.at >= c.snap.decks[1].beat + 4.0, "on a phrase line, a bar away: {kh:?}");
+        // Back to its own key on that line, not before.
+        while c.key_home.is_some() {
+            assert_eq!(c.snap.decks[1].semitones, 1.0);
+            pump(&mut e, &mut c);
+            assert!(c.snap.decks[1].beat < kh.at + 4.0, "never went home");
+        }
+        pump(&mut e, &mut c);
+        assert_eq!(c.snap.decks[1].semitones, 0.0);
+        assert!(c.snap.decks[1].beat >= kh.at);
+        assert!(c.status.iter().any(|(_, m)| m.contains("back in its own key")));
+
+        // A key you set yourself meanwhile stays.
+        c.key_home = Some(automix::KeyHome { at: c.snap.decks[1].beat + 8.0, from: 0.0, to: -1.0, ..kh });
+        c.deck_cmd(1, DeckCmd::Semitones(2.0));
+        for _ in 0..200 {
+            pump(&mut e, &mut c);
+        }
+        assert!(c.key_home.is_none() && c.snap.decks[1].semitones == 2.0, "yours from there");
     }
 
     #[test]
