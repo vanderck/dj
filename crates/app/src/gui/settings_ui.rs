@@ -162,6 +162,8 @@ fn settings(ui: &mut Ui, core: &mut Core, st: &mut UiState) {
         }
     });
     ui.checkbox(&mut core.settings.keylock_on_load, "Key lock (pitch preserve) on load");
+    ui.checkbox(&mut core.settings.tempo_home, "After a mix, ease back to the new track's own tempo")
+        .on_hover_text("A mix plays the new track at the old one's tempo. Afterwards it glides back to its own (0 %), 0.25 % a bar, too slowly to hear, so a set doesn't drift ever further from the songs' tempos (real DJs keep most tracks within 5 %). Moving its tempo fader stops it.");
     ui.checkbox(&mut core.settings.load_at_first_cue, "Load tracks at their first cue");
     ui.horizontal(|ui| {
         use crate::settings::CuePadMode;

@@ -358,6 +358,10 @@ Fonts: Inter and JetBrains Mono, bundled under the SIL Open Font License (see
   first when one order mixes clearly better (*Mix tip* in the status line).
 
   The old track stops at the end and the new one becomes the tempo master.
+  It plays at the old track's tempo; from there it eases back to its own,
+  0.25 % a bar, too slowly to hear (8 % takes 32 bars), so a set doesn't drift
+  ever further from the songs' tempos. Moving its tempo fader stops that, and
+  Settings → Decks → *After a mix, ease back…* turns it off.
   Tap the button during a mix to cancel it. Controller faders that dj moved
   are picked up: they take effect again once moved to (or past) dj's value.
   **With an external mixer** dj can't see or move your faders: any deck

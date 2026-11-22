@@ -169,6 +169,25 @@ pub struct VocalReturn {
     level: f32,
 }
 
+/// After a mix the new track plays at the old one's tempo; it eases back to its own.
+#[derive(Clone, Copy, Debug)]
+pub struct TempoHome {
+    deck: usize,
+    track_id: u64,
+    /// The fader dj set last, the clock beat then, and the fader before it (the deck may not show
+    /// the newest yet); any other: you moved it.
+    last: Option<(f64, f64, f64)>,
+}
+
+impl TempoHome {
+    pub fn new(deck: usize, track_id: u64) -> Self {
+        Self { deck, track_id, last: None }
+    }
+}
+
+/// How fast the tempo eases home: 0.25 % a bar, too slow to hear (8 % takes 32 bars).
+const TEMPO_HOME_PER_BAR: f64 = 0.0025;
+
 fn smooth(x: f64) -> f32 {
     let x = x.clamp(0.0, 1.0);
     (x * x * (3.0 - 2.0 * x)) as f32
@@ -921,9 +940,48 @@ impl Core {
         }
     }
 
+    /// Ease the new track's tempo back to its own, once it leads the clock.
+    fn tempo_home_tick(&mut self) {
+        let Some(mut th) = self.tempo_home else { return };
+        let v = self.snap.decks[th.deck];
+        if v.track_id != th.track_id || !v.loaded || !self.settings.tempo_home {
+            self.tempo_home = None;
+            return;
+        }
+        // Until the handoff, it follows the old track's tempo; it leads once that one stops.
+        if self.snap.clock.owner != ClockOwner::Deck(th.deck as u8) || !v.playing {
+            return;
+        }
+        let clock = self.snap.clock.beat;
+        let Some((fader, at, before)) = th.last else {
+            th.last = Some((v.tempo_fader, clock, v.tempo_fader));
+            self.tempo_home = Some(th);
+            return;
+        };
+        if (v.tempo_fader - fader).abs() > 1e-6 && (v.tempo_fader - before).abs() > 1e-6 {
+            // You moved it: yours from here.
+            self.tempo_home = None;
+            return;
+        }
+        let bars = ((clock - at) / 4.0).max(0.0);
+        let speed = v.tempo_range.speed(fader);
+        let step = TEMPO_HOME_PER_BAR * bars;
+        let next = if (speed - 1.0).abs() <= step { 1.0 } else { speed - step * (speed - 1.0).signum() };
+        let f = if next == 1.0 { 0.0 } else { v.tempo_range.fader_for_speed(next) };
+        self.deck_cmd(th.deck, DeckCmd::Tempo(f));
+        if f == 0.0 {
+            self.tempo_home = None;
+            self.log(format!("Deck {} is back at its own tempo", th.deck + 1));
+        } else {
+            th.last = Some((f, clock, fader));
+            self.tempo_home = Some(th);
+        }
+    }
+
     /// Advance a running mix (called every tick).
     pub(super) fn automix_tick(&mut self) {
         self.vocal_return_tick();
+        self.tempo_home_tick();
         self.order_hint_tick();
         let now = self.snap.clock.beat;
         let due: Vec<_> = self.echo_cleanup.iter().copied().filter(|e| now >= e.2).collect();
@@ -1121,6 +1179,9 @@ impl Core {
                 }
                 self.log(format!("Mixed into deck {}", i + 1));
             }
+            // Its own tempo again, slowly, once it leads (it plays at the old track's).
+            self.tempo_home = (self.settings.tempo_home && (vi.speed / vi.speed_mult.max(0.01) - 1.0).abs() > 0.002 && vi.has_grid)
+                .then_some(TempoHome::new(i, vi.track_id));
             // The new track as it is from here: every stem in, except (Now) its vocals, which come
             // back on its next phrase that has vocals.
             if how == MixHow::Stems {
