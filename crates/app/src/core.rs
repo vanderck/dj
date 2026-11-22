@@ -2929,6 +2929,10 @@ impl Core {
             }
         }
         self.stop_preparing();
+        // A mix's echo-out not removed yet (its tail still ringing, or the mix still running):
+        // gone before the session is saved, else it would come back on that channel next time.
+        self.cancel_mix();
+        self.drop_mix_echoes();
         self.save_all();
         crate::settings::flush_writes();
     }
@@ -4086,6 +4090,20 @@ pub(crate) mod tests {
         assert!(c.snap.decks[1].playing);
         assert!((c.session.channels[1].params.volume - 1.0).abs() < 1e-6);
         assert!((c.session.channels[1].params.eq[0] - 0.5).abs() < 1e-6, "the new bass in");
+    }
+
+    #[test]
+    fn quitting_while_a_mix_echo_rings_doesnt_save_it() {
+        let (mut e, mut c, _config) = core();
+        mix_setup(&mut e, &mut c);
+        let mut plan = c.plan_now(1, 0, crate::settings::MixStyle::Eq);
+        plan.echo_at = Some(plan.length_beats / 4.0 - 1.0);
+        c.start_mix(plan);
+        run_mix(&mut e, &mut c, |_, _| {});
+        let echo = |c: &Core| c.session.channels[0].fx.slots.iter().flatten().any(|s| s.name == "Echo");
+        assert!(echo(&c) && !c.echo_cleanup.is_empty(), "its tail still ringing");
+        c.prepare_to_quit();
+        assert!(!echo(&c) && c.echo_cleanup.is_empty(), "gone before the session is saved");
     }
 
     #[test]

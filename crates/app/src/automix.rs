@@ -1366,6 +1366,15 @@ impl Core {
         }
     }
 
+    /// Remove the echoes mixes added that are still waiting for their tail to ring out.
+    pub fn drop_mix_echoes(&mut self) {
+        for (ch, slot, _) in std::mem::take(&mut self.echo_cleanup) {
+            if self.session.channels[ch].fx.slots[slot].as_ref().is_some_and(|s| s.effect_id == ECHO_ID) {
+                self.remove_insert(ch, slot);
+            }
+        }
+    }
+
     /// Advance a running mix (called every tick).
     pub(super) fn automix_tick(&mut self) {
         self.vocal_return_tick();

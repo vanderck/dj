@@ -698,3 +698,39 @@ fn each_stem_has_a_meter() {
     run(&mut e, 200);
     assert!(e.snapshot().decks[0].stem_peaks.iter().all(|x| *x < 0.01));
 }
+
+#[test]
+fn key_lock_only_stretches_away_from_the_tracks_own_tempo() {
+    let (mut e, mut c) = setup();
+    let (track, _) = stem_track(60);
+    let src = track.audio.frames.clone();
+    send(&mut c, Command::Load { deck: 0, track, start_at_first_cue: false });
+    send(&mut c, Command::GlobalQuantize(None));
+    deck(&mut c, 0, DeckCmd::KeyLock(true));
+    deck(&mut c, 0, DeckCmd::Tempo(0.0));
+    deck(&mut c, 0, DeckCmd::Play);
+    let out = run(&mut e, 40);
+    assert!(!e.snapshot().decks[0].stretching, "key lock at 0 %: no stretcher");
+    // The audio as it is: some stretch of the output is the track's samples exactly.
+    let w = &out[out.len() - 1024..];
+    let same = (0..src.len() - 1024).any(|o| w.iter().zip(&src[o..o + 1024]).all(|(a, b)| (a[0] - b[0]).abs() < 1e-4));
+    assert!(same, "untouched audio at 0 % with key lock");
+    // Tempo away from 0 %: stretched (pitch kept).
+    deck(&mut c, 0, DeckCmd::Tempo(0.5));
+    run(&mut e, 10);
+    assert!(e.snapshot().decks[0].stretching);
+    // A hair off (0.08 % at ±8 %: inaudible): back to the audio as it is.
+    deck(&mut c, 0, DeckCmd::Tempo(0.01));
+    run(&mut e, 10);
+    assert!(!e.snapshot().decks[0].stretching);
+    // Without key lock: never (varispeed).
+    deck(&mut c, 0, DeckCmd::KeyLock(false));
+    deck(&mut c, 0, DeckCmd::Tempo(0.5));
+    run(&mut e, 10);
+    assert!(!e.snapshot().decks[0].stretching);
+    // A transposed key: always.
+    deck(&mut c, 0, DeckCmd::Tempo(0.0));
+    deck(&mut c, 0, DeckCmd::Semitones(1.0));
+    run(&mut e, 10);
+    assert!(e.snapshot().decks[0].stretching);
+}
