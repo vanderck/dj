@@ -3196,10 +3196,30 @@ pub(crate) mod tests {
         let deadline = Instant::now() + std::time::Duration::from_secs(600);
         let mut mixes = 0;
         let mut was_mixing = false;
+        // What happened, for a failure: each change of the decks' tracks and Auto-DJ's played list.
+        let mut history: Vec<String> = Vec::new();
+        let name = |p: &Path| p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
         // Until the last track has played out.
         while c.autodj.is_some() {
             assert!(Instant::now() < deadline, "the set never ended: {:?}", c.status);
             pump(&mut e, &mut c);
+            let decks: Vec<String> = (0..2)
+                .map(|d| {
+                    let v = c.snap.decks[d];
+                    format!(
+                        "{}{}{}",
+                        c.decks[d].info.as_ref().map(|i| name(&i.path)).unwrap_or("-".into()),
+                        if v.playing { "▶" } else { "" },
+                        c.decks[d].loading.as_ref().map(|p| format!("(loading {})", name(p))).unwrap_or_default()
+                    )
+                })
+                .collect();
+            let mut played: Vec<String> = c.autodj.as_ref().map(|a| a.played.iter().map(|p| name(p)).collect()).unwrap_or_default();
+            played.sort();
+            let state = format!("{decks:?} played {played:?} mix {}", c.automix.is_some());
+            if history.last().is_none_or(|h| !h.ends_with(&state)) {
+                history.push(format!("@{:.1} {state}", c.snap.clock.beat));
+            }
             if was_mixing && c.automix.is_none() {
                 mixes += 1;
             }
@@ -3210,12 +3230,15 @@ pub(crate) mod tests {
                 assert!(loud <= 1, "two tracks up outside a mix");
             }
         }
-        assert_eq!(mixes, 2, "three tracks, two mixes: {:?}", c.status);
+        assert_eq!(mixes, 2, "three tracks, two mixes: {:?}\n{}", c.status, history.join("\n"));
         assert!(c.status.iter().any(|(_, m)| m.contains("last track")), "{:?}", c.status);
         assert!(c.status.iter().any(|(_, m)| m.contains("the set is over")), "{:?}", c.status);
         for t in &tracks {
             assert!(c.history.contains(t), "{} played", t.display());
         }
+        // Each track loaded once (not over itself while the engine caught up).
+        let loads = history.iter().filter(|h| h.contains("(loading")).count();
+        assert!(loads <= 3, "{}", history.join("\n"));
     }
 
     #[test]

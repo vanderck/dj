@@ -1284,10 +1284,13 @@ impl Core {
             if self.decks[0].loading.is_some() || self.decks[1].loading.is_some() || self.automix.is_some() {
                 return;
             }
-            let waiting = (0..2).find_map(|d| {
-                let i = self.decks[d].info.as_ref().filter(|i| !a.played.contains(&i.path) && a.set.contains(&i.path))?;
-                self.snap.decks[d].loaded.then(|| (d, i.path.clone()))
-            });
+            let unplayed = |d: usize| self.decks[d].info.as_ref().filter(|i| !a.played.contains(&i.path) && a.set.contains(&i.path));
+            // A track of the list just loaded that the engine doesn't show yet: wait for it (else
+            // the first track of the list was loaded again, over itself).
+            if (0..2).any(|d| unplayed(d).is_some() && !self.snap.decks[d].loaded) {
+                return;
+            }
+            let waiting = (0..2).find_map(|d| unplayed(d).map(|i| (d, i.path.clone())));
             match waiting {
                 Some((d, path)) => {
                     if self.snap.decks[d].loop_on {
