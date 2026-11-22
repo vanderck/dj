@@ -169,6 +169,72 @@ pub struct VocalReturn {
     level: f32,
 }
 
+/// Fits: within 5 % of the playing tempo (real DJs keep 86 % of tracks within 5 % of their own).
+pub const FITS_PCT: f64 = 5.0;
+
+/// Key fit, best first; `None` = does not mix.
+pub fn key_rank(c: dj_library::key::Compat) -> Option<u8> {
+    match c {
+        dj_library::key::Compat::Same => Some(0),
+        dj_library::key::Compat::Relative | dj_library::key::Compat::Adjacent => Some(1),
+        dj_library::key::Compat::Boost => Some(2),
+        dj_library::key::Compat::Diagonal | dj_library::key::Compat::Clash => None,
+    }
+}
+
+/// Lower is better: the key fit first, then the tempo distance (each key step outweighs the
+/// whole ±5 BPM window).
+/// How well a track fits after the playing one, lower is better: the key (same, then
+/// relative/adjacent, then a boost), the tempo gap (per %), and the energy (level or a step up
+/// best; down or a big jump less so).
+pub fn fit_score(e: &dj_library::scan::Entry, reference: dj_library::key::Key, ref_bpm: Option<f64>, ref_energy: Option<u8>) -> f64 {
+    let rank = e.key.and_then(|k| key_rank(k.compat(reference))).unwrap_or(9) as f64;
+    let tempo = match (ref_bpm, e.bpm) {
+        (Some(r), Some(b)) => 100.0 * (b / r - 1.0).abs(),
+        _ => 0.0,
+    };
+    let energy = match (ref_energy, e.energy) {
+        (Some(a), Some(b)) => match b as i32 - a as i32 {
+            0 | 1 => 0.0,
+            2 | -1 => 1.5,
+            _ => 3.0,
+        },
+        _ => 0.5,
+    };
+    // (A key step outweighs the whole tempo window.)
+    rank * 5.0 + tempo + energy
+}
+
+/// How much a prepared track's mix score (see `Core::mix_score`) lifts it in Fits.
+pub fn mix_bonus(score: f32) -> f64 {
+    (score as f64 / 3.0).clamp(0.0, 8.0)
+}
+
+/// Auto-DJ: a list of tracks played as a set on decks 1 and 2 (see [`Core::autodj_tick`]).
+#[derive(Clone, Debug, Default)]
+pub struct AutoDj {
+    /// The tracks it plays, in the library's order when it started.
+    pub tracks: Vec<std::path::PathBuf>,
+    /// Those played (or being played, or skipped).
+    pub played: std::collections::HashSet<std::path::PathBuf>,
+    /// When the waiting deck's track was loaded (deck, track id, when): it waits for its stems
+    /// and sections a while.
+    loaded: Option<(usize, u64, std::time::Instant)>,
+    /// Said that the list has run out.
+    said_last: bool,
+    /// A deck it just started (it shows as playing a moment later).
+    starting: Option<(usize, std::time::Instant)>,
+}
+
+impl AutoDj {
+    pub fn left(&self) -> usize {
+        self.tracks.iter().filter(|t| !self.played.contains(*t)).count()
+    }
+}
+
+/// How long Auto-DJ waits for a loaded track's stems and sections before mixing without them.
+const AUTODJ_WAIT_SECS: u64 = 150;
+
 /// How well a library track would mix in (see [`Core::mix_score`]).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Suggestion {
@@ -1040,6 +1106,163 @@ impl Core {
         } else {
             th.last = Some((f, clock, fader));
             self.tempo_home = Some(th);
+        }
+    }
+
+    /// Start Auto-DJ on these tracks (the library's list), or stop it (`None`).
+    pub fn set_autodj(&mut self, tracks: Option<Vec<std::path::PathBuf>>) {
+        match tracks {
+            Some(t) if !t.is_empty() => {
+                let n = t.len();
+                // Whatever is playing counts as played.
+                let mut a = AutoDj { tracks: t, ..Default::default() };
+                for d in 0..2 {
+                    if let Some(i) = self.decks[d].info.as_ref().filter(|_| self.snap.decks[d].playing) {
+                        a.played.insert(i.path.clone());
+                    }
+                }
+                self.autodj = Some(a);
+                self.log(format!("Auto-DJ: {n} tracks, in the order that mixes best"));
+            }
+            _ => {
+                if self.autodj.take().is_some() {
+                    self.log("Auto-DJ stopped (the playing track plays on)");
+                }
+            }
+        }
+    }
+
+    /// The next track for Auto-DJ after deck `p`: the best fit (key, tempo, energy, and how well
+    /// it would mix in, as Fits ranks them) of the tracks not played yet; tracks without a tempo
+    /// last.
+    fn autodj_next(&mut self, p: usize) -> Option<std::path::PathBuf> {
+        let a = self.autodj.as_ref()?;
+        let left: Vec<std::path::PathBuf> = a.tracks.iter().filter(|t| !a.played.contains(*t)).cloned().collect();
+        let reference = self.deck_key(p);
+        let (ref_bpm, ref_energy) = (Some(self.snap.decks[p].bpm).filter(|b| *b > 0.0), self.deck_energy(p));
+        let mut best: Option<(f64, std::path::PathBuf)> = None;
+        for path in left {
+            let entry = self.library.iter().find(|e| e.path == path).cloned().unwrap_or_else(|| dj_library::scan::Entry::read(&path));
+            let mut f = match reference {
+                Some(rk) => fit_score(&entry, rk, ref_bpm, ref_energy),
+                None => 0.0,
+            };
+            // Keys that clash, or tempos far apart, only when nothing else is left.
+            if let (Some(k), Some(rk)) = (entry.key, reference) {
+                if key_rank(k.compat(rk)).is_none() {
+                    f += 50.0;
+                }
+            }
+            match (ref_bpm, entry.bpm) {
+                (Some(r), Some(b)) if 100.0 * (b / r - 1.0).abs() > 8.0 => f += 30.0,
+                (_, None) => f += 100.0,
+                _ => {}
+            }
+            f -= self.mix_score(p, &path).map_or(0.0, |s| mix_bonus(s.score));
+            if best.as_ref().is_none_or(|(b, _)| f < *b) {
+                best = Some((f, path));
+            }
+        }
+        best.map(|(_, p)| p)
+    }
+
+    /// Auto-DJ: keep the set going. With nothing playing, the first track starts on deck 1. While
+    /// one plays, the best next track loads on the other deck (silent), and once it's ready (its
+    /// stems and sections in, or after a while, or right away in the playing track's last minute)
+    /// dj mixes it in at the best moment. When the list runs out, the last track plays out.
+    pub(super) fn autodj_tick(&mut self) {
+        let Some(a) = self.autodj.as_ref() else { return };
+        let playing = |c: &Self, d: usize| c.snap.decks[d].playing && !c.snap.decks[d].loop_on && c.session.channels[d].params.volume > 0.05;
+        let p = match self.snap.clock.owner {
+            ClockOwner::Deck(m) if (m as usize) < 2 && playing(self, m as usize) => Some(m as usize),
+            _ => (0..2).find(|&d| playing(self, d)),
+        };
+        if let Some((d, at)) = a.starting {
+            if !self.snap.decks[d].playing && at.elapsed().as_secs() < 2 {
+                return;
+            }
+            self.autodj.as_mut().unwrap().starting = None;
+        }
+        let a = self.autodj.as_ref().unwrap();
+        let Some(p) = p else {
+            // Nothing playing: start the next track there is on deck 1 or 2, else load the first
+            // one on deck 1.
+            if self.decks[0].loading.is_some() || self.decks[1].loading.is_some() || self.automix.is_some() {
+                return;
+            }
+            let waiting = (0..2).find_map(|d| {
+                let i = self.decks[d].info.as_ref().filter(|i| !a.played.contains(&i.path) && a.tracks.contains(&i.path))?;
+                self.snap.decks[d].loaded.then(|| (d, i.path.clone()))
+            });
+            match waiting {
+                Some((d, path)) => {
+                    if self.snap.decks[d].loop_on {
+                        self.deck_cmd(d, DeckCmd::LoopToggle);
+                    }
+                    self.set_picked_up(&format!("Mixer/CH{}/Volume", d + 1), 1.0);
+                    self.deck_cmd(d, DeckCmd::Play);
+                    let a = self.autodj.as_mut().unwrap();
+                    a.played.insert(path);
+                    a.starting = Some((d, std::time::Instant::now()));
+                }
+                None => match a.tracks.iter().find(|t| !a.played.contains(*t)).cloned() {
+                    Some(first) => self.load_track(0, &first),
+                    None => {
+                        self.autodj = None;
+                        self.log("Auto-DJ: the set is over");
+                    }
+                },
+            }
+            return;
+        };
+        let q = 1 - p;
+        if let Some(i) = self.decks[p].info.as_ref() {
+            let path = i.path.clone();
+            self.autodj.as_mut().unwrap().played.insert(path);
+        }
+        if self.automix.is_some() || self.decks[q].loading.is_some() {
+            return;
+        }
+        let a = self.autodj.as_ref().unwrap();
+        let waiting = self.decks[q].info.as_ref().filter(|i| a.tracks.contains(&i.path) && !a.played.contains(&i.path)).map(|i| (i.track_id, i.cues_pending));
+        match waiting {
+            Some((id, cues_pending)) => {
+                let since = match a.loaded {
+                    Some((d, t, at)) if d == q && t == id => at,
+                    _ => {
+                        self.autodj.as_mut().unwrap().loaded = Some((q, id, std::time::Instant::now()));
+                        return;
+                    }
+                };
+                let stems_settled = self.snap.decks[q].stems_ready || self.decks[q].stems_missing.is_some();
+                let sections_in = !self.settings.song_sections || self.decks[q].sections.is_some() || self.decks[q].stems_missing.is_some();
+                let ready = stems_settled && sections_in && !cues_pending;
+                if !(ready || since.elapsed().as_secs() >= AUTODJ_WAIT_SECS || self.mix_is_urgent(p)) {
+                    return;
+                }
+                if self.mix_target(q) != Some(p) {
+                    return;
+                }
+                let plan = self.plan_best(q, p, MixStyle::Auto);
+                self.start_mix(plan);
+            }
+            None => match self.autodj_next(p) {
+                Some(next) => {
+                    // Silent until the mix brings it in.
+                    self.set_picked_up(&format!("Mixer/CH{}/Volume", q + 1), 0.0);
+                    self.load_track(q, &next);
+                }
+                None => {
+                    let a = self.autodj.as_mut().unwrap();
+                    if !a.said_last {
+                        a.said_last = true;
+                        self.log("Auto-DJ: that's the last track of the list; it plays out");
+                    }
+                    if !self.snap.decks[p].playing {
+                        self.autodj = None;
+                    }
+                }
+            },
         }
     }
 

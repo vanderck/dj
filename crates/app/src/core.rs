@@ -254,6 +254,8 @@ pub struct Core {
     pub automix: Option<automix::AutoMix>,
     /// After a Now mix: the new track's vocals coming back on its next vocal phrase.
     pub vocal_return: Option<automix::VocalReturn>,
+    /// Auto-DJ, when on (see `set_autodj`).
+    pub autodj: Option<automix::AutoDj>,
     /// A deck whose mix profile is to be saved (deck, track, since).
     profile_due: Option<(usize, u64, Instant)>,
     /// The deck easing back to its own tempo after a mix (see `tempo_home_tick`).
@@ -345,6 +347,7 @@ impl Core {
             dirty_since: None,
             automix: None,
             vocal_return: None,
+            autodj: None,
             profile_due: None,
             preparer: None,
             profiles: HashMap::new(),
@@ -2594,6 +2597,8 @@ impl Core {
         }
 
         self.automix_tick();
+        // (After the mix's tick: a mix Auto-DJ starts is seen by the engine before it's checked.)
+        self.autodj_tick();
         self.prepare_tick();
         self.feedback_state();
         self.midi_feedback();
@@ -2848,6 +2853,36 @@ mod tests {
         assert!(s.score > 0.0 && s.why.contains("bars"), "{s:?}");
         assert_eq!(c.mix_score_known(0, &next), Some(Some(s)), "cached");
         assert_eq!(c.mix_score(0, &next.with_file_name("never-prepared.wav")), None);
+    }
+
+    #[test]
+    fn auto_dj_plays_the_list_as_a_set() {
+        let (mut e, mut c, _config) = core();
+        let tracks: Vec<PathBuf> = (0..3).map(|k| kick_wav(&format!("set-{k}.wav"), 40)).collect();
+        c.set_autodj(Some(tracks.clone()));
+        let deadline = Instant::now() + std::time::Duration::from_secs(600);
+        let mut mixes = 0;
+        let mut was_mixing = false;
+        // Until the last track has played out.
+        while c.autodj.is_some() {
+            assert!(Instant::now() < deadline, "the set never ended: {:?}", c.status);
+            pump(&mut e, &mut c);
+            if was_mixing && c.automix.is_none() {
+                mixes += 1;
+            }
+            was_mixing = c.automix.is_some();
+            // Never two tracks heard at full at once outside a mix.
+            if c.automix.is_none() {
+                let loud = (0..2).filter(|&d| c.snap.decks[d].playing && !c.snap.decks[d].loop_on && c.session.channels[d].params.volume > 0.5).count();
+                assert!(loud <= 1, "two tracks up outside a mix");
+            }
+        }
+        assert_eq!(mixes, 2, "three tracks, two mixes: {:?}", c.status);
+        assert!(c.status.iter().any(|(_, m)| m.contains("last track")), "{:?}", c.status);
+        assert!(c.status.iter().any(|(_, m)| m.contains("the set is over")), "{:?}", c.status);
+        for t in &tracks {
+            assert!(c.history.contains(t), "{} played", t.display());
+        }
     }
 
     #[test]

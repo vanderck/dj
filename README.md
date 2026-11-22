@@ -71,6 +71,15 @@ Every track is separated into **drums, bass, vocals and other** with HT-Demucs, 
 after it loads (`crates/stems-core`). The deck plays the full mix until the stems are ready; its
 header shows the progress until they're there.
 
+**Auto-DJ.** The library's *Auto-DJ* button plays the tracks it lists (all of them, a search,
+or History) as a set on decks 1 and 2. With nothing playing it starts the first; while a track
+plays, it loads the best next one on the other deck, silent (the best by key, tempo, energy and
+how well it would mix in: as Fits ranks them; clashing keys and tempos more than 8 % apart only
+when nothing else is left), waits for its stems and sections (at most 2½ minutes, or not at all
+in the playing track's last minute), and mixes it in at the best moment, as *Mix → Best* does.
+When the list runs out, the last track plays out. The button shows how many are left; click it
+to stop (what plays plays on). Prepare the list first so every track is ready at once.
+
 **Prepare the library ahead of time.** The library's *Prepare* button gets the tracks it lists
 (all of them, a search, or History) ready to mix, in the background on half the cores: their
 stems (HT-Demucs), sections and beats (All-In-One) and a *mix profile* (each bar's parts,

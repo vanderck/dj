@@ -40,46 +40,7 @@ const COLS: [(Option<Col>, &str, f32, bool); 10] = [
 ];
 
 /// Fits: tempo window around the reference deck's BPM.
-/// Fits: within 5 % of the playing tempo (real DJs keep 86 % of tracks within 5 % of their own).
-const FITS_PCT: f64 = 5.0;
-
-/// Key fit, best first; `None` = does not mix.
-fn key_rank(c: Compat) -> Option<u8> {
-    match c {
-        Compat::Same => Some(0),
-        Compat::Relative | Compat::Adjacent => Some(1),
-        Compat::Boost => Some(2),
-        Compat::Diagonal | Compat::Clash => None,
-    }
-}
-
-/// Lower is better: the key fit first, then the tempo distance (each key step outweighs the
-/// whole ±5 BPM window).
-/// How well a track fits after the playing one, lower is better: the key (same, then
-/// relative/adjacent, then a boost), the tempo gap (per %), and the energy (level or a step up
-/// best; down or a big jump less so).
-fn fit_score(e: &Entry, reference: dj_library::key::Key, ref_bpm: Option<f64>, ref_energy: Option<u8>) -> f64 {
-    let rank = e.key.and_then(|k| key_rank(k.compat(reference))).unwrap_or(9) as f64;
-    let tempo = match (ref_bpm, e.bpm) {
-        (Some(r), Some(b)) => 100.0 * (b / r - 1.0).abs(),
-        _ => 0.0,
-    };
-    let energy = match (ref_energy, e.energy) {
-        (Some(a), Some(b)) => match b as i32 - a as i32 {
-            0 | 1 => 0.0,
-            2 | -1 => 1.5,
-            _ => 3.0,
-        },
-        _ => 0.5,
-    };
-    // (A key step outweighs the whole tempo window.)
-    rank * 5.0 + tempo + energy
-}
-
-/// How much a prepared track's mix score (see `Core::mix_score`) lifts it in Fits.
-fn mix_bonus(score: f32) -> f64 {
-    (score as f64 / 3.0).clamp(0.0, 8.0)
-}
+use crate::core::automix::{fit_score, key_rank, mix_bonus, FITS_PCT};
 
 fn mmss(s: Option<f64>) -> String {
     s.map(|s| format!("{}:{:02}", (s / 60.0) as u32, (s % 60.0) as u32)).unwrap_or_default()
@@ -193,7 +154,31 @@ pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect) {
     if prep.is_some() {
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
     }
-    let pills_left = super::mixer::global_pills(ui, core, st, prr.left() - 8.0, y, bar_h);
+    // Auto-DJ: the tracks listed, played as a set on decks 1 and 2.
+    let auto_label = match &core.autodj {
+        Some(a) => format!("Auto-DJ · {} left", a.left()),
+        None => "Auto-DJ".into(),
+    };
+    let aw = pill_width(ui, &auto_label, 13.0);
+    let ar = Rect::from_min_size(Pos2::new(prr.left() - 8.0 - aw, y), Vec2::new(aw, bar_h));
+    let auto_hover = if core.autodj.is_some() {
+        "Click to stop (the playing track plays on)"
+    } else {
+        "Play the tracks listed as a set on decks 1 and 2: dj picks each next track (key, tempo, energy, and how well it would mix in: as Fits) and mixes it in at the best moment. Prepare them first so each is ready at once."
+    };
+    if pill(ui, ar, &auto_label, core.autodj.is_some()).on_hover_text(auto_hover).clicked() {
+        if core.autodj.is_some() {
+            core.set_autodj(None);
+        } else {
+            let paths: Vec<PathBuf> = if st.browser_hist {
+                core.history.iter().rev().cloned().collect()
+            } else {
+                core.filtered_library().into_iter().map(|i| core.library[i].path.clone()).collect()
+            };
+            core.set_autodj(Some(paths));
+        }
+    }
+    let pills_left = super::mixer::global_pills(ui, core, st, ar.left() - 8.0, y, bar_h);
     let info_r = Rect::from_min_max(Pos2::new(fr.right() + 12.0, y), Pos2::new(pills_left - 12.0, y + bar_h));
     ui.painter_at(info_r).text(Pos2::new(info_r.right(), info_r.center().y), Align2::RIGHT_CENTER, info, sans(12.5), TEXT_DIM);
 
