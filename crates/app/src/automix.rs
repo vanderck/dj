@@ -512,7 +512,9 @@ impl Core {
         // are far apart; only then it cuts.
         let can_blend = !stretch && (stems || !clash);
         let (blend, cut) = match style {
-            MixStyle::Auto => (can_blend, !can_blend),
+            // (A cut is quick: only in the old track's last 30 s. Before that, Auto blends 20 s or
+            // more even where it would rather cut; it doesn't wait for the end to cut.)
+            MixStyle::Auto => (true, !can_blend),
             MixStyle::Stems | MixStyle::Eq => (true, false),
             MixStyle::Drop => (false, true),
         };
@@ -538,13 +540,17 @@ impl Core {
         // Nothing quick (under 20 s, or a cut) unless the old track is almost over; a cut you
         // asked for (Drop) wherever it fits.
         let (min_bars, short_from) = self.mix_floor(outgoing, &out);
+        // Best starts while 30 s of the old track is left, and is over before it ends (the very
+        // end only when nothing earlier fits).
+        let start_before = if when == MixWhen::Best { short_from } else { usize::MAX };
         let short_from = if style == MixStyle::Drop { 0 } else { short_from };
-        let mut lim = Limits {
+        let lim = Limits {
             earliest,
             latest,
             lengths,
             min_bars,
             short_from,
+            start_before,
             cue_bar: chosen.then_some(cue_bar),
             drop_cue_bar,
             in_cues: cb_i.iter().filter(|b| **b >= -0.1).map(|b| b.round().max(0.0) as usize).collect(),
@@ -555,14 +561,7 @@ impl Core {
             stems,
             hurry: when == MixWhen::Now,
         };
-        let mut found = tr::search(&out, &inc, &lim);
-        // Auto would cut, but a cut has to wait for the old track's last 30 s, and this mix
-        // can't (Now): a blend of 20 s or more instead.
-        if found.is_empty() && style == MixStyle::Auto && !lim.blend {
-            lim.blend = true;
-            found = tr::search(&out, &inc, &lim);
-        }
-        found
+        tr::search(&out, &inc, &lim)
             .into_iter()
             .map(|c| {
                 let how = match c.technique {
@@ -731,6 +730,7 @@ impl Core {
             lengths: (MIN_MIX_BARS / 4..=MAX_MIX_BARS / 4).map(|k| 4 * k).collect(),
             min_bars,
             short_from,
+            start_before: short_from,
             cue_bar: in_cues.first().copied().or(Some(0)),
             drop_cue_bar: None,
             in_cues,
@@ -768,6 +768,7 @@ impl Core {
                 lengths: (MIN_MIX_BARS / 4..=MAX_MIX_BARS / 4).map(|k| 4 * k).collect(),
                 min_bars,
                 short_from,
+                start_before: short_from,
                 cue_bar: Some(0),
                 drop_cue_bar: None,
                 in_cues: cb_i.iter().filter(|b| **b >= -0.1).map(|b| b.round().max(0.0) as usize).collect(),
@@ -1322,7 +1323,9 @@ impl Core {
                 let stems_settled = self.snap.decks[q].stems_ready || self.decks[q].stems_missing.is_some();
                 let sections_in = !self.settings.song_sections || self.decks[q].sections.is_some() || self.decks[q].stems_missing.is_some();
                 let ready = stems_settled && sections_in && !cues_pending;
-                if !(ready || since.elapsed().as_secs() >= AUTODJ_WAIT_SECS || self.mix_is_urgent(p)) {
+                // (Without waiting any longer in the playing track's last 90 s: the mix has to start
+                // while 30 s of it is left, and last 20 s or more.)
+                if !(ready || since.elapsed().as_secs() >= AUTODJ_WAIT_SECS || self.ends_within(p, 90.0)) {
                     return;
                 }
                 if self.mix_target(q) != Some(p) {

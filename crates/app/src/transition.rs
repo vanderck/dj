@@ -260,6 +260,9 @@ pub struct Limits {
     /// from bar `short_from` of the old track on (where less than 30 s of it is left).
     pub min_bars: usize,
     pub short_from: usize,
+    /// Best: the mix starts before this bar of the old track (while 30 s of it is left) and is
+    /// over before it ends, unless nothing fits that way; `usize::MAX`: no such limit.
+    pub start_before: usize,
     /// The bar of the new track at its cue (where it waits), if it's on a bar line.
     pub cue_bar: Option<usize>,
     /// The bar of its drop cue (a hot cue named "Drop"), to cut in on.
@@ -483,7 +486,9 @@ pub fn search(out: &Bars, inc: &Bars, lim: &Limits) -> Vec<Candidate> {
     // too short for that, at least 8 bars.
     let rest = |strict: bool| if strict { (n_in / 2).max(32) } else { 8 };
     let mut found = Vec::new();
-    for strict in [true, false] {
+    // In time first (see `start_before`); the very end only when nothing else fits.
+    let timing = if lim.start_before == usize::MAX { vec![false] } else { vec![true, false] };
+    for (timed, strict) in timing.iter().flat_map(|&t| [(t, true), (t, false)]) {
         for out_bar in lim.earliest..=lim.latest.min(n_out.saturating_sub(1)) {
             // On the old track's phrase lines (every 4 bars, from its cues' phrase start).
             if !out.line4(out_bar) {
@@ -498,6 +503,9 @@ pub fn search(out: &Bars, inc: &Bars, lim: &Limits) -> Vec<Candidate> {
                         // Never a quick mix (a short blend, a cut) unless the old track is almost
                         // over.
                         if out_bar < lim.short_from && (tech == Technique::Cut || bars < lim.min_bars) {
+                            continue;
+                        }
+                        if timed && (out_bar >= lim.start_before || out_bar + bars > n_out) {
                             continue;
                         }
                         if in_bar + bars + rest(strict) > n_in {
@@ -555,6 +563,7 @@ mod tests {
             lengths: (2..=16).map(|k| 4 * k).collect(),
             min_bars: 0,
             short_from: 0,
+            start_before: usize::MAX,
             cue_bar: None,
             drop_cue_bar: None,
             in_cues: vec![],
@@ -676,6 +685,28 @@ mod tests {
         lim.earliest = 20;
         lim.latest = 24;
         assert!(search(&out, &inc, &lim).is_empty());
+    }
+
+    #[test]
+    fn best_starts_before_the_last_30_seconds_and_is_over_before_the_end() {
+        // The old track sings to bar 88, then an 8-bar outro without drums or bass to the end:
+        // that outro (its last 16 s) draws the mix there.
+        let out_parts = [(0, "intro"), (16, "verse"), (32, "chorus"), (48, "verse"), (64, "chorus"), (88, "outro")];
+        let out = track(96, [&[(0, 88)], &[(0, 88)], &[(16, 88)], &[(0, 96)]]).with_sections(&sections(&out_parts, 96));
+        let inc = track(128, [&[(0, 128)], &[(8, 128)], &[(24, 96)], &[(0, 128)]]);
+        let mut lim = limits(40, 95);
+        lim.cut = false;
+        let free = &search(&out, &inc, &lim)[0];
+        assert!(free.out_bar >= 81, "without the limit it waits for the very end: {free:?}");
+        // 2 s bars: the last 30 s are the last 15 bars.
+        lim.start_before = 81;
+        let best = search(&out, &inc, &lim);
+        for b in &best {
+            assert!(b.out_bar < 81 && b.out_bar + b.bars <= 96, "{b:?}");
+        }
+        // Asked when it's already that late: still a mix (the end is all there is).
+        lim.earliest = 84;
+        assert!(!search(&out, &inc, &lim).is_empty());
     }
 
     #[test]
