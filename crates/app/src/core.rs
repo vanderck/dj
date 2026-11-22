@@ -218,6 +218,8 @@ pub struct Core {
     pub vst3_scanning: bool,
     vst3_rx: Option<Receiver<ScanCache>>,
     pub library: Vec<Entry>,
+    /// Keeps the computer awake while dj runs (Settings → Decks).
+    awake: crate::awake::KeepAwake,
     /// Preparing library tracks in the background (see `prepare_tracks`).
     pub preparer: Option<crate::profile::Preparer>,
     /// Tracks whose profile is in (or not, `None`) as read from disk, by path.
@@ -322,6 +324,7 @@ impl Core {
             vst3_scanning: false,
             vst3_rx: None,
             library: Vec::new(),
+            awake: Default::default(),
             library_scanning: false,
             library_rx: None,
             browser_selected: None,
@@ -2456,6 +2459,7 @@ impl Core {
 
     /// Poll everything; call ~60×/s from the UI or headless loop.
     pub fn tick(&mut self) {
+        self.awake.set(self.settings.keep_awake);
         self.snap = *self.ctl.snapshot();
         self.midi.set_clock(self.snap.clock.bpm);
 
