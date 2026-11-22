@@ -222,9 +222,9 @@ pub struct AutoDj {
     pub tracks: Vec<std::path::PathBuf>,
     /// The same, as a set (looked up every frame).
     set: std::collections::HashSet<std::path::PathBuf>,
-    /// When it last picked a next track: it picks at most once a second (a pick ranks the
-    /// whole list).
-    picked_at: Option<std::time::Instant>,
+    /// When it last picked a next track, for which playing deck and track: it picks again for
+    /// the same at most once a second (a pick ranks the whole list).
+    picked_at: Option<(std::time::Instant, usize, u64)>,
     /// Those played (or being played, or skipped).
     pub played: std::collections::HashSet<std::path::PathBuf>,
     /// When the waiting deck's track was loaded (deck, track id, when): it waits for its stems
@@ -1284,10 +1284,13 @@ impl Core {
             if self.decks[0].loading.is_some() || self.decks[1].loading.is_some() || self.automix.is_some() {
                 return;
             }
-            let waiting = (0..2).find_map(|d| {
-                let i = self.decks[d].info.as_ref().filter(|i| !a.played.contains(&i.path) && a.set.contains(&i.path))?;
-                self.snap.decks[d].loaded.then(|| (d, i.path.clone()))
-            });
+            let unplayed = |d: usize| self.decks[d].info.as_ref().filter(|i| !a.played.contains(&i.path) && a.set.contains(&i.path));
+            // A track of the list just loaded that the engine doesn't show yet: wait for it (else
+            // the first track of the list was loaded again, over itself).
+            if (0..2).any(|d| unplayed(d).is_some() && !self.snap.decks[d].loaded) {
+                return;
+            }
+            let waiting = (0..2).find_map(|d| unplayed(d).map(|i| (d, i.path.clone())));
             match waiting {
                 Some((d, path)) => {
                     if self.snap.decks[d].loop_on {
@@ -1342,9 +1345,9 @@ impl Core {
                 let plan = self.plan_best(q, p, MixStyle::Auto);
                 self.start_mix(plan);
             }
-            None if a.picked_at.is_some_and(|t| t.elapsed().as_secs_f32() < 1.0) => {}
+            None if a.picked_at.is_some_and(|(t, d, id)| d == p && id == self.snap.decks[p].track_id && t.elapsed().as_secs_f32() < 1.0) => {}
             None => {
-                self.autodj.as_mut().unwrap().picked_at = Some(std::time::Instant::now());
+                self.autodj.as_mut().unwrap().picked_at = Some((std::time::Instant::now(), p, self.snap.decks[p].track_id));
                 match self.autodj_next(p) {
                 Some(next) => {
                     // Silent until the mix brings it in.
@@ -1362,6 +1365,15 @@ impl Core {
                     }
                 }
             }
+            }
+        }
+    }
+
+    /// Remove the echoes mixes added that are still waiting for their tail to ring out.
+    pub fn drop_mix_echoes(&mut self) {
+        for (ch, slot, _) in std::mem::take(&mut self.echo_cleanup) {
+            if self.session.channels[ch].fx.slots[slot].as_ref().is_some_and(|s| s.effect_id == ECHO_ID) {
+                self.remove_insert(ch, slot);
             }
         }
     }

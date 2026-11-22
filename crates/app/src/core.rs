@@ -2929,6 +2929,10 @@ impl Core {
             }
         }
         self.stop_preparing();
+        // A mix's echo-out not removed yet (its tail still ringing, or the mix still running):
+        // gone before the session is saved, else it would come back on that channel next time.
+        self.cancel_mix();
+        self.drop_mix_echoes();
         self.save_all();
         crate::settings::flush_writes();
     }
@@ -3192,10 +3196,34 @@ pub(crate) mod tests {
         let deadline = Instant::now() + std::time::Duration::from_secs(600);
         let mut mixes = 0;
         let mut was_mixing = false;
+        // What happened, for a failure: each change of the decks' tracks and Auto-DJ's played list.
+        let mut history: Vec<String> = Vec::new();
+        let name = |p: &Path| p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
         // Until the last track has played out.
         while c.autodj.is_some() {
             assert!(Instant::now() < deadline, "the set never ended: {:?}", c.status);
             pump(&mut e, &mut c);
+            let decks: Vec<String> = (0..2)
+                .map(|d| {
+                    let v = c.snap.decks[d];
+                    format!(
+                        "{}{}{}",
+                        c.decks[d].info.as_ref().map(|i| name(&i.path)).unwrap_or("-".into()),
+                        if v.playing { "▶" } else { "" },
+                        c.decks[d].loading.as_ref().map(|p| format!("(loading {})", name(p))).unwrap_or_default()
+                    )
+                })
+                .collect();
+            let mut played: Vec<String> = c.autodj.as_ref().map(|a| a.played.iter().map(|p| name(p)).collect()).unwrap_or_default();
+            played.sort();
+            let state = format!("{decks:?} played {played:?} mix {}", c.automix.is_some());
+            if history.last().is_none_or(|h| !h.ends_with(&state)) {
+                history.push(format!("@{:.1} {state}", c.snap.clock.beat));
+            }
+            // Once the set is going, the next track loads while one still plays (not after it ended).
+            if c.autodj.as_ref().is_some_and(|a| !a.played.is_empty()) && (0..2).any(|d| c.decks[d].loading.is_some()) {
+                assert!((0..2).any(|d| c.snap.decks[d].playing), "loaded after the music stopped\n{}", history.join("\n"));
+            }
             if was_mixing && c.automix.is_none() {
                 mixes += 1;
             }
@@ -3206,12 +3234,15 @@ pub(crate) mod tests {
                 assert!(loud <= 1, "two tracks up outside a mix");
             }
         }
-        assert_eq!(mixes, 2, "three tracks, two mixes: {:?}", c.status);
+        assert_eq!(mixes, 2, "three tracks, two mixes: {:?}\n{}", c.status, history.join("\n"));
         assert!(c.status.iter().any(|(_, m)| m.contains("last track")), "{:?}", c.status);
         assert!(c.status.iter().any(|(_, m)| m.contains("the set is over")), "{:?}", c.status);
         for t in &tracks {
             assert!(c.history.contains(t), "{} played", t.display());
         }
+        // Each track loaded once (not over itself while the engine caught up).
+        let loads = history.iter().filter(|h| h.contains("(loading")).count();
+        assert!(loads <= 3, "{}", history.join("\n"));
     }
 
     #[test]
@@ -4086,6 +4117,20 @@ pub(crate) mod tests {
         assert!(c.snap.decks[1].playing);
         assert!((c.session.channels[1].params.volume - 1.0).abs() < 1e-6);
         assert!((c.session.channels[1].params.eq[0] - 0.5).abs() < 1e-6, "the new bass in");
+    }
+
+    #[test]
+    fn quitting_while_a_mix_echo_rings_doesnt_save_it() {
+        let (mut e, mut c, _config) = core();
+        mix_setup(&mut e, &mut c);
+        let mut plan = c.plan_now(1, 0, crate::settings::MixStyle::Eq);
+        plan.echo_at = Some(plan.length_beats / 4.0 - 1.0);
+        c.start_mix(plan);
+        run_mix(&mut e, &mut c, |_, _| {});
+        let echo = |c: &Core| c.session.channels[0].fx.slots.iter().flatten().any(|s| s.name == "Echo");
+        assert!(echo(&c) && !c.echo_cleanup.is_empty(), "its tail still ringing");
+        c.prepare_to_quit();
+        assert!(!echo(&c) && c.echo_cleanup.is_empty(), "gone before the session is saved");
     }
 
     #[test]

@@ -188,6 +188,10 @@ impl Source for Reader<'_> {
     }
 }
 
+/// Key lock stretches once the tempo is more than 0.3 % from the track's own and stops below
+/// 0.15 % (a pitch change of under 3 cents there: inaudible).
+const KEYLOCK_ON: f64 = 0.003;
+const KEYLOCK_OFF: f64 = 0.0015;
 const XFADE_FRAMES: u32 = 192; // ~4 ms blend when switching render modes
 /// Seconds per beat assumed for loops on a track without a beat grid (120 BPM).
 const NO_GRID_SECS_PER_BEAT: f64 = 0.5;
@@ -233,6 +237,9 @@ pub struct DeckView {
     /// Each stem's peak level as heard (after its gain), [`crate::track::Stem`] order; 0 without
     /// stems.
     pub stem_peaks: [f32; NUM_STEMS],
+    /// The time-stretcher is in use (key lock away from the track's own tempo, or a transposed
+    /// key); otherwise the deck plays the audio as it is.
+    pub stretching: bool,
 }
 
 pub struct Deck {
@@ -286,6 +293,9 @@ pub struct Deck {
     stem_gain: [f32; NUM_STEMS],
     /// Per-stem peak meters (see [`DeckView::stem_peaks`]).
     stem_meter: [f32; NUM_STEMS],
+    /// Key lock is stretching: the tempo is far enough from the track's own to change its pitch
+    /// audibly (see `KEYLOCK_ON` / `KEYLOCK_OFF`).
+    keylock_engaged: bool,
 }
 
 /// Time constant for stem gain changes.
@@ -346,6 +356,7 @@ impl Deck {
             stem_target: [1.0; NUM_STEMS],
             stem_gain: [1.0; NUM_STEMS],
             stem_meter: [0.0; NUM_STEMS],
+            keylock_engaged: false,
         }
     }
 
@@ -533,6 +544,7 @@ impl Deck {
             stems_ready: self.stems.is_some(),
             stem_gains: self.stem_target,
             stem_peaks: self.stem_meter,
+            stretching: self.stretch_active,
         }
     }
 
@@ -1339,8 +1351,20 @@ impl Deck {
                 stems: stems_mix,
             };
 
-            let want_stretch =
-                (self.keylock || self.semitones != 0.0) && self.motor >= 1.0 && v > 0.0 && self.backspin.is_none();
+            // Key lock only stretches once the tempo is away from the track's own: at (or within a
+            // hair of) 0 % the audio plays untouched (a stretcher, even at 1:1, smears it a
+            // little, like a touch of reverb). Two thresholds, so a synced deck hovering around
+            // 0 % doesn't switch back and forth.
+            let off = (v - 1.0).abs();
+            if off > KEYLOCK_ON {
+                self.keylock_engaged = true;
+            } else if off < KEYLOCK_OFF {
+                self.keylock_engaged = false;
+            }
+            let want_stretch = ((self.keylock && self.keylock_engaged) || self.semitones != 0.0)
+                && self.motor >= 1.0
+                && v > 0.0
+                && self.backspin.is_none();
             if want_stretch != self.stretch_active {
                 self.stretch_active = want_stretch;
                 self.stretcher.reset();
