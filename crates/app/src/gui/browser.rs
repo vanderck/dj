@@ -46,6 +46,102 @@ fn mmss(s: Option<f64>) -> String {
     s.map(|s| format!("{}:{:02}", (s / 60.0) as u32, (s % 60.0) as u32)).unwrap_or_default()
 }
 
+/// The Crates button: the crate shown (or "Crates"); its menu picks one, makes, renames and
+/// deletes them, and imports Serato's crates and rekordbox's playlists. Returns its right edge.
+fn crates_pill(ui: &mut Ui, core: &mut Core, st: &mut UiState, x: f32, y: f32, h: f32) -> f32 {
+    let shown = core.browser_crate.and_then(|i| core.crates.get(i)).map(|c| c.name.clone());
+    let mut label = shown.clone().unwrap_or_else(|| "Crates".into());
+    if label.chars().count() > 26 {
+        label = format!("{}…", label.chars().take(25).collect::<String>());
+    }
+    let label = format!("{label} ▾");
+    let w = pill_width(ui, &label, 13.0);
+    let r = Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, h));
+    let resp = pill(ui, r, &label, shown.is_some() && !st.browser_hist);
+    egui::Popup::menu(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+        ui.set_min_width(260.0);
+        let mut pick = None;
+        egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+            if core.crates.is_empty() {
+                ui.label(egui::RichText::new("No crates yet").weak());
+            }
+            for (i, c) in core.crates.iter().enumerate() {
+                let text = if c.source.is_empty() { format!("{}  ({})", c.name, c.tracks.len()) } else { format!("{}  ({}) · {}", c.name, c.tracks.len(), c.source) };
+                if ui.selectable_label(core.browser_crate == Some(i) && !st.browser_hist, text).clicked() {
+                    pick = Some(i);
+                }
+            }
+        });
+        if let Some(i) = pick {
+            core.browser_crate = Some(i);
+            st.browser_hist = false;
+            core.browser_query.clear();
+            ui.close();
+        }
+        ui.separator();
+        ui.add(egui::TextEdit::singleline(&mut st.crate_name).hint_text("Crate name").desired_width(240.0));
+        ui.horizontal(|ui| {
+            if ui.button("New crate").clicked() {
+                core.new_crate(&st.crate_name);
+                st.browser_hist = false;
+                st.crate_name.clear();
+            }
+            if let Some(i) = core.browser_crate.filter(|_| !st.browser_hist) {
+                if ui.add_enabled(!st.crate_name.trim().is_empty(), egui::Button::new("Rename")).clicked() {
+                    core.rename_crate(i, &st.crate_name);
+                    st.crate_name.clear();
+                }
+                if ui.button("Delete").on_hover_text("The crate only: its tracks stay in the library").clicked() {
+                    core.delete_crate(i);
+                }
+            }
+        });
+        ui.separator();
+        if ui.button("Import Serato crates").on_hover_text("The crates in _Serato_/Subcrates (Music folder and drives); importing again updates them").clicked() {
+            core.import_serato_crates();
+            ui.close();
+        }
+        if ui.button("Import rekordbox XML…").on_hover_text("rekordbox: File → Export Collection in xml format; its playlists become crates").clicked() {
+            if let Some(p) = rfd::FileDialog::new().set_title("rekordbox collection (XML)").add_filter("rekordbox XML", &["xml"]).pick_file() {
+                core.import_rekordbox(&p);
+            }
+            ui.close();
+        }
+    });
+    r.right()
+}
+
+/// A track's right-click menu: add it to a crate, or take it out of the one shown.
+fn track_menu(ui: &mut Ui, core: &mut Core, path: &std::path::Path) {
+    ui.menu_button("Add to crate", |ui| {
+        let mut to = None;
+        for (i, c) in core.crates.iter().enumerate() {
+            if ui.button(&c.name).clicked() {
+                to = Some(i);
+            }
+        }
+        if !core.crates.is_empty() {
+            ui.separator();
+        }
+        if ui.button("New crate").clicked() {
+            let shown = core.browser_crate;
+            to = Some(core.new_crate("New crate"));
+            core.browser_crate = shown;
+        }
+        if let Some(i) = to {
+            core.add_to_crate(i, &[path.to_path_buf()]);
+            ui.close();
+        }
+    });
+    if let Some(i) = core.browser_crate {
+        let name = core.crates.get(i).map(|c| c.name.clone()).unwrap_or_default();
+        if ui.button(format!("Remove from \"{name}\"")).clicked() {
+            core.remove_from_crate(i, path);
+            ui.close();
+        }
+    }
+}
+
 pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect) {
     ui.allocate_rect(rect, Sense::hover());
     card(ui, rect);
@@ -70,8 +166,9 @@ pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect) {
     for (label, hist) in [("All tracks", false), ("History", true)] {
         let w = pill_width(ui, label, 13.0);
         let pr = Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, bar_h));
-        if pill(ui, pr, label, st.browser_hist == hist).clicked() {
+        if pill(ui, pr, label, st.browser_hist == hist && (hist || core.browser_crate.is_none())).clicked() {
             st.browser_hist = hist;
+            core.browser_crate = None;
             // All tracks means all of them: a search left in the field would hide most.
             if !hist {
                 core.browser_query.clear();
@@ -79,6 +176,7 @@ pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect) {
         }
         x += w + 8.0;
     }
+    x = crates_pill(ui, core, st, x, y, bar_h) + 8.0;
     // Harmonic filter against the master / playing deck.
     let reference = core.reference_key();
     let ref_deck = match core.snap.clock.owner {
@@ -403,6 +501,7 @@ pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect) {
                 egui::DragAndDrop::set_payload::<PathBuf>(&ctx, e.path.clone());
                 core.browser_selected = Some(i);
             }
+            resp.context_menu(|ui| track_menu(ui, core, &e.path));
         }
     });
     if let Some(p) = egui::DragAndDrop::payload::<PathBuf>(&ctx) {
@@ -412,7 +511,13 @@ pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect) {
         }
     }
     if rows.is_empty() && !core.library_scanning {
-        let msg = if st.browser_hist { "Tracks you load appear here." } else { "No tracks yet — press Import folder." };
+        let msg = if st.browser_hist {
+            "Tracks you load appear here."
+        } else if core.browser_crate.is_some() {
+            "No tracks in this crate yet: right-click a track (All tracks) to add it."
+        } else {
+            "No tracks yet — press Import folder."
+        };
         ui.painter().text(body.center(), Align2::CENTER_CENTER, msg, sans(13.0), TEXT_DIM);
     }
 }

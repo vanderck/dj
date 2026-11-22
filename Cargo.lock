@@ -1014,6 +1014,7 @@ dependencies = [
  "anyhow",
  "dj-engine",
  "realfft",
+ "roxmltree",
  "serde",
  "serde_json",
  "symphonia",

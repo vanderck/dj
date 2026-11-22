@@ -13,3 +13,4 @@ serde_json.workspace = true
 anyhow.workspace = true
 symphonia.workspace = true
 realfft.workspace = true
+roxmltree = "0.21"
