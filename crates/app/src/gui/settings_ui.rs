@@ -171,11 +171,29 @@ fn settings(ui: &mut Ui, core: &mut Core, st: &mut UiState) {
     }
     ui.horizontal(|ui| {
         use crate::settings::CuePadMode;
-        ui.label("Hot cue pads");
-        ui.selectable_value(&mut core.settings.cue_pads, CuePadMode::Loop, "Loop from the cue")
-            .on_hover_text("A set pad starts a loop at its cue, of the deck's loop size (on screen and on your controller)");
-        ui.selectable_value(&mut core.settings.cue_pads, CuePadMode::Jump, "Jump to the cue")
-            .on_hover_text("A set pad jumps to its cue and plays on (on screen and on your controller)");
+        let mut on = core.settings.cue_pads == CuePadMode::Loop;
+        if ui
+            .checkbox(&mut on, "Hot cue pads loop")
+            .on_hover_text("On: a set pad starts a loop at its cue, of the loop length. Off: it jumps to its cue and plays on. (On screen and on your controller.)")
+            .changed()
+        {
+            core.settings.cue_pads = if on { CuePadMode::Loop } else { CuePadMode::Jump };
+        }
+        // The loop length: for pads, the loop button, and the decks' loop size until changed.
+        let mut beats = core.settings.default_loop_beats;
+        egui::ComboBox::from_id_salt("default-loop")
+            .selected_text(format!("{} beats", beats))
+            .show_ui(ui, |ui| {
+                for b in [1.0, 2.0, 4.0, 8.0, 16.0, 32.0] {
+                    ui.selectable_value(&mut beats, b, format!("{b} beats"));
+                }
+            })
+            .response
+            .on_hover_text("Default loop length (a loop on a hot cue, the loop button)");
+        if beats != core.settings.default_loop_beats {
+            core.settings.default_loop_beats = beats;
+            core.set_default_loop(beats);
+        }
     });
     ui.horizontal(|ui| {
         use crate::settings::CuePoints;
