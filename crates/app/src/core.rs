@@ -2316,6 +2316,16 @@ impl Core {
         }
     }
 
+    /// A new default loop length (Settings): every deck's loop size and loop button use it.
+    pub fn set_default_loop(&mut self, beats: f64) {
+        let beats = beats.clamp(1.0 / 32.0, 64.0);
+        for d in 0..NUM_DECKS {
+            self.loop_size[d] = beats;
+            self.deck_cmd(d, DeckCmd::DefaultLoopBeats(beats));
+        }
+        self.mark_dirty();
+    }
+
     /// A hot cue pad pressed: an empty pad sets the cue; a set pad loops from it at the deck's loop
     /// size or jumps to it (Settings → Hot cue pads), the same on screen and on a controller.
     fn pad_press(&mut self, d: usize, idx: u8) -> Option<DeckCmd> {
@@ -4221,6 +4231,30 @@ pub(crate) mod tests {
         // dj's own loads (Auto-DJ, the session) don't ask.
         c.load_track(1, &a);
         assert!(c.pending_load.is_none());
+    }
+
+    #[test]
+    fn loops_on_cues_switch_and_the_default_loop_is_4_beats() {
+        let (mut e, mut c, _config) = core();
+        assert_eq!(crate::settings::Settings::default().default_loop_beats, 4.0);
+        assert_eq!(c.loop_size, [4.0; NUM_DECKS], "a new install starts at 4");
+        c.load_track(0, &kick_wav("loops.wav", 30));
+        let deadline = Instant::now() + std::time::Duration::from_secs(60);
+        while !(c.snap.decks[0].loaded && c.snap.decks[0].has_grid) {
+            assert!(Instant::now() < deadline, "never loaded");
+            pump(&mut e, &mut c);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        c.deck_cmd(0, DeckCmd::SetCue { idx: 0, secs: Some(4.0), end_secs: None });
+        pump(&mut e, &mut c);
+        // On: a pad loops from its cue, of the loop length (8 here, chosen in Settings).
+        c.settings.cue_pads = crate::settings::CuePadMode::Loop;
+        c.set_default_loop(8.0);
+        assert_eq!(c.loop_size, [8.0; NUM_DECKS]);
+        assert!(matches!(c.pad_press(0, 0), Some(DeckCmd::CueBeatLoop { idx: 0, beats }) if beats == 8.0));
+        // Off: it jumps there and plays on.
+        c.settings.cue_pads = crate::settings::CuePadMode::Jump;
+        assert!(matches!(c.pad_press(0, 0), Some(DeckCmd::HotCue { idx: 0, pressed: false })));
     }
 
     #[test]
