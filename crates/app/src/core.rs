@@ -127,7 +127,7 @@ pub fn addr_kind(addr: &str) -> Kind {
         | "wallclock" | "sync" | "record" | "quantizeon" | "bypassall" | "stemdrums" | "stembass"
         | "stemvocals" | "stemother" | "acapella" | "instrumental" => Kind::Switch,
         "cue" | "backspin" | "phaseminus" | "phaseplus" | "trigger" => Kind::Hold,
-        "beatskip" | "barskip" | "loopmovebeat" | "loopmovebar" | "pitchstep" | "bpmstep" | "browse" | "jog" => Kind::Step,
+        "beatskip" | "barskip" | "loopmovebeat" | "loopmovebar" | "pitchstep" | "bpmstep" | "browse" | "jog" | "loopsizestep" => Kind::Step,
         "phasebend" | "bend" => Kind::Bend,
         "quantize" | "speed" | "output" | "lane" | "pattern" => Kind::Index,
         _ if SLIP_LOOPS.iter().any(|(n, _)| n.eq_ignore_ascii_case(last)) => Kind::Hold,
@@ -1721,6 +1721,17 @@ impl Core {
             ["loopout"] if trig => Some(DeckCmd::LoopOut),
             ["loopexit"] if trig => Some(DeckCmd::LoopExit),
             ["loopbeats"] => f.filter(|v| *v > 0.0).map(|v| DeckCmd::LoopBeats(v as f64)),
+            // An encoder on the loop size: each step doubles or halves it (and a playing loop).
+            ["loopsizestep"] => {
+                let n = ints.first().copied().unwrap_or(0).clamp(-6, 6);
+                if n == 0 {
+                    return true;
+                }
+                let k = 2f64.powi(n);
+                self.loop_size[d] = (self.loop_size[d] * k).clamp(1.0 / 32.0, 64.0);
+                self.deck_cmd(d, DeckCmd::DefaultLoopBeats(self.loop_size[d]));
+                self.snap.decks[d].loop_on.then_some(DeckCmd::LoopScale(k))
+            }
             ["loophalve"] if trig => Some(DeckCmd::LoopScale(0.5)),
             ["loopdouble"] if trig => Some(DeckCmd::LoopScale(2.0)),
             ["freeloop"] => f.map(|v| DeckCmd::FreeLoop(5.0 + (v.clamp(0.0, 1.0) as f64).powi(2) * 995.0)),
@@ -4076,6 +4087,69 @@ pub(crate) mod tests {
         std::thread::sleep(std::time::Duration::from_millis(JOG_HOLD_MS + 20));
         c.tick();
         assert!(c.decks[0].jog_until.is_none());
+    }
+
+    #[test]
+    fn the_opus_quad_preset_drives_dj() {
+        let (mut e, mut c, _config) = core();
+        let preset = crate::presets::opus_quad();
+        // Every address is one dj knows, and no MIDI control is mapped twice.
+        for m in &preset {
+            // (A trigger with a press: dj ignores a trigger's 0.)
+            let probe = match addr_kind(&m.address) {
+                _ if m.address.contains(':') => vec![],
+                Kind::Trigger => vec![OscType::Float(1.0)],
+                Kind::Step => vec![OscType::Int(0)],
+                _ => vec![OscType::Float(0.0)],
+            };
+            assert!(c.route(&m.address, &probe), "unknown address {}", m.address);
+        }
+        let mut sources: Vec<_> = preset.iter().map(|m| m.source).collect();
+        sources.sort_by_key(|s| (s.kind as u8, s.channel, s.number));
+        sources.dedup();
+        assert_eq!(sources.len(), preset.len(), "a MIDI control mapped twice");
+        // Added over an existing mapping on the same control: replaced; others kept.
+        c.profile.mappings = vec![
+            MidiMapping { source: MidiSource { kind: MidiKind::Note, channel: 0, number: 0 }, address: "Deck/1/Eject".into(), mode: MapMode::Absolute, invert: false, feedback: false },
+            MidiMapping { source: MidiSource { kind: MidiKind::Note, channel: 9, number: 0 }, address: "Deck/1/Eject".into(), mode: MapMode::Absolute, invert: false, feedback: false },
+        ];
+        let n = crate::presets::apply(&mut c.profile, preset.clone());
+        assert_eq!((n, c.profile.mappings.len()), (preset.len(), preset.len() + 1));
+
+        let path = kick_wav("opus.wav", 30);
+        c.load_track(1, &path);
+        let deadline = Instant::now() + std::time::Duration::from_secs(60);
+        while !(c.snap.decks[1].loaded && c.snap.decks[1].has_grid) {
+            assert!(Instant::now() < deadline, "never loaded");
+            pump(&mut e, &mut c);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        // Deck 2's PLAY/PAUSE (note 0, channel 2).
+        c.handle_midi(&[0x91, 0, 127]);
+        c.handle_midi(&[0x91, 0, 0]);
+        while !c.snap.decks[1].playing {
+            assert!(Instant::now() < deadline, "never played");
+            pump(&mut e, &mut c);
+        }
+        // Its tempo fader, 14-bit: all the way to "+".
+        c.handle_midi(&[0xb1, 0, 127]);
+        c.handle_midi(&[0xb1, 32, 127]);
+        pump(&mut e, &mut c);
+        assert!((c.snap.decks[1].speed - 1.0 - c.snap.decks[1].tempo_range.speed(1.0) + 1.0).abs() < 1e-3, "{}", c.snap.decks[1].speed);
+        // Mixer (channel 5): CH 2 fader, EQ low, headphone cue.
+        c.handle_midi(&[0xb4, 18, 127]);
+        c.handle_midi(&[0xb4, 9, 0]);
+        c.handle_midi(&[0xb4, 71, 127]);
+        c.handle_midi(&[0xb4, 71, 0]);
+        let p = c.session.channels[1].params;
+        assert_eq!((p.volume, p.eq[0]), (1.0, 0.0));
+        assert!(p.cue, "headphone cue on");
+        // The beat loop encoder doubles the loop size; the browse knob moves the selection.
+        let size = c.loop_size[1];
+        c.handle_midi(&[0xb1, 46, 1]);
+        assert_eq!(c.loop_size[1], size * 2.0);
+        c.handle_midi(&[0xb1, 46, 127]);
+        assert_eq!(c.loop_size[1], size);
     }
 
     #[test]

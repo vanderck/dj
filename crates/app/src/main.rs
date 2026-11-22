@@ -15,6 +15,7 @@ mod osc;
 mod profile;
 mod settings;
 mod stems;
+mod presets;
 mod syndicate_map;
 mod transition;
 

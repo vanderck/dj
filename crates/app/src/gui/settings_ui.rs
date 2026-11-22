@@ -450,6 +450,15 @@ fn mapping(ui: &mut Ui, core: &mut Core) {
     if let Some(t) = &core.last_touched {
         ui.label(RichText::new(format!("Waiting for MIDI for: {t}")).color(ACCENT));
     }
+    // Ready-made mappings.
+    ui.horizontal(|ui| {
+        ui.label("Add mapping for");
+        if ui.button("Pioneer OPUS-QUAD").on_hover_text("Its PC control mode (BROWSE > MIDI > LOAD). Replaces mappings on the same MIDI controls; select it as the MIDI output for its lights.").clicked() {
+            let n = crate::presets::apply(&mut core.profile, crate::presets::opus_quad());
+            let _ = core.profile.save();
+            core.log(format!("OPUS-QUAD: {n} controls mapped"));
+        }
+    });
     // Import a mapping exported from Syndicate.
     ui.horizontal(|ui| {
         let id = egui::Id::unique("sdcmap-path");
