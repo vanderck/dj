@@ -104,7 +104,16 @@ pub fn list_audio_files(root: &Path) -> Vec<PathBuf> {
 /// Scan folders, reusing cached entries whose file hasn't changed.
 /// Tag reads are spread over all cores.
 pub fn scan(roots: &[PathBuf], cache: &[Entry]) -> Vec<Entry> {
-    let files: Vec<PathBuf> = roots.iter().flat_map(|r| list_audio_files(r)).collect();
+    scan_with(roots, &[], cache)
+}
+
+/// Like [`scan`], plus single files elsewhere (tracks in crates outside the library folders):
+/// those that exist and aren't in the folders already.
+pub fn scan_with(roots: &[PathBuf], extra: &[PathBuf], cache: &[Entry]) -> Vec<Entry> {
+    let mut files: Vec<PathBuf> = roots.iter().flat_map(|r| list_audio_files(r)).collect();
+    let listed: std::collections::HashSet<PathBuf> = files.iter().cloned().collect();
+    let mut seen = std::collections::HashSet::new();
+    files.extend(extra.iter().filter(|p| !listed.contains(*p) && seen.insert((*p).clone()) && p.is_file()).cloned());
     let cached: std::collections::HashMap<&Path, &Entry> = cache.iter().map(|e| (e.path.as_path(), e)).collect();
     let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(16);
     let chunk = files.len().div_ceil(threads).max(1);
@@ -133,4 +142,24 @@ pub fn scan(roots: &[PathBuf], cache: &[Entry]) -> Vec<Entry> {
     });
     out.sort_by(|a, b| a.artist.to_lowercase().cmp(&b.artist.to_lowercase()).then(a.title.cmp(&b.title)));
     out
+}
+
+#[cfg(test)]
+mod scan_with_tests {
+    #[test]
+    fn files_outside_the_folders_are_scanned_too() {
+        let base = std::env::temp_dir().join(format!("dj-scan-with-{}", std::process::id()));
+        let (lib, elsewhere) = (base.join("lib"), base.join("elsewhere"));
+        std::fs::create_dir_all(&lib).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        for f in [lib.join("in.wav"), elsewhere.join("crate.wav")] {
+            std::fs::write(f, b"RIFF").unwrap();
+        }
+        let extra = vec![elsewhere.join("crate.wav"), lib.join("in.wav"), elsewhere.join("gone.wav"), elsewhere.join("crate.wav")];
+        let found = super::scan_with(&[lib.clone()], &extra, &[]);
+        let mut names: Vec<_> = found.iter().map(|e| e.path.file_name().unwrap().to_string_lossy().into_owned()).collect();
+        names.sort();
+        assert_eq!(names, ["crate.wav", "in.wav"], "once each; a missing one left out");
+        let _ = std::fs::remove_dir_all(base);
+    }
 }

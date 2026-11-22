@@ -5,6 +5,7 @@
 //! energy level and cue points (key is never detected).
 
 pub mod analysis;
+pub mod crates;
 pub mod key;
 pub mod loudness;
 pub mod scan;

@@ -56,6 +56,8 @@ pub struct UiState {
     pub new_folder: String,
     pub new_vst_path: String,
     pub browser_hist: bool,
+    /// The name typed in the Crates menu (a new crate, or a new name for the one shown).
+    pub crate_name: String,
     pub browser_harmonic: bool,
     /// The library entry Fits last focused (its best match), to refocus when that changes.
     pub fits_focus: Option<usize>,
@@ -86,6 +88,7 @@ impl Default for UiState {
             new_folder: String::new(),
             new_vst_path: String::new(),
             browser_hist: false,
+            crate_name: String::new(),
             browser_harmonic: false,
             fits_focus: None,
             browser_sort: browser::Col::Artist,
@@ -331,7 +334,7 @@ fn load_alert(ctx: &egui::Context, core: &mut Core) {
     let playing = core.decks[d].info.as_ref().map(|i| i.title()).unwrap_or_default();
     let new = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
     let mut answer = None;
-    let modal = egui::Modal::new(egui::Id::new("load-alert")).show(ctx, |ui| {
+    let modal = egui::Modal::new(egui::Id::unique("load-alert")).show(ctx, |ui| {
         ui.set_width(380.0);
         ui.label(egui::RichText::new(format!("Deck {} is playing", d + 1)).strong().size(16.0).color(skin::DECK[d]));
         ui.add_space(6.0);

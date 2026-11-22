@@ -237,6 +237,9 @@ pub struct Core {
     /// Tracks loaded this session (for the HIST view).
     pub history: Vec<PathBuf>,
     pub browser_query: String,
+    /// Crates (dj's own and imported from Serato / rekordbox), and the one the browser shows.
+    pub crates: Vec<dj_library::crates::Crate>,
+    pub browser_crate: Option<usize>,
     loader_tx: Sender<LoadJob>,
     loader_rx: Receiver<LoadResult>,
     pub stems: crate::stems::StemsWorker,
@@ -340,6 +343,8 @@ impl Core {
             library_rx: None,
             browser_selected: None,
             history: Vec::new(),
+            crates: Vec::new(),
+            browser_crate: None,
             browser_query: String::new(),
             loader_tx: job_tx,
             loader_rx: res_rx,
@@ -381,6 +386,7 @@ impl Core {
         let mut library: Vec<dj_library::scan::Entry> = crate::settings::load_json(&crate::settings::config_dir().join("library-cache.json"));
         core.fill_detected(&mut library);
         core.library = library;
+        core.crates = crate::settings::load_json(&Self::crates_path());
         core.start_osc();
         core
     }
@@ -981,9 +987,11 @@ impl Core {
         }
         let roots = self.settings.library_folders.clone();
         let cache = self.library.clone();
+        // (Crates' tracks outside the library folders are listed too.)
+        let extra: Vec<PathBuf> = self.crates.iter().flat_map(|c| c.tracks.iter().cloned()).collect();
         let (tx, rx) = unbounded();
         std::thread::spawn(move || {
-            let _ = tx.send(dj_library::scan::scan(&roots, &cache));
+            let _ = tx.send(dj_library::scan::scan_with(&roots, &extra, &cache));
         });
         self.library_rx = Some(rx);
         self.library_scanning = true;
@@ -1008,8 +1016,159 @@ impl Core {
             cache.bundles.iter().filter_map(|(p, _, r)| r.as_ref().err().map(|e| (p.clone(), e.clone()))).collect();
     }
 
+    /// The browser's list: the library, or the selected crate's tracks (in the crate's order;
+    /// those not found are left out), matching the search.
     pub fn filtered_library(&self) -> Vec<usize> {
-        self.library.iter().enumerate().filter(|(_, e)| e.matches(&self.browser_query)).map(|(i, _)| i).collect()
+        match self.browser_crate.and_then(|c| self.crates.get(c)) {
+            Some(c) => {
+                let at: HashMap<&Path, usize> = self.library.iter().enumerate().map(|(i, e)| (e.path.as_path(), i)).collect();
+                c.tracks.iter().filter_map(|p| at.get(p.as_path()).copied()).filter(|&i| self.library[i].matches(&self.browser_query)).collect()
+            }
+            None => self.library.iter().enumerate().filter(|(_, e)| e.matches(&self.browser_query)).map(|(i, _)| i).collect(),
+        }
+    }
+
+    // ------------------------------------------------------------ crates
+
+    pub fn crates_path() -> PathBuf {
+        crate::settings::config_dir().join("crates.json")
+    }
+
+    fn save_crates(&mut self) {
+        self.crates.sort_by_key(|c| c.name.to_lowercase());
+        let _ = crate::settings::save_json_later(&Self::crates_path(), &self.crates);
+    }
+
+    /// Where crate `name` now sits (after sorting).
+    fn crate_index(&self, name: &str) -> Option<usize> {
+        self.crates.iter().position(|c| c.name == name)
+    }
+
+    /// A new, empty crate of yours (a name already taken gets a number); shown in the browser.
+    pub fn new_crate(&mut self, name: &str) -> usize {
+        let base = if name.trim().is_empty() { "New crate" } else { name.trim() };
+        let mut name = base.to_string();
+        let mut n = 2;
+        while self.crate_index(&name).is_some() {
+            name = format!("{base} {n}");
+            n += 1;
+        }
+        self.crates.push(dj_library::crates::Crate { name: name.clone(), ..Default::default() });
+        self.save_crates();
+        let i = self.crate_index(&name).unwrap_or(0);
+        self.browser_crate = Some(i);
+        i
+    }
+
+    pub fn rename_crate(&mut self, i: usize, name: &str) {
+        let name = name.trim();
+        if name.is_empty() || i >= self.crates.len() || self.crate_index(name).is_some_and(|j| j != i) {
+            return;
+        }
+        self.crates[i].name = name.to_string();
+        let shown = self.browser_crate == Some(i);
+        self.save_crates();
+        if shown {
+            self.browser_crate = self.crate_index(name);
+        }
+    }
+
+    pub fn delete_crate(&mut self, i: usize) {
+        if i >= self.crates.len() {
+            return;
+        }
+        let name = self.crates.remove(i).name;
+        self.browser_crate = match self.browser_crate {
+            Some(c) if c == i => None,
+            Some(c) if c > i => Some(c - 1),
+            c => c,
+        };
+        self.save_crates();
+        self.log(format!("Crate \"{name}\" deleted (its tracks stay in the library)"));
+    }
+
+    /// Add tracks to a crate (those already in it stay where they are).
+    pub fn add_to_crate(&mut self, i: usize, paths: &[PathBuf]) {
+        let Some(c) = self.crates.get_mut(i) else { return };
+        let mut added = 0;
+        for p in paths {
+            if !c.tracks.contains(p) {
+                c.tracks.push(p.clone());
+                added += 1;
+            }
+        }
+        let name = c.name.clone();
+        let shown = self.browser_crate == Some(i);
+        self.save_crates();
+        if shown {
+            self.browser_crate = self.crate_index(&name);
+        }
+        self.log(format!("{added} track{} added to \"{name}\"", if added == 1 { "" } else { "s" }));
+    }
+
+    pub fn remove_from_crate(&mut self, i: usize, path: &Path) {
+        if let Some(c) = self.crates.get_mut(i) {
+            c.tracks.retain(|p| p != path);
+            let _ = crate::settings::save_json_later(&Self::crates_path(), &self.crates);
+        }
+    }
+
+    /// Imported crates replace those imported before from the same place under the same name;
+    /// yours stay. Then the library is scanned again for their tracks outside its folders.
+    fn merge_imported(&mut self, from: &str, imported: Vec<dj_library::crates::Crate>) -> (usize, usize, usize) {
+        let shown = self.browser_crate.and_then(|i| self.crates.get(i)).map(|c| c.name.clone());
+        let n = imported.len();
+        let tracks: usize = imported.iter().map(|c| c.tracks.len()).sum();
+        let missing = imported.iter().flat_map(|c| &c.tracks).filter(|p| !p.exists()).count();
+        for c in imported {
+            let suffixed = format!("{} ({from})", c.name);
+            match self.crates.iter().position(|o| o.source == c.source && (o.name == c.name || o.name == suffixed)) {
+                // (Updated under the name it has here.)
+                Some(j) => {
+                    let name = std::mem::take(&mut self.crates[j].name);
+                    self.crates[j] = dj_library::crates::Crate { name, ..c };
+                }
+                // (A crate of yours by that name: the import gets the source in its name.)
+                None if self.crate_index(&c.name).is_some() => self.crates.push(dj_library::crates::Crate { name: suffixed, ..c }),
+                None => self.crates.push(c),
+            }
+        }
+        self.save_crates();
+        self.browser_crate = shown.and_then(|n| self.crate_index(&n));
+        self.rescan_library();
+        (n, tracks, missing)
+    }
+
+    /// Import the crates of every `_Serato_` folder (the Music folder's and external drives').
+    pub fn import_serato_crates(&mut self) {
+        let dirs = dj_library::crates::serato_dirs();
+        if dirs.is_empty() {
+            self.log("No Serato crates found (no _Serato_/Subcrates in the Music folder or on a drive)");
+            return;
+        }
+        let mut all = Vec::new();
+        for d in &dirs {
+            match dj_library::crates::import_serato(d) {
+                Ok(c) => all.extend(c),
+                Err(e) => self.log(format!("Serato crates: {e}")),
+            }
+        }
+        let (n, t, missing) = self.merge_imported("Serato", all);
+        let gone = if missing > 0 { format!(", {missing} files not found") } else { String::new() };
+        self.log(format!("Serato: {n} crates, {t} tracks{gone}"));
+    }
+
+    /// Import the playlists of a rekordbox XML export (File → Export Collection in xml format).
+    pub fn import_rekordbox(&mut self, path: &Path) {
+        let read = std::fs::read_to_string(path).map_err(|e| e.to_string()).and_then(|x| dj_library::crates::read_rekordbox_xml(&x));
+        match read {
+            Ok(crates) => {
+                let (n, t, missing) = self.merge_imported("rekordbox", crates);
+                let gone = if missing > 0 { format!(", {missing} files not found") } else { String::new() };
+                self.log(format!("rekordbox: {n} playlists, {t} tracks{gone}"));
+            }
+            Err(e) => self.log(format!("rekordbox import: {e}")),
+        }
     }
 
     // ------------------------------------------------------------ channel / mixer
@@ -4255,6 +4414,53 @@ pub(crate) mod tests {
         // Off: it jumps there and plays on.
         c.settings.cue_pads = crate::settings::CuePadMode::Jump;
         assert!(matches!(c.pad_press(0, 0), Some(DeckCmd::HotCue { idx: 0, pressed: false })));
+    }
+
+    #[test]
+    fn crates_are_made_shown_and_imported() {
+        use dj_library::crates::Crate;
+        use dj_library::scan::Entry;
+        let (_e, mut c, _config) = core();
+        let p = |n: &str| PathBuf::from(format!("/music/{n}.mp3"));
+        c.library = ["a", "b", "c", "d"].iter().map(|n| Entry { path: p(n), title: n.to_string(), ..Default::default() }).collect();
+        // Yours: names unique, sorted, shown when made.
+        let warm = c.new_crate("Warm up");
+        assert_eq!(c.browser_crate, Some(warm));
+        c.add_to_crate(warm, &[p("c"), p("a"), p("c"), p("x")]);
+        assert_eq!(c.crates[warm].tracks, vec![p("c"), p("a"), p("x")], "no doubles; order kept");
+        // The browser lists it in its order (a track not in the library is left out), searched.
+        assert_eq!(c.filtered_library(), vec![2, 0]);
+        c.browser_query = "a".into();
+        assert_eq!(c.filtered_library(), vec![0]);
+        c.browser_query.clear();
+        c.new_crate("Warm up");
+        assert!(c.crates.iter().any(|k| k.name == "Warm up 2"));
+        let a_crate = c.new_crate("A first");
+        assert_eq!(a_crate, 0, "sorted by name");
+        let warm = c.crates.iter().position(|k| k.name == "Warm up").unwrap();
+        c.browser_crate = Some(warm);
+        c.rename_crate(warm, "Opening");
+        assert_eq!(c.crates[c.browser_crate.unwrap()].name, "Opening", "still shown after the re-sort");
+        let shown = c.browser_crate.unwrap();
+        c.remove_from_crate(shown, &p("c"));
+        assert_eq!(c.filtered_library(), vec![0]);
+        c.delete_crate(shown);
+        assert_eq!(c.browser_crate, None);
+        assert_eq!(c.filtered_library().len(), 4, "the whole library again");
+        assert!(c.crates.iter().all(|k| k.name != "Opening"));
+        // Imports: again from the same place replaces; a crate of yours by that name stays.
+        let serato = |tracks: Vec<PathBuf>| vec![Crate { name: "A first".into(), tracks: tracks.clone(), source: "Serato".into() }, Crate { name: "House".into(), tracks, source: "Serato".into() }];
+        c.merge_imported("Serato", serato(vec![p("a")]));
+        c.merge_imported("Serato", serato(vec![p("b"), p("d")]));
+        let house: Vec<_> = c.crates.iter().filter(|k| k.name == "House").collect();
+        assert_eq!(house.len(), 1);
+        assert_eq!(house[0].tracks, vec![p("b"), p("d")]);
+        assert!(c.crates.iter().any(|k| k.name == "A first" && k.source.is_empty()), "yours kept");
+        assert_eq!(c.crates.iter().filter(|k| k.name == "A first (Serato)").count(), 1);
+        // Saved, and read back.
+        crate::settings::flush_writes();
+        let saved: Vec<Crate> = crate::settings::load_json(&Core::crates_path());
+        assert_eq!(saved, c.crates);
     }
 
     #[test]
