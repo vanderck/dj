@@ -153,6 +153,8 @@ fn mixlab() {
         earliest: 0,
         latest: outb.len(),
         lengths: (2..=32).map(|k| 4 * k).collect(),
+        min_bars: 0,
+        short_from: 0,
         cue_bar: None,
         drop_cue_bar: None,
         in_cues: vec![],

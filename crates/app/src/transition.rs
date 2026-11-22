@@ -256,6 +256,10 @@ pub struct Limits {
     pub latest: usize,
     /// Overlap lengths to try, in bars (every phrase length that could fit: the songs decide).
     pub lengths: Vec<usize>,
+    /// The shortest blend, in bars (20 s at the tempo it plays at); shorter ones, and cuts, only
+    /// from bar `short_from` of the old track on (where less than 30 s of it is left).
+    pub min_bars: usize,
+    pub short_from: usize,
     /// The bar of the new track at its cue (where it waits), if it's on a bar line.
     pub cue_bar: Option<usize>,
     /// The bar of its drop cue (a hot cue named "Drop"), to cut in on.
@@ -491,6 +495,11 @@ pub fn search(out: &Bars, inc: &Bars, lim: &Limits) -> Vec<Candidate> {
                         continue;
                     }
                     for &bars in &lengths {
+                        // Never a quick mix (a short blend, a cut) unless the old track is almost
+                        // over.
+                        if out_bar < lim.short_from && (tech == Technique::Cut || bars < lim.min_bars) {
+                            continue;
+                        }
                         if in_bar + bars + rest(strict) > n_in {
                             continue;
                         }
@@ -544,6 +553,8 @@ mod tests {
             earliest,
             latest,
             lengths: (2..=16).map(|k| 4 * k).collect(),
+            min_bars: 0,
+            short_from: 0,
             cue_bar: None,
             drop_cue_bar: None,
             in_cues: vec![],
@@ -640,6 +651,31 @@ mod tests {
         let b = &search(&out, &inc, &lim)[0];
         assert_eq!(b.out_bar, 20);
         assert_eq!(b.in_bar, 32, "your cue");
+    }
+
+    #[test]
+    fn no_quick_mix_until_the_old_track_is_almost_over() {
+        // 2 s bars: 20 s is 10 bars; the old track's last 30 s are its last 15 bars (from 81).
+        let out = track(96, [&[(0, 96)]; 4]);
+        let inc = track(96, [&[(0, 96)]; 4]);
+        let mut lim = limits(0, 95);
+        lim.lengths = vec![4, 8, 12, 16];
+        lim.min_bars = 10;
+        lim.short_from = 81;
+        let found = search(&out, &inc, &lim);
+        assert!(!found.is_empty());
+        for c in &found {
+            let quick = c.technique == Technique::Cut || c.bars < 10;
+            assert!(!quick || c.out_bar >= 81, "{c:?}");
+        }
+        // Only cuts allowed (keys or tempos that don't blend): they wait for the end.
+        lim.blend = false;
+        let found = search(&out, &inc, &lim);
+        assert!(!found.is_empty() && found.iter().all(|c| c.out_bar >= 81), "{found:?}");
+        // In a hurry, well before the end: nothing (dj blends 20 s instead).
+        lim.earliest = 20;
+        lim.latest = 24;
+        assert!(search(&out, &inc, &lim).is_empty());
     }
 
     #[test]

@@ -3679,7 +3679,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn mixes_start_on_phrases_and_bars_and_vocals_come_back() {
+    fn mixes_start_on_phrases_and_bars_and_bring_the_new_track_all_in() {
         use crate::core::automix::{MixHow, MixWhen};
         let (mut e, mut c, _config) = core();
         mix_setup(&mut e, &mut c);
@@ -3708,6 +3708,10 @@ pub(crate) mod tests {
         }
         let plan = c.plan_now(1, 0, crate::settings::MixStyle::Stems);
         let beat = c.snap.decks[0].beat;
+        // Never a quick mix (the old track isn't near its end): 20 s or more.
+        assert!(!c.ends_within(0, 30.0));
+        let secs = plan.length_beats * 60.0 / c.snap.decks[0].bpm;
+        assert!(secs >= 20.0, "{secs:.1} s: {plan:?}");
         // Now: on a phrase (8 bars when that's within 4 bars, else 4 bars): at most 4 bars after
         // the new track's lead-in.
         assert_eq!(plan.start_beat % 16.0, 0.0, "{plan:?}");
@@ -3726,15 +3730,9 @@ pub(crate) mod tests {
             }
         });
         assert!(checked);
-        // The old vocals sang through the whole mix: the new ones are out after it, then come back
-        // on its next vocal phrase.
-        assert_eq!(c.snap.decks[1].stem_gains[2], 0.0);
-        assert!(c.vocal_return.is_some(), "a vocal phrase was found ahead");
-        let deadline = Instant::now() + std::time::Duration::from_secs(60);
-        while c.snap.decks[1].stem_gains[2] < 1.0 {
-            assert!(Instant::now() < deadline, "vocals never came back");
-            pump(&mut e, &mut c);
-        }
+        // The old vocals sang through the whole mix: the new ones took over before its end (the
+        // new track all in before the old one's volume closed), not left out for later.
+        assert_eq!(c.snap.decks[1].stem_gains, [1.0; 4]);
         assert!(c.vocal_return.is_none());
     }
 
