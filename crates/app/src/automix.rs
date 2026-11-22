@@ -996,9 +996,10 @@ impl Core {
         match how {
             MixHow::Eq if external => {} // you fade on the mixer
             MixHow::Eq => {
-                // In (volume already up): the highs rise from the start, then the mids; the bass
-                // swap (where the plan puts it: where the new bass comes in or the old one stops,
-                // else halfway). Out: mids, then highs; its volume only closes the last part.
+                // In (volume already up): the highs rise from the start, then the mids, the old
+                // ones partly making room; the bass swap (where the plan puts it: where the new
+                // bass comes in or the old one stops, else late on a phrase line). Out: mids, then
+                // highs; its volume only closes the last part.
                 // The old track's EQ is done a bar before the end (then its volume closes).
                 let done = ((bars_n - 1.0) / bars_n).max(0.5);
                 let (lo, hi) = swap_range(bars_n.round() as usize);
@@ -1007,8 +1008,14 @@ impl Core {
                 // Each band over at most 8 bars (a long mix spreads them out, not slows them down).
                 let span = |frac: f64| (frac * bars_n).min(8.0) / bars_n;
                 if p < ps {
-                    self.mix_set(&high(i), in_high * smooth(p / span(0.7 * ps)));
-                    self.mix_set(&mid(i), in_mid * smooth((p - 0.3 * ps) / span(0.7 * ps)));
+                    let (rise_h, rise_m) = (smooth(p / span(0.7 * ps)), smooth((p - 0.3 * ps) / span(0.7 * ps)));
+                    self.mix_set(&high(i), in_high * rise_h);
+                    self.mix_set(&mid(i), in_mid * rise_m);
+                    // Room for them: the old highs and mids come partly down as the new ones rise,
+                    // the old bass staying until the swap (how DJs stage it: highs and mids
+                    // first, bass last).
+                    self.mix_set(&high(o), out_high * (1.0 - 0.5 * rise_h));
+                    self.mix_set(&mid(o), out_mid * (1.0 - 0.4 * rise_m));
                 }
                 if p >= ps && !swapped {
                     self.automix.as_mut().unwrap().swapped = true;
@@ -1018,10 +1025,11 @@ impl Core {
                     self.mix_set(&low(o), 0.0);
                 }
                 if p >= ps {
-                    // Out by `done`: the mids first, then the highs, each over at most 8 bars.
+                    // Out by `done` from where they were (60 % mids, half the highs): the mids
+                    // first, then the highs, each over at most 8 bars.
                     let (m, h) = (span(0.6 * after), span(0.7 * after));
-                    self.mix_set(&mid(o), out_mid * (1.0 - smooth((p - (ps + 0.6 * after - m)) / m)));
-                    self.mix_set(&high(o), out_high * (1.0 - smooth((p - (done - h)) / h)));
+                    self.mix_set(&mid(o), 0.6 * out_mid * (1.0 - smooth((p - (ps + 0.6 * after - m)) / m)));
+                    self.mix_set(&high(o), 0.5 * out_high * (1.0 - smooth((p - (done - h)) / h)));
                 }
             }
             MixHow::Stems => {
@@ -1272,8 +1280,10 @@ pub fn swap_range(bars: usize) -> (usize, usize) {
 /// (`inc` and `out`, `bars` long; see [`bar_levels`]):
 ///
 /// - The basses swap where the new bass comes in on its own, else where the old bass stops on
-///   its own, else halfway.
-/// - New drums that are there from the start come in halfway to the swap; drums that enter on
+///   its own, else on the phrase line nearest 70 % of the way: real DJs take the old bass out
+///   late, as the last part of the old track to go (the DJ-mix studies' EQ curves).
+/// - New drums that are there from the start come in halfway to the swap (on a phrase line);
+///   drums that enter on
 ///   their own are left alone. Same for the melody (other), which is always let in.
 /// - New vocals (Best) wait until the old vocals are gone.
 /// - Old drums leave after the swap, halfway to the end; old vocals and other by the end; any
@@ -1296,25 +1306,26 @@ pub fn plan_blend(inc: &[Vec<f32>; 4], out: &[Vec<f32>; 4], bars: usize, vocals_
 
     // The bass swap: where one bass keeps playing in the most bars (the old one until the swap,
     // the new one after it); of those, where the new bass comes in or the old one stops on its
-    // own, then the one nearest halfway.
+    // own, then on a phrase line (every 4 bars into the mix), then the one nearest 70 % in.
     let (e_in, e_out) = (enters(&inc[BASS]), stops(&out[BASS]));
     let with_bass = |sw: usize| (0..bars).filter(|&k| if k < sw { on(&out[BASS], k) } else { on(&inc[BASS], k) }).count();
     let natural = |sw: usize| Some(sw) == e_in || Some(sw) == e_out;
-    let half = bars.div_ceil(2);
+    let late = (bars as f64 * 0.7).round() as usize;
+    let phrase = |k: usize| bars >= 8 && k.is_multiple_of(4);
     // (From a fifth of the way in, so the new track has come up, to 3 bars before the end, so the
     // old one can be taken out before its volume closes; the EQ mix keeps to the same range.)
     let (lo, hi) = swap_range(bars);
     // No old bass to swap with at the start: the new bass may come in from the first bars.
     let lo = if !on(&out[BASS], 0) && !on(&out[BASS], 1) { 1 } else { lo };
-    let sw = (lo..=hi).max_by_key(|&sw| (with_bass(sw), natural(sw), usize::MAX - sw.abs_diff(half))).unwrap_or(half);
+    let sw = (lo..=hi).max_by_key(|&sw| (with_bass(sw), natural(sw), phrase(sw), usize::MAX - sw.abs_diff(late))).unwrap_or(late.clamp(lo, hi));
     notes.push(if Some(sw) == e_out {
         format!("bass swaps at bar {}, where the old bass stops", sw + 1)
     } else if Some(sw) == e_in {
         format!("bass swaps at bar {}, where the new bass comes in", sw + 1)
-    } else if with_bass(sw) > with_bass(half) {
+    } else if with_bass(sw) > with_bass(late.clamp(lo, hi)) {
         format!("bass swaps at bar {}, keeping a bass playing", sw + 1)
     } else {
-        format!("bass swaps at bar {} (halfway)", sw + 1)
+        format!("bass swaps at bar {}, late on a phrase line (the old bass goes last)", sw + 1)
     });
     let swap = sw as f64;
 
@@ -1341,7 +1352,9 @@ pub fn plan_blend(inc: &[Vec<f32>; 4], out: &[Vec<f32>; 4], bars: usize, vocals_
         in_ramp[DRUMS] = r;
         notes.push("new drums come in at once (no old drums)".into());
     } else if on(&inc[DRUMS], 0) {
-        let at = (swap / 2.0).floor().max(1.0).min(swap);
+        // (On the phrase line before halfway to the swap, when there is one.)
+        let half_way = (swap / 2.0).floor();
+        let at = if half_way >= 4.0 { half_way - half_way % 4.0 } else { half_way }.max(1.0).min(swap);
         in_at[DRUMS] = Some(at);
         in_ramp[DRUMS] = (swap - at).clamp(1.0, 4.0);
     } else if enters(&inc[DRUMS]).is_some() {
@@ -1463,8 +1476,13 @@ mod tests {
         let b = plan_blend(&lv([ALL, ALL, NONE, ALL]), &lv([ALL, &[(0, 6)], ALL, ALL]), 16, true, false);
         assert_eq!(b.swap, 6.0);
         assert!(b.notes[0].contains("old bass stops"));
-        // Neither: halfway.
-        assert_eq!(plan_blend(&lv([ALL, ALL, ALL, ALL]), &lv([ALL, ALL, ALL, ALL]), 16, true, false).swap, 8.0);
+        // Neither: late, on a phrase line (12 bars into 16: the old bass goes last, as real DJs
+        // take it out).
+        let b = plan_blend(&lv([ALL, ALL, ALL, ALL]), &lv([ALL, ALL, ALL, ALL]), 16, true, false);
+        assert_eq!(b.swap, 12.0);
+        assert!(b.notes[0].contains("late on a phrase line"), "{:?}", b.notes);
+        let full32: [Vec<f32>; 4] = std::array::from_fn(|_| vec![0.5; 32]);
+        assert_eq!(plan_blend(&full32, &full32, 32, true, false).swap, 24.0);
     }
 
     #[test]
@@ -1479,8 +1497,9 @@ mod tests {
         assert!(b.notes.iter().any(|n| n.contains("no old vocals")), "{:?}", b.notes);
         // Drums there from the start are brought in halfway to the swap; old drums leave after it.
         let b = plan_blend(&lv([ALL, ALL, NONE, ALL]), &lv([ALL, ALL, NONE, ALL]), 16, true, false);
-        assert_eq!(b.in_at[DRUMS], Some(4.0));
-        assert_eq!(b.out_at[DRUMS], Some(12.0));
+        assert_eq!(b.swap, 12.0);
+        assert_eq!(b.in_at[DRUMS], Some(4.0), "on the phrase line before halfway to the swap");
+        assert_eq!(b.out_at[DRUMS], Some(14.0));
         assert_eq!(b.out_at[OTHER], Some(15.0), "out a bar before the end (then the volume closes)");
         assert_eq!(b.in_at[OTHER], Some(0.0), "the new melody rises from the start");
         assert!(b.levels(0.0, true).0[OTHER] == 0.0 && b.levels(3.0, true).0[OTHER] < 1.0, "gently");
@@ -1494,9 +1513,10 @@ mod tests {
         assert_eq!(b.in_at[VOCALS], Some(11.0));
         assert_eq!(b.out_at[VOCALS], None, "old vocals end on their own at bar 12");
         // Levels follow the plan: bass is a clean switch at the swap; others ramp.
-        let (i, o) = b.levels(7.9, false);
+        assert_eq!(b.swap, 12.0);
+        let (i, o) = b.levels(11.9, false);
         assert_eq!((i[BASS], o[BASS]), (0.0, 1.0));
-        let (i, o) = b.levels(8.0, false);
+        let (i, o) = b.levels(12.0, false);
         assert_eq!((i[BASS], o[BASS]), (1.0, 0.0));
         assert_eq!(b.levels(10.0, false).0[VOCALS], 0.0);
         assert_eq!(b.levels(13.0, false).0[VOCALS], 1.0);

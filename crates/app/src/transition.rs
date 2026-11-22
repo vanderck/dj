@@ -383,6 +383,11 @@ pub fn score(out: &Bars, inc: &Bars, c: &Candidate, lim: &Limits) -> (f32, Vec<S
         s += 3.0;
         notes.push(format!("its chorus lands as the old track leaves (bar {})", end_in + 1));
     }
+    // Real DJ mixes last whole 8-bar phrases far more often than the lengths between (the
+    // DJ-mix studies: 1.5–1.65× as many at 8, 16, 24 and 32 bars as just around them).
+    if c.technique == Technique::Blend && c.bars.is_multiple_of(8) {
+        s += 0.5;
+    }
     // Phrases: start and end on the old track's phrase lines; the new track from a phrase line.
     if out.line8(c.out_bar) {
         s += 1.0;
@@ -576,6 +581,15 @@ mod tests {
         // Without the sections it can't know where the songs' parts are.
         let plain = search(&track(96, [&[(0, 96)], &[(0, 96)], &[(16, 80)], &[(0, 96)]]), &track(128, [&[(0, 128)], &[(0, 128)], &[(16, 96)], &[(0, 128)]]), &limits(40, 90));
         assert!(plain[0].notes.iter().all(|n| !n.contains("chorus")), "{:?}", plain[0]);
+    }
+
+    #[test]
+    fn mixes_last_whole_phrases() {
+        // Two tracks that fit anywhere: of the lengths that fit equally, a whole number of 8-bar
+        // phrases (as real DJ mixes mostly are).
+        let t = || track(160, [&[(0, 160)], &[(0, 160)], &[], &[(0, 160)]]);
+        let best = search(&t(), &t(), &limits(40, 120));
+        assert!(best[0].technique == Technique::Blend && best[0].bars.is_multiple_of(8), "{best:?}");
     }
 
     #[test]
