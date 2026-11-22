@@ -315,7 +315,7 @@ impl Deck {
             quantize: Quantize::UseGlobal,
             loop_region: None,
             loop_on: false,
-            default_loop_beats: 16.0,
+            default_loop_beats: 4.0,
             slip: false,
             slip_pos: 0.0,
             was_slip_engaged: false,

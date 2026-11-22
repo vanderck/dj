@@ -277,7 +277,7 @@ impl Default for Settings {
             layout: LayoutMode::Auto,
             cue_points: CuePoints::Tags,
             cue_pads: CuePadMode::Loop,
-            version: 1,
+            version: 2,
             tempo_step_pct: 0.0,
         }
     }
@@ -302,11 +302,12 @@ impl Settings {
     /// now live in dj's, and its default OSC root becomes dj's.
     fn migrate_from_collective(&mut self) {
         // Once: the default loop was 16 beats; it is 4 (a 16 chosen afterwards stays).
-        if self.version < 1 {
+        // (Again once, version 2: a 16 still saved from before moves to 4 too.)
+        if self.version < 2 {
             if self.default_loop_beats == 16.0 {
                 self.default_loop_beats = 4.0;
             }
-            self.version = 1;
+            self.version = 2;
         }
         if self.osc_root.trim_matches('/').eq_ignore_ascii_case("collective") {
             self.osc_root = "/dj/".into();
@@ -489,7 +490,7 @@ mod tests {
             osc_root: "/Collective/".into(),
             stems_demucs: Some(old.join("models").join("htdemucs.onnx")),
             stems_prepared_dir: Some(PathBuf::from("/elsewhere/stems")),
-            version: 0,
+            version: 1,
             default_loop_beats: 16.0,
             ..Default::default()
         };
