@@ -129,6 +129,28 @@ pub enum Style {
     Empty,
 }
 
+/// Button labels drawn as the universal symbols (shapes, whatever the font has): a play arrow
+/// and the two pause bars.
+pub const PLAY: &str = "\u{25B6}";
+pub const PAUSE: &str = "\u{23F8}";
+
+/// The play arrow or the pause bars, `size` high, centred on `c`.
+pub fn transport_icon(p: &egui::Painter, c: Pos2, size: f32, pause: bool, color: Color32) {
+    let h = size;
+    if pause {
+        let (w, gap) = (0.3 * h, 0.26 * h);
+        for x in [c.x - gap / 2.0 - w, c.x + gap / 2.0] {
+            let r = Rect::from_min_size(Pos2::new(x, c.y - h / 2.0), Vec2::new(w, h));
+            p.rect_filled(r, CornerRadius::same(((0.12 * h) as u8).max(1)), color);
+        }
+    } else {
+        // (Shifted right a little: a triangle's weight sits left of its box's centre.)
+        let (l, r) = (c.x - 0.36 * h, c.x + 0.5 * h);
+        let pts = vec![Pos2::new(l, c.y - h / 2.0), Pos2::new(r, c.y), Pos2::new(l, c.y + h / 2.0)];
+        p.add(egui::Shape::convex_polygon(pts, color, Stroke::NONE));
+    }
+}
+
 pub fn button(ui: &mut Ui, rect: Rect, label: &str, style: Style, font: FontId) -> Response {
     let r = ui.allocate_rect(rect, Sense::click_and_drag());
     let hover = r.hovered();
@@ -151,7 +173,9 @@ pub fn button(ui: &mut Ui, rect: Rect, label: &str, style: Style, font: FontId) 
     if stroke.width > 0.0 {
         p.rect_stroke(rect, radius, stroke, StrokeKind::Inside);
     }
-    if !label.is_empty() {
+    if label == PLAY || label == PAUSE {
+        transport_icon(p, rect.center(), (font.size * 0.95).min(rect.height() * 0.5), label == PAUSE, text);
+    } else if !label.is_empty() {
         p.text(rect.center(), Align2::CENTER_CENTER, label, font, text);
     }
     r
@@ -232,4 +256,34 @@ pub fn set_visuals(ctx: &egui::Context) {
     ctx.set_theme(egui::ThemePreference::Dark);
     ctx.set_visuals_of(egui::Theme::Dark, v.clone());
     ctx.set_visuals_of(egui::Theme::Light, v);
+}
+
+#[cfg(test)]
+mod transport_tests {
+    use super::*;
+
+    /// What the button paints, flattened.
+    fn painted(label: &str) -> Vec<egui::Shape> {
+        let ctx = egui::Context::default();
+        install_fonts(&ctx);
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let r = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(120.0, 48.0));
+            button(ui, r, label, Style::Outline(Color32::RED, false), bold(17.0));
+        });
+        out.textures_delta.clear(); // (no GPU here to upload them to)
+        out.shapes.into_iter().map(|c| c.shape).collect()
+    }
+
+    #[test]
+    fn play_and_pause_are_drawn_as_their_symbols() {
+        let is_text = |s: &egui::Shape| matches!(s, egui::Shape::Text(_));
+        let play = painted(PLAY);
+        assert!(!play.iter().any(is_text), "no text, whatever the font");
+        assert!(play.iter().any(|s| matches!(s, egui::Shape::Path(p) if p.points.len() == 3 && p.closed)), "a triangle");
+        let pause = painted(PAUSE);
+        assert!(!pause.iter().any(is_text));
+        let bars = pause.iter().filter(|s| matches!(s, egui::Shape::Rect(r) if r.rect.height() < 30.0)).count();
+        assert_eq!(bars, 2, "two bars");
+        assert!(painted("Sync").iter().any(is_text), "other labels stay text");
+    }
 }
