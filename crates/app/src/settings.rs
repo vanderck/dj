@@ -145,6 +145,8 @@ pub struct Settings {
     pub keylock_on_load: bool,
     /// After a mix, the new track eases back to its own tempo (it plays at the old one's).
     pub tempo_home: bool,
+    /// How Mix (and Auto-DJ) mixes: Auto, Blend (Stems, else EQ) or Drop; picked under Mix.
+    pub mix_style: MixStyle,
     pub tape_stop_ms: f64,
     pub default_loop_beats: f64,
     pub skip_beats: f64,
@@ -212,7 +214,8 @@ pub enum MixStyle {
     /// dj assesses the two tracks for each mix (see `Core::assess`).
     #[default]
     Auto,
-    /// Swap drums, bass, vocals and other one by one, with the stems.
+    /// Blend: swap drums, bass, vocals and other one by one, with the stems; an EQ blend without
+    /// them.
     Stems,
     /// Bass cut on the EQ and swapped at the midpoint, with volume fades (with an external mixer:
     /// you fade on the mixer).
@@ -250,6 +253,7 @@ impl Default for Settings {
             tempo_range: TempoRange::Pct10,
             keylock_on_load: true,
             tempo_home: true,
+            mix_style: MixStyle::Auto,
             tape_stop_ms: 25.0,
             default_loop_beats: 4.0,
             skip_beats: 16.0,

@@ -400,6 +400,14 @@ impl Core {
         }
     }
 
+    /// How Mix and Auto-DJ mix from now on (remembered).
+    pub fn set_mix_style(&mut self, style: MixStyle) {
+        if self.settings.mix_style != style {
+            self.settings.mix_style = style;
+            self.mark_dirty();
+        }
+    }
+
     /// Whether Mix should skip the popup (the playing track ends within a minute).
     pub fn mix_is_urgent(&self, outgoing: usize) -> bool {
         let v = &self.snap.decks[outgoing];
@@ -1371,7 +1379,7 @@ impl Core {
                 if self.mix_target(q) != Some(p) {
                     return;
                 }
-                let plan = self.plan_best(q, p, MixStyle::Auto);
+                let plan = self.plan_best(q, p, self.settings.mix_style);
                 self.start_mix(plan);
             }
             None if a.picked_at.is_some_and(|(t, d, id)| d == p && id == self.snap.decks[p].track_id && t.elapsed().as_secs_f32() < 1.0) => {}
