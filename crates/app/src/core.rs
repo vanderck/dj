@@ -639,8 +639,9 @@ impl Core {
                     self.apply_detected_cues(deck, c);
                 }
             }
-            Update::Sections { deck, track_id, sections } if current(self, deck, track_id) => {
-                self.decks[deck].sections = Some(sections);
+            Update::Sections { deck, track_id, found } if current(self, deck, track_id) => {
+                self.decks[deck].sections = Some(Arc::new(found.sections.clone()));
+                self.check_grid_with_beats(deck, &found.beats);
             }
             Update::NoStems { deck, track_id, error, cues } if current(self, deck, track_id) => {
                 self.decks[deck].stems_progress = None;
@@ -662,6 +663,57 @@ impl Core {
             self.deck_cmd(d, DeckCmd::StemGain { stem: i as u8, gain: *g });
         }
         Some(DeckCmd::StemGain { stem: 0, gain: gains[0] })
+    }
+
+    /// Check the deck's grid against the beats All-In-One hears: half a beat off (no kicks to
+    /// place it), or bars starting on the wrong beat (unless the cue points, on phrase starts,
+    /// say where the bars are). A grid you set yourself, or one with a tempo map, is only reported
+    /// on. The fix is for this load (the check runs again on the next).
+    fn check_grid_with_beats(&mut self, d: usize, beats: &[crate::stems::Beat]) {
+        let Some(track) = self.decks[d].track.clone() else { return };
+        let Some(info) = self.decks[d].info.as_ref() else { return };
+        let Some(grid) = track.grid else { return };
+        let heard: Vec<(f64, f32)> = beats.iter().map(|b| (b.secs, b.downbeat)).collect();
+        let spb = grid.seconds_per_beat();
+        let map = track.tempo_map.clone();
+        let beat_at = |t: f64| map.as_ref().map_or_else(|| grid.beat_at(t), |m| m.beat_at(t));
+        let Some(check) = dj_library::analysis::check_beats(beat_at, spb, &heard) else { return };
+        // Hot cues on whole beats, most on the first beat of a bar: the bars are confirmed.
+        let half = if check.offbeat { 0.5 } else { 0.0 };
+        let on_beats: Vec<i64> = info
+            .cues
+            .iter()
+            .flatten()
+            .filter(|c| c.kind == dj_engine::track::CueKind::Hot && c.secs > 0.1)
+            .map(|c| beat_at(c.secs) - half)
+            .filter(|b| (b - b.round()).abs() < 0.1)
+            .map(|b| b.round() as i64)
+            .collect();
+        let cues_say_bars = on_beats.len() >= 2 && on_beats.iter().filter(|b| b.rem_euclid(4) == 0).count() * 2 > on_beats.len();
+        let bars = check.bar_shift.filter(|_| !cues_say_bars).unwrap_or(0) as f64;
+        let mine = info.grid_source == Some(GridSource::User);
+        let pct = (check.agree * 100.0).round();
+        let what = match (check.offbeat, bars != 0.0) {
+            (false, false) => {
+                if check.agree < 0.5 {
+                    self.log(format!("Deck {}: the grid doesn't follow the beats All-In-One hears ({pct:.0} % agree): check its BPM", d + 1));
+                } else {
+                    let bars = if check.bar_shift.is_some() && cues_say_bars { ", bars as the cues say" } else { "" };
+                    self.log(format!("Deck {}: grid checked: {pct:.0} % of the beats All-In-One hears are on it{bars}", d + 1));
+                }
+                return;
+            }
+            (true, false) => "half a beat off".to_string(),
+            (false, true) => format!("its bars start {bars:.0} beat{} later", if bars == 1.0 { "" } else { "s" }),
+            (true, true) => format!("half a beat off, and its bars start {bars:.0} beat{} later", if bars == 1.0 { "" } else { "s" }),
+        };
+        if mine || map.is_some() {
+            self.log(format!("Deck {}: All-In-One hears the grid {what}; left as it is ({})", d + 1, if mine { "your grid" } else { "a tempo map" }));
+            return;
+        }
+        let fixed = dj_engine::track::BeatGrid { bpm: grid.bpm, anchor_secs: grid.anchor_secs + (half + bars) * spb };
+        self.deck_cmd(d, DeckCmd::SetGrid(Some(fixed)));
+        self.log(format!("Deck {}: grid corrected from the beats All-In-One hears: {what}", d + 1));
     }
 
     /// Save what loading detected (grid, energy, cue points from the mix) so the next load and
@@ -2679,6 +2731,45 @@ mod tests {
         }
         w.finalize().unwrap();
         path
+    }
+
+    #[test]
+    fn the_beats_all_in_one_hears_correct_the_grid() {
+        use crate::stems::{Beat, Structure, Update};
+        let (mut e, mut c, _config) = core();
+        c.load_track(0, &kick_wav("grid-check.wav", 40));
+        let deadline = Instant::now() + std::time::Duration::from_secs(60);
+        while !(c.snap.decks[0].loaded && c.decks[0].info.is_some()) {
+            assert!(Instant::now() < deadline, "track never loaded");
+            pump(&mut e, &mut c);
+        }
+        let g = c.decks[0].track.as_ref().unwrap().grid.expect("a detected grid");
+        assert!((g.bpm - 120.0).abs() < 0.5, "{g:?}");
+        let id = c.decks[0].info.as_ref().unwrap().track_id;
+        // The model hears every kick, the bars starting on the second (0.5 s), which the grid
+        // doesn't have on a bar line.
+        assert!(g.beat_at(0.5).round().rem_euclid(4.0) != 0.0, "{g:?}");
+        let beats: Vec<Beat> = (0..80).map(|k| Beat { secs: 0.5 * k as f64, downbeat: if k % 4 == 1 { 0.9 } else { 0.1 } }).collect();
+        let found = Arc::new(Structure { sections: vec![], beats });
+        let beat_now = |e: &mut dj_engine::Engine, c: &mut Core| {
+            pump(e, c);
+            c.snap.decks[0].beat
+        };
+        c.on_stems_update(Update::Sections { deck: 0, track_id: id, found: found.clone() });
+        assert!(c.status.iter().any(|(_, m)| m.contains("corrected") && m.contains("bars start")), "{:?}", c.status);
+        // Now the heard downbeat at 0.5 s is a bar's first beat (the deck sits at 0 s).
+        let at_half = beat_now(&mut e, &mut c) + 1.0;
+        assert!((at_half - (at_half / 4.0).round() * 4.0).abs() < 0.05, "beat at 0.5 s: {at_half}");
+        // Cue points on the grid's bar starts (Mixed In Key's phrases) keep its bars.
+        c.deck_cmd(0, DeckCmd::SetGrid(None));
+        for (i, t) in [8.0, 16.0, 32.0].into_iter().enumerate() {
+            c.decks[0].info.as_mut().unwrap().cues[i] = Some(Cue { kind: CueKind::Hot, secs: g.secs_at_beat(t * 2.0), end_secs: None, name: String::new(), color: [0; 3] });
+        }
+        c.status.clear();
+        c.on_stems_update(Update::Sections { deck: 0, track_id: id, found });
+        assert!(!c.status.iter().any(|(_, m)| m.contains("corrected")), "{:?}", c.status);
+        assert!((beat_now(&mut e, &mut c) - g.beat_at(0.0)).abs() < 0.05, "grid kept");
+        assert_eq!(c.decks[0].sections.as_deref().map(|s| s.len()), Some(0));
     }
 
     #[test]

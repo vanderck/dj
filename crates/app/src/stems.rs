@@ -23,10 +23,17 @@ pub enum Update {
     /// report). `cues`: cue points detected from the mix instead, when the request asked for them.
     NoStems { deck: usize, track_id: u64, error: Option<String>, cues: Option<Vec<Cue>> },
     /// The track's sections (intro, verse, chorus…), found with its stems after `Done`.
-    Sections { deck: usize, track_id: u64, sections: Arc<Vec<Section>> },
+    Sections { deck: usize, track_id: u64, found: Arc<Structure> },
 }
 
-pub use stems_core::structure::Section;
+pub use stems_core::structure::{Beat, Section};
+
+/// What All-In-One found in a track: its sections, and the beats it hears (to check the grid).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Structure {
+    pub sections: Vec<Section>,
+    pub beats: Vec<Beat>,
+}
 
 pub struct Request {
     pub deck: usize,
@@ -234,13 +241,13 @@ struct SectionJob {
 /// Find a track's sections with All-In-One (kept next to its prepared stems, as they take a
 /// while), and report them.
 fn sections(job: &SectionJob, tx: &Sender<Update>, model: &mut StructureCache) {
-    let found = match job.file.as_deref().and_then(read_sections) {
+    let found = match job.file.as_deref().and_then(read_structure) {
         Some(s) => s,
         None => {
             match model.analyze(job.threads, &job.track.audio, &job.stems) {
                 Ok(s) => {
                     if let Some(f) = &job.file {
-                        if let Err(e) = write_sections(f, &s) {
+                        if let Err(e) = write_structure(f, &s) {
                             eprintln!("sections: {e}");
                         }
                     }
@@ -253,31 +260,45 @@ fn sections(job: &SectionJob, tx: &Sender<Update>, model: &mut StructureCache) {
             }
         }
     };
-    let _ = tx.send(Update::Sections { deck: job.deck, track_id: job.track.id, sections: Arc::new(found) });
+    let _ = tx.send(Update::Sections { deck: job.deck, track_id: job.track.id, found: Arc::new(found) });
 }
 
-/// Sections as text: a line per section, "start end label" (seconds).
-fn read_sections(path: &Path) -> Option<Vec<Section>> {
+/// As text: a line per section, "section start end label", and per beat, "beat secs downbeat".
+/// (Files from before beats were kept are found again.)
+fn read_structure(path: &Path) -> Option<Structure> {
     let text = fs::read_to_string(path).ok()?;
     let mut lines = text.lines();
-    if lines.next()? != "dj-sections 1" {
+    if lines.next()? != "dj-sections 2" {
         return None;
     }
-    lines
-        .map(|l| {
-            let mut w = l.split_whitespace();
-            let start = w.next()?.parse().ok()?;
-            let end = w.next()?.parse().ok()?;
-            let label = stems_core::structure::label(w.next()?)?;
-            Some(Section { start, end, label })
-        })
-        .collect()
+    let mut found = Structure::default();
+    for l in lines {
+        let mut w = l.split_whitespace();
+        match w.next()? {
+            "section" => {
+                let start = w.next()?.parse().ok()?;
+                let end = w.next()?.parse().ok()?;
+                let label = stems_core::structure::label(w.next()?)?;
+                found.sections.push(Section { start, end, label });
+            }
+            "beat" => {
+                let secs = w.next()?.parse().ok()?;
+                let downbeat = w.next()?.parse().ok()?;
+                found.beats.push(Beat { secs, downbeat });
+            }
+            _ => return None,
+        }
+    }
+    Some(found)
 }
 
-fn write_sections(path: &Path, sections: &[Section]) -> std::io::Result<()> {
-    let mut text = String::from("dj-sections 1\n");
-    for s in sections {
-        text.push_str(&format!("{:.2} {:.2} {}\n", s.start, s.end, s.label));
+fn write_structure(path: &Path, found: &Structure) -> std::io::Result<()> {
+    let mut text = String::from("dj-sections 2\n");
+    for s in &found.sections {
+        text.push_str(&format!("section {:.2} {:.2} {}\n", s.start, s.end, s.label));
+    }
+    for b in &found.beats {
+        text.push_str(&format!("beat {:.4} {:.2}\n", b.secs, b.downbeat));
     }
     let tmp = path.with_extension("tmp");
     fs::write(&tmp, text)?;
@@ -294,7 +315,7 @@ pub struct StructureCache {
 impl StructureCache {
     /// The sections of a track from its mix and stems.
     #[cfg(any(feature = "stems-onnx", feature = "stems-onnx-dynamic"))]
-    pub fn analyze(&mut self, threads: usize, audio: &dj_engine::track::AudioData, stems: &StemData) -> Result<Vec<Section>, String> {
+    pub fn analyze(&mut self, threads: usize, audio: &dj_engine::track::AudioData, stems: &StemData) -> Result<Structure, String> {
         use stems_core::structure::{mono_44k, StructureModel};
         if self.loaded.as_ref().is_none_or(|(t, _)| *t != threads) {
             let options = stems_core::OnnxOptions { intra_threads: threads };
@@ -316,11 +337,12 @@ impl StructureCache {
             });
             mono_44k(frames, rate)
         };
-        Ok(model.analyze(part).map_err(|e| e.to_string())?.sections)
+        let s = model.analyze(part).map_err(|e| e.to_string())?;
+        Ok(Structure { sections: s.sections, beats: s.beats })
     }
 
     #[cfg(not(any(feature = "stems-onnx", feature = "stems-onnx-dynamic")))]
-    pub fn analyze(&mut self, _threads: usize, _audio: &dj_engine::track::AudioData, _stems: &StemData) -> Result<Vec<Section>, String> {
+    pub fn analyze(&mut self, _threads: usize, _audio: &dj_engine::track::AudioData, _stems: &StemData) -> Result<Structure, String> {
         Err("built without ONNX Runtime".into())
     }
 }
@@ -702,11 +724,16 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("dj-sections-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let f = dir.join("1.sections");
-        let s = vec![Section { start: 0.0, end: 24.5, label: "intro" }, Section { start: 24.5, end: 61.25, label: "chorus" }];
-        write_sections(&f, &s).unwrap();
-        assert_eq!(read_sections(&f), Some(s));
-        fs::write(&f, "dj-sections 1\n0 10 nonsense\n").unwrap();
-        assert_eq!(read_sections(&f), None, "unknown labels are not trusted");
+        let s = Structure {
+            sections: vec![Section { start: 0.0, end: 24.5, label: "intro" }, Section { start: 24.5, end: 61.25, label: "chorus" }],
+            beats: vec![Beat { secs: 0.5125, downbeat: 0.75 }, Beat { secs: 1.0, downbeat: 0.25 }],
+        };
+        write_structure(&f, &s).unwrap();
+        assert_eq!(read_structure(&f), Some(s));
+        fs::write(&f, "dj-sections 2\nsection 0 10 nonsense\n").unwrap();
+        assert_eq!(read_structure(&f), None, "unknown labels are not trusted");
+        fs::write(&f, "dj-sections 1\n0 10 intro\n").unwrap();
+        assert_eq!(read_structure(&f), None, "older files (no beats) are found again");
         let _ = fs::remove_dir_all(&dir);
     }
 
