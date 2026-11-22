@@ -2080,7 +2080,7 @@ impl Core {
 
     // ------------------------------------------------------------ MIDI input
 
-    fn handle_midi(&mut self, msg: &[u8]) {
+    pub(crate) fn handle_midi(&mut self, msg: &[u8]) {
         if msg.is_empty() {
             return;
         }
@@ -2680,7 +2680,7 @@ pub fn merge_cues(old: &[Option<Cue>; NUM_HOT_CUES], mut found: Vec<Cue>, close:
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use dj_engine::{create, EngineConfig};
 
@@ -2689,7 +2689,7 @@ mod tests {
 
     /// A test's config folder (settings, prepared stems, generated audio): removed when the test
     /// ends, so runs don't pile up gigabytes in the temp folder.
-    struct TestDir {
+    pub(crate) struct TestDir {
         dir: PathBuf,
         _lock: std::sync::MutexGuard<'static, ()>,
     }
@@ -2700,7 +2700,7 @@ mod tests {
         }
     }
 
-    fn core() -> (dj_engine::Engine, Core, TestDir) {
+    pub(crate) fn core() -> (dj_engine::Engine, Core, TestDir) {
         let lock = CONFIG_DIR_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let dir = std::env::temp_dir().join(format!("dj-core-test-{}-{:?}", std::process::id(), std::thread::current().id()));
         let _ = std::fs::remove_dir_all(&dir);
