@@ -35,3 +35,6 @@ eframe.workspace = true
 dirs.workspace = true
 dj-vst3.workspace = true
 rfd = "0.15"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

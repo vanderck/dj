@@ -215,6 +215,11 @@ pub fn mix_bonus(score: f32) -> f64 {
 pub struct AutoDj {
     /// The tracks it plays, in the library's order when it started.
     pub tracks: Vec<std::path::PathBuf>,
+    /// The same, as a set (looked up every frame).
+    set: std::collections::HashSet<std::path::PathBuf>,
+    /// When it last picked a next track: it picks at most once a second (a pick ranks the
+    /// whole list).
+    picked_at: Option<std::time::Instant>,
     /// Those played (or being played, or skipped).
     pub played: std::collections::HashSet<std::path::PathBuf>,
     /// When the waiting deck's track was loaded (deck, track id, when): it waits for its stems
@@ -227,6 +232,11 @@ pub struct AutoDj {
 }
 
 impl AutoDj {
+    /// A track that didn't load: skipped (else it would be picked again and again).
+    pub fn skip(&mut self, path: &std::path::Path) -> bool {
+        self.set.contains(path) && self.played.insert(path.to_path_buf())
+    }
+
     pub fn left(&self) -> usize {
         self.tracks.iter().filter(|t| !self.played.contains(*t)).count()
     }
@@ -1115,7 +1125,8 @@ impl Core {
             Some(t) if !t.is_empty() => {
                 let n = t.len();
                 // Whatever is playing counts as played.
-                let mut a = AutoDj { tracks: t, ..Default::default() };
+                let set = t.iter().cloned().collect();
+                let mut a = AutoDj { tracks: t, set, ..Default::default() };
                 for d in 0..2 {
                     if let Some(i) = self.decks[d].info.as_ref().filter(|_| self.snap.decks[d].playing) {
                         a.played.insert(i.path.clone());
@@ -1140,11 +1151,23 @@ impl Core {
         let left: Vec<std::path::PathBuf> = a.tracks.iter().filter(|t| !a.played.contains(*t)).cloned().collect();
         let reference = self.deck_key(p);
         let (ref_bpm, ref_energy) = (Some(self.snap.decks[p].bpm).filter(|b| *b > 0.0), self.deck_energy(p));
-        let mut best: Option<(f64, std::path::PathBuf)> = None;
+        // By key, tempo and energy first; then how well they'd mix in, for the best dozen only (a
+        // search each: all of a long list at once would hold up the screen).
+        // (The library by path: looking each track up in it was list × library comparisons, a
+        // frozen screen with a big crate.)
+        let index: std::collections::HashMap<&std::path::Path, &dj_library::scan::Entry> = self.library.iter().map(|e| (e.path.as_path(), e)).collect();
+        let mut ranked: Vec<(f64, std::path::PathBuf)> = Vec::new();
         for path in left {
-            let entry = self.library.iter().find(|e| e.path == path).cloned().unwrap_or_else(|| dj_library::scan::Entry::read(&path));
+            let read;
+            let entry = match index.get(path.as_path()) {
+                Some(e) => *e,
+                None => {
+                    read = dj_library::scan::Entry::read(&path);
+                    &read
+                }
+            };
             let mut f = match reference {
-                Some(rk) => fit_score(&entry, rk, ref_bpm, ref_energy),
+                Some(rk) => fit_score(entry, rk, ref_bpm, ref_energy),
                 None => 0.0,
             };
             // Keys that clash, or tempos far apart, only when nothing else is left.
@@ -1158,12 +1181,15 @@ impl Core {
                 (_, None) => f += 100.0,
                 _ => {}
             }
-            f -= self.mix_score(p, &path).map_or(0.0, |s| mix_bonus(s.score));
-            if best.as_ref().is_none_or(|(b, _)| f < *b) {
-                best = Some((f, path));
-            }
+            ranked.push((f, path));
         }
-        best.map(|(_, p)| p)
+        drop(index);
+        ranked.sort_by(|a, b| a.0.total_cmp(&b.0));
+        ranked.truncate(12);
+        for (f, path) in ranked.iter_mut() {
+            *f -= self.mix_score(p, path).map_or(0.0, |s| mix_bonus(s.score));
+        }
+        ranked.into_iter().min_by(|a, b| a.0.total_cmp(&b.0)).map(|(_, p)| p)
     }
 
     /// Auto-DJ: keep the set going. With nothing playing, the first track starts on deck 1. While
@@ -1191,7 +1217,7 @@ impl Core {
                 return;
             }
             let waiting = (0..2).find_map(|d| {
-                let i = self.decks[d].info.as_ref().filter(|i| !a.played.contains(&i.path) && a.tracks.contains(&i.path))?;
+                let i = self.decks[d].info.as_ref().filter(|i| !a.played.contains(&i.path) && a.set.contains(&i.path))?;
                 self.snap.decks[d].loaded.then(|| (d, i.path.clone()))
             });
             match waiting {
@@ -1224,7 +1250,7 @@ impl Core {
             return;
         }
         let a = self.autodj.as_ref().unwrap();
-        let waiting = self.decks[q].info.as_ref().filter(|i| a.tracks.contains(&i.path) && !a.played.contains(&i.path)).map(|i| (i.track_id, i.cues_pending));
+        let waiting = self.decks[q].info.as_ref().filter(|i| a.set.contains(&i.path) && !a.played.contains(&i.path)).map(|i| (i.track_id, i.cues_pending));
         match waiting {
             Some((id, cues_pending)) => {
                 let since = match a.loaded {
@@ -1246,7 +1272,10 @@ impl Core {
                 let plan = self.plan_best(q, p, MixStyle::Auto);
                 self.start_mix(plan);
             }
-            None => match self.autodj_next(p) {
+            None if a.picked_at.is_some_and(|t| t.elapsed().as_secs_f32() < 1.0) => {}
+            None => {
+                self.autodj.as_mut().unwrap().picked_at = Some(std::time::Instant::now());
+                match self.autodj_next(p) {
                 Some(next) => {
                     // Silent until the mix brings it in.
                     self.set_picked_up(&format!("Mixer/CH{}/Volume", q + 1), 0.0);
@@ -1262,7 +1291,8 @@ impl Core {
                         self.autodj = None;
                     }
                 }
-            },
+            }
+            }
         }
     }
 

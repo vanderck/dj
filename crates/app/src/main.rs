@@ -56,6 +56,21 @@ fn attach_console() {
     }
 }
 
+/// Leave at once, once everything is saved. The normal exit tears down C/C++ globals (ONNX
+/// Runtime's among them) while background threads (separating stems, finding sections) may still
+/// be using them, which crashed dj on quit. Leaving without that teardown is safe: the files are
+/// written, and the OS frees the rest (and `caffeinate`, watching dj, ends with it).
+pub fn quit_now() -> ! {
+    #[cfg(unix)]
+    // SAFETY: `_exit` ends the process without running atexit handlers or destructors; nothing
+    // after this needs them.
+    unsafe {
+        libc::_exit(0)
+    }
+    #[cfg(not(unix))]
+    std::process::exit(0)
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     #[cfg(windows)]
