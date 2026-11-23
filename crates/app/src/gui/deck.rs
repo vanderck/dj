@@ -870,7 +870,7 @@ fn mix_button(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Re
         let label = if bars > 0.0 { format!("Mix in {bars:.0}") } else { "Mixing…".to_string() };
         let resp = button(ui, rect, &label, Style::Fill(GREEN), font).on_hover_text("Tap to cancel");
         if resp.clicked() && !core.learn {
-            core.cancel_mix();
+            core.tap_cancel_mix();
         }
         return;
     }

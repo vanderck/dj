@@ -50,6 +50,8 @@ pub const MIN_MIX_SECS: f64 = 20.0;
 pub const SHORT_MIX_NEAR_END_SECS: f64 = 30.0;
 /// In the playing track's last minute, Mix doesn't ask: it mixes at the best moment left.
 const LAST_MINUTE_SECS: f64 = 60.0;
+/// A tap on a mix's button this soon after it started doesn't cancel it.
+const MIX_TAP_GUARD: std::time::Duration = std::time::Duration::from_millis(1500);
 /// Stem order: drums, bass, vocals, other.
 use crate::transition::{BASS, DRUMS, OTHER, PRESENT, VOCALS};
 /// The echo an echo-out inserts.
@@ -164,6 +166,9 @@ pub struct AutoMix {
     echo_slot: Option<usize>,
     /// The new deck's transposition before the mix (put back on cancel).
     in_semitones: f64,
+    /// When it was started: a tap on its button right after (a double tap, or the tap that
+    /// started it counted twice) doesn't cancel it.
+    started: std::time::Instant,
 }
 
 /// After a Now mix: bring the new track's vocals back where its next vocal phrase starts.
@@ -1105,6 +1110,7 @@ impl Core {
             out_cutoff: params(o).cutoff,
             echo_slot: None,
             in_semitones: self.snap.decks[i].semitones,
+            started: std::time::Instant::now(),
             plan,
         };
         // Its key fitted to the playing track's, while it's still silent.
@@ -1159,6 +1165,18 @@ impl Core {
         }
     }
 
+    /// A tap on a waiting or running mix's button: cancels it, unless it started moments ago
+    /// (the second tap of a double tap, which in a track's last minute starts the mix with the
+    /// first: cancelling then left the new track looping silently as the old one ended).
+    /// Whether it cancelled.
+    pub fn tap_cancel_mix(&mut self) -> bool {
+        if self.automix.as_ref().is_none_or(|m| m.started.elapsed() < MIX_TAP_GUARD) {
+            return false;
+        }
+        self.cancel_mix();
+        true
+    }
+
     pub fn cancel_mix(&mut self) {
         if let Some(m) = self.automix.take() {
             let (i, o) = (m.plan.incoming, m.plan.outgoing);
@@ -1191,7 +1209,9 @@ impl Core {
             if m.plan.transpose != 0 {
                 self.deck_cmd(i, DeckCmd::Semitones(m.in_semitones));
             }
-            self.log("Mix cancelled".to_string());
+            // Not brought in yet: it still waits, silent (say so: the old track may be ending).
+            let waiting = !m.released && !m.external;
+            self.log(if waiting { format!("Mix cancelled: deck {} still waits, volume down", i + 1) } else { "Mix cancelled".to_string() });
         }
     }
 

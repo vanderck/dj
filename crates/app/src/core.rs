@@ -3550,6 +3550,37 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_tap_right_after_a_mix_starts_does_not_cancel_it() {
+        let (mut e, mut c, _config) = core();
+        for (d, name) in [(0, "tap-a.wav"), (1, "tap-b.wav")] {
+            c.load_track(d, &kick_wav(name, 60));
+            let deadline = Instant::now() + std::time::Duration::from_secs(60);
+            while !(c.snap.decks[d].loaded && c.decks[d].info.is_some()) {
+                assert!(Instant::now() < deadline, "track never loaded");
+                pump(&mut e, &mut c);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+        c.deck_cmd(0, DeckCmd::Play);
+        for _ in 0..20 {
+            pump(&mut e, &mut c);
+        }
+        // In the old track's last minute, one tap on Mix starts it: the second tap of a double
+        // tap lands on the same button, now the mix's.
+        assert!(c.mix_is_urgent(0));
+        let plan = c.plan_best(1, 0, c.settings.mix_style);
+        c.start_mix(plan);
+        pump(&mut e, &mut c);
+        assert!(!c.tap_cancel_mix(), "too soon to be meant");
+        assert!(c.automix.is_some());
+        std::thread::sleep(std::time::Duration::from_millis(1600));
+        assert!(c.tap_cancel_mix());
+        assert!(c.automix.is_none());
+        // Not brought in yet: it says the new track still waits, silent.
+        assert!(c.status.iter().any(|(_, m)| m == "Mix cancelled: deck 2 still waits, volume down"), "{:?}", c.status);
+    }
+
+    #[test]
     fn mix_now_is_over_in_about_half_a_minute() {
         // Two long tracks that fit everywhere: Best's search would blend them for 44 bars (90 s),
         // little happening for the first minute. Now keeps it to 16 bars (32 s at 120).
