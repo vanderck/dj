@@ -589,11 +589,12 @@ pub fn find_mashup(inc: &Bars, out: &Bars, earliest: usize, now: bool) -> Option
         }
         n / 8 * 8
     };
-    let (in_bar, bars) = (0..inc.len())
-        .filter(|&k| on_phrase(inc, k) && inc.on(VOCALS, k))
-        .map(|k| (k, sung(k)))
-        .filter(|&(_, n)| n >= 8)
-        .max_by_key(|&(k, n)| (n.min(16), inc.label(k) == "chorus", n, std::cmp::Reverse(k)))?;
+    // From its first third if it sings there, so most of it is still to play after the
+    // mashup (else its longest run, often its last choruses, brought it in a minute from its
+    // end); there, 16 bars if it can, a chorus, the earliest.
+    let runs: Vec<(usize, usize)> = (0..inc.len()).filter(|&k| on_phrase(inc, k) && inc.on(VOCALS, k)).map(|k| (k, sung(k))).filter(|&(_, n)| n >= 8).collect();
+    let early: Vec<(usize, usize)> = runs.iter().copied().filter(|&(k, _)| k <= inc.len() / 3).collect();
+    let (in_bar, bars) = (if early.is_empty() { runs } else { early }).into_iter().max_by_key(|&(k, n)| (n.min(16), inc.label(k) == "chorus", std::cmp::Reverse(k)))?;
     // The old track: its phrase starts from `earliest` with room for it (shorter if that's all).
     let room = |k: usize| out.len().saturating_sub(k + TAIL) / 8 * 8;
     let starts = (earliest..out.len()).filter(|&k| on_phrase(out, k) && room(k) >= 8);
@@ -631,6 +632,19 @@ mod tests {
             std::array::from_fn(|s| (0..n).map(|k| if ranges[s].iter().any(|&(a, b)| (a..b).contains(&k)) { 0.5 } else { 0.0 }).collect());
         let loud = (0..n).map(|k| 0.2 + 0.2 * (0..4).filter(|&s| stems[s][k] > 0.0).count() as f32).collect();
         Bars { start: 0.0, bar_secs: 2.0, bands: [vec![0.3; n], vec![0.3; n], vec![0.3; n]], loud, stems: Some(stems), ..Default::default() }.finished()
+    }
+
+    #[test]
+    fn a_mashup_brings_the_new_track_in_early_enough_to_play_on() {
+        // New (120 bars): a verse sung 16-32, then from 72 a long run of choruses to the end
+        // (the longest singing). Old: full music.
+        let inc = track(120, [&[(0, 120)], &[(8, 120)], &[(16, 32), (72, 116)], &[(0, 120)]]);
+        let out = track(96, [&[(0, 96)], &[(0, 96)], &[], &[(0, 96)]]);
+        let m = find_mashup(&inc, &out, 0, true).expect("a mashup");
+        assert_eq!((m.in_bar, m.bars), (16, 16), "the verse, with most of the track to come: {m:?}");
+        // Sung only late: that, rather than no mashup.
+        let late = track(120, [&[(0, 120)], &[(8, 120)], &[(72, 116)], &[(0, 120)]]);
+        assert_eq!(find_mashup(&late, &out, 0, true).map(|m| m.in_bar), Some(72));
     }
 
     #[test]
