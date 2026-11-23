@@ -199,13 +199,30 @@ pub fn key_rank(c: dj_library::key::Compat) -> Option<u8> {
     }
 }
 
-/// Lower is better: the key fit first, then the tempo distance (each key step outweighs the
-/// whole ±5 BPM window).
+/// The semitone (+1 or -1) that brings a key to the same, an adjacent or the relative key of
+/// `reference`, if one does: a mix shifts a new track that clashes by that much (see
+/// `Core::key_shift`).
+pub fn shift_to_fit(k: dj_library::key::Key, reference: dj_library::key::Key) -> Option<i32> {
+    use dj_library::key::Compat;
+    [1, -1].into_iter().find(|s| matches!(k.transpose(*s).compat(reference), Compat::Same | Compat::Adjacent | Compat::Relative))
+}
+
+/// How a key fits after `reference` (the move from `reference` to it: two up is the boost):
+/// its rank (see [`key_rank`]; 3 for a key that fits once the mix shifts it a semitone) and
+/// that shift (0 when it fits as it is). `None`: it doesn't mix.
+pub fn key_fit(k: dj_library::key::Key, reference: dj_library::key::Key) -> Option<(u8, i32)> {
+    match key_rank(reference.compat(k)) {
+        Some(r) => Some((r, 0)),
+        None => shift_to_fit(k, reference).map(|s| (3, s)),
+    }
+}
+
 /// How well a track fits after the playing one, lower is better: the key (same, then
-/// relative/adjacent, then a boost), the tempo gap (per %), and the energy (level or a step up
-/// best; down or a big jump less so).
+/// relative/adjacent, then a boost, then a key the mix shifts a semitone to fit), the tempo gap
+/// (per %), and the energy (level or a step up best; down or a big jump less so). Each key step
+/// outweighs the whole tempo window.
 pub fn fit_score(e: &dj_library::scan::Entry, reference: dj_library::key::Key, ref_bpm: Option<f64>, ref_energy: Option<u8>) -> f64 {
-    let rank = e.key.and_then(|k| key_rank(k.compat(reference))).unwrap_or(9) as f64;
+    let rank = e.key.and_then(|k| key_fit(k, reference)).map_or(9, |f| f.0) as f64;
     let tempo = match (ref_bpm, e.bpm) {
         (Some(r), Some(b)) => 100.0 * (b / r - 1.0).abs(),
         _ => 0.0,
@@ -487,12 +504,11 @@ impl Core {
     /// track sounding like itself, and fixes 8 of 12 keys; with two, every clash would be
     /// "fixed" by changing the track's character.)
     pub fn key_shift(&self, incoming: usize, outgoing: usize) -> Option<i32> {
-        use dj_library::key::Compat;
         let (a, b) = (self.deck_key(incoming)?, self.deck_key(outgoing)?);
         if !self.keys_clash(incoming, outgoing) {
             return None;
         }
-        [1, -1].into_iter().find(|s| matches!(a.transpose(*s).compat(b), Compat::Same | Compat::Adjacent | Compat::Relative))
+        shift_to_fit(a, b)
     }
 
     /// The two decks' keys don't mix (clash or diagonal on the Camelot wheel).
@@ -1372,7 +1388,7 @@ impl Core {
             };
             // Keys that clash, or tempos far apart, only when nothing else is left.
             if let (Some(k), Some(rk)) = (entry.key, reference) {
-                if key_rank(k.compat(rk)).is_none() {
+                if key_fit(k, rk).is_none() {
                     f += 50.0;
                 }
             }
