@@ -222,6 +222,9 @@ pub enum MixStyle {
     Eq,
     /// No blend: the new track cuts in on the beat, from its drop cue if it has one.
     Drop,
+    /// The new track's singing over the old track's music, then its own music under it (with
+    /// stems on both; otherwise as Auto).
+    Mashup,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
