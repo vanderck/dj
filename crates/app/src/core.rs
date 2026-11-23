@@ -87,6 +87,10 @@ pub struct DeckUi {
     /// You picked where this track starts (a hot cue pad or the Cue button since it loaded): a
     /// mix brings it in from there.
     pub cue_chosen: bool,
+    /// The beats All-In-One heard (and the drum stem's grid), for a grid check that waits
+    /// while you hear the deck: correcting its tempo or beat then would jump (see
+    /// `Core::grid_check_tick`). For that track only.
+    pub grid_check_pending: Option<(u64, Arc<crate::stems::Structure>, Option<dj_engine::track::BeatGrid>)>,
 }
 
 enum LoadJob {
@@ -748,7 +752,13 @@ impl Core {
                 if !found.sections.is_empty() {
                     self.decks[deck].sections = Some(Arc::new(found.sections.clone()));
                 }
-                self.check_grid_with_beats(deck, &found.beats, drums);
+                if self.heard(deck) {
+                    // Playing with its fader up: a corrected tempo or beat would jump under you
+                    // (and under the decks that follow it). Once you don't hear it.
+                    self.decks[deck].grid_check_pending = Some((track_id, found.clone(), drums));
+                } else {
+                    self.check_grid_with_beats(deck, &found.beats, drums);
+                }
                 if let Some(c) = cues {
                     self.apply_detected_cues(deck, c);
                 }
@@ -829,6 +839,32 @@ impl Core {
         let fixed = dj_engine::track::BeatGrid { bpm: grid.bpm, anchor_secs: grid.anchor_secs + (half + bars) * spb };
         self.deck_cmd(d, DeckCmd::SetGrid(Some(fixed)));
         self.log(format!("Deck {}: grid corrected from the beats All-In-One hears: {what}", d + 1));
+    }
+
+    /// Whether you hear deck `d`: playing, its fader up and not muted (with an external mixer,
+    /// where dj can't see the faders: playing).
+    pub fn heard(&self, d: usize) -> bool {
+        let v = &self.snap.decks[d];
+        let p = &self.session.channels[d].params;
+        v.playing && (self.external_routing() || (p.volume > 0.05 && !p.mute))
+    }
+
+    /// A grid check that waited while you heard the deck (see `DeckUi::grid_check_pending`):
+    /// now, if you don't (stopped, or its fader down), and it's still that track.
+    fn grid_check_tick(&mut self) {
+        for d in 0..NUM_DECKS {
+            let Some((id, _, _)) = self.decks[d].grid_check_pending.as_ref() else { continue };
+            if self.decks[d].info.as_ref().is_none_or(|i| i.track_id != *id) {
+                self.decks[d].grid_check_pending = None;
+                continue;
+            }
+            if self.heard(d) {
+                continue;
+            }
+            let (_, found, drums) = self.decks[d].grid_check_pending.take().unwrap();
+            self.check_grid_with_beats(d, &found.beats, drums);
+            self.save_profile_soon(d);
+        }
     }
 
     /// Keep how much of a track has vocals (from its stems), and show it in the library.
@@ -3012,6 +3048,7 @@ impl Core {
         }
 
         self.automix_tick();
+        self.grid_check_tick();
         // (After the mix's tick: a mix Auto-DJ starts is seen by the engine before it's checked.)
         self.autodj_tick();
         self.prepare_tick();
@@ -3536,6 +3573,42 @@ pub(crate) mod tests {
         let id = c.decks[0].info.as_ref().unwrap().track_id;
         c.on_stems_update(Update::Sections { deck: 0, track_id: id, found, cues: None, drums: None });
         assert!(!c.status.iter().any(|(_, m)| m.contains("→") || m.contains("corrected")), "{:?}", c.status);
+    }
+
+    #[test]
+    fn a_grid_correction_waits_while_you_hear_the_deck() {
+        use crate::stems::{Beat, Structure, Update};
+        let (mut e, mut c, _config) = core();
+        c.load_track(0, &kick_wav("wait-grid.wav", 40));
+        let deadline = Instant::now() + std::time::Duration::from_secs(60);
+        while !(c.snap.decks[0].loaded && c.decks[0].info.is_some()) {
+            assert!(Instant::now() < deadline, "track never loaded");
+            pump(&mut e, &mut c);
+        }
+        let id = c.decks[0].info.as_ref().unwrap().track_id;
+        // Playing, fader up: what you hear.
+        c.route("Mixer/CH1/Volume", &[OscType::Float(0.9)]);
+        c.deck_cmd(0, DeckCmd::Play);
+        for _ in 0..20 {
+            pump(&mut e, &mut c);
+        }
+        assert!(c.heard(0));
+        // The model hears a steady 80 BPM (the detector said 120): not now, the tempo would jump.
+        let beats: Vec<Beat> = (0..52).map(|k| Beat { secs: 0.75 * k as f64, downbeat: if k % 4 == 0 { 0.9 } else { 0.1 } }).collect();
+        c.on_stems_update(Update::Sections { deck: 0, track_id: id, found: Arc::new(Structure { sections: vec![], beats }), cues: None, drums: None });
+        for _ in 0..20 {
+            pump(&mut e, &mut c);
+        }
+        assert!((c.snap.decks[0].track_bpm - 120.0).abs() < 0.5, "{}", c.snap.decks[0].track_bpm);
+        assert!(!c.status.iter().any(|(_, m)| m.contains("→")), "{:?}", c.status);
+        // Fader down (cued in your headphones, or a mix took it out): then.
+        c.route("Mixer/CH1/Volume", &[OscType::Float(0.0)]);
+        for _ in 0..5 {
+            pump(&mut e, &mut c);
+        }
+        assert!(c.status.iter().any(|(_, m)| m.contains("BPM 120.0 → 80.0")), "{:?}", c.status);
+        assert!((c.snap.decks[0].track_bpm - 80.0).abs() < 0.01, "{}", c.snap.decks[0].track_bpm);
+        assert!(c.decks[0].grid_check_pending.is_none());
     }
 
     #[test]
