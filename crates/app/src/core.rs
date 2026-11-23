@@ -3383,14 +3383,19 @@ pub(crate) mod tests {
             }
         }
         assert_eq!(mixes, 2, "three tracks, two mixes: {:?}\n{}", c.status, history.join("\n"));
+        // The next track loading on the old deck before a mix was over (its old track done)
+        // ended that mix as done, not cancelled.
+        assert!(!c.status.iter().any(|(_, m)| m.contains("cancelled")), "{:?}", c.status);
         assert!(c.status.iter().any(|(_, m)| m.contains("last track")), "{:?}", c.status);
         assert!(c.status.iter().any(|(_, m)| m.contains("the set is over")), "{:?}", c.status);
         for t in &tracks {
             assert!(c.history.contains(t), "{} played", t.display());
         }
-        // Each track loaded once (not over itself while the engine caught up).
-        let loads = history.iter().filter(|h| h.contains("(loading")).count();
-        assert!(loads <= 3, "{}", history.join("\n"));
+        // Each track loaded once (not over itself while the engine caught up): count each load
+        // where it starts (one can span several lines, a mix ending meanwhile).
+        let loading = |h: &str| h.split("(loading ").skip(1).map(|r| r.split(')').next().unwrap_or("").to_string()).collect::<Vec<_>>();
+        let loads = history.iter().enumerate().map(|(k, h)| loading(h).into_iter().filter(|l| k == 0 || !loading(&history[k - 1]).contains(l)).count()).sum::<usize>();
+        assert!(loads <= 3, "{loads} loads\n{}", history.join("\n"));
     }
 
     #[test]
