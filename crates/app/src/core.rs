@@ -3550,6 +3550,40 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_mix_waits_for_the_engine_to_start_the_new_deck() {
+        let (mut e, mut c, _config) = core();
+        for (d, name) in [(0, "race-a.wav"), (1, "race-b.wav")] {
+            c.load_track(d, &kick_wav(name, 60));
+            let deadline = Instant::now() + std::time::Duration::from_secs(60);
+            while !(c.snap.decks[d].loaded && c.decks[d].info.is_some()) {
+                assert!(Instant::now() < deadline, "track never loaded");
+                pump(&mut e, &mut c);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+        c.deck_cmd(0, DeckCmd::Play);
+        for _ in 0..20 {
+            pump(&mut e, &mut c);
+        }
+        let plan = c.plan_now(1, 0, crate::settings::MixStyle::Eq);
+        c.start_mix(plan);
+        // The screen redraws before the engine has played a block: the new deck isn't playing
+        // (nor waiting to) in what it shows yet. That's not a deck stopped under the mix.
+        for _ in 0..3 {
+            c.tick();
+            assert!(c.automix.is_some(), "cancelled before the engine started the deck: {:?}", c.status);
+        }
+        pump(&mut e, &mut c);
+        assert!(c.snap.decks[1].playing || c.snap.decks[1].play_pending);
+        assert!(c.automix.is_some());
+        // Stopped for real (after it was seen playing): the mix gives up.
+        c.deck_cmd(1, DeckCmd::Pause);
+        pump(&mut e, &mut c);
+        pump(&mut e, &mut c);
+        assert!(c.automix.is_none(), "the new deck stopped: cancelled");
+    }
+
+    #[test]
     fn a_tap_right_after_a_mix_starts_does_not_cancel_it() {
         let (mut e, mut c, _config) = core();
         for (d, name) in [(0, "tap-a.wav"), (1, "tap-b.wav")] {

@@ -50,6 +50,8 @@ pub const MIN_MIX_SECS: f64 = 20.0;
 pub const SHORT_MIX_NEAR_END_SECS: f64 = 30.0;
 /// In the playing track's last minute, Mix doesn't ask: it mixes at the best moment left.
 const LAST_MINUTE_SECS: f64 = 60.0;
+/// How long the engine may take to start a mix's new deck before the mix gives up on it.
+const MIX_START_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 /// A tap on a mix's button this soon after it started doesn't cancel it.
 const MIX_TAP_GUARD: std::time::Duration = std::time::Duration::from_millis(1500);
 /// Stem order: drums, bass, vocals, other.
@@ -169,6 +171,9 @@ pub struct AutoMix {
     /// When it was started: a tap on its button right after (a double tap, or the tap that
     /// started it counted twice) doesn't cancel it.
     started: std::time::Instant,
+    /// The new deck has been seen playing (or about to) since: the engine started it. Until
+    /// then (its first blocks after `start_mix`), not playing is not a reason to give up.
+    in_seen: bool,
 }
 
 /// After a Now mix: bring the new track's vocals back where its next vocal phrase starts.
@@ -1111,6 +1116,7 @@ impl Core {
             echo_slot: None,
             in_semitones: self.snap.decks[i].semitones,
             started: std::time::Instant::now(),
+            in_seen: false,
             plan,
         };
         // Its key fitted to the playing track's, while it's still silent.
@@ -1526,7 +1532,16 @@ impl Core {
         // EQ and stems back). The old track reaching its end is fine: it fades on its own, and the
         // mix carries on bringing the new one in.
         let old_ended = vo.loaded && !vo.playing && vo.duration_secs > 0.0 && vo.position_secs >= vo.duration_secs - 0.5;
-        if (vi.track_id, vo.track_id) != m.tracks || !vi.loaded || !vo.loaded || !(vo.playing || old_ended) || !(vi.playing || vi.play_pending) {
+        // The new deck stopped: once it was seen playing (the engine may not have started it yet
+        // in the first frames after the mix began, when the screen already redraws), or still
+        // not playing after a while.
+        let in_on = vi.playing || vi.play_pending;
+        if in_on && !m.in_seen {
+            self.automix.as_mut().unwrap().in_seen = true;
+        }
+        let m = self.automix.as_ref().unwrap();
+        let in_stopped = !in_on && (m.in_seen || m.started.elapsed() > MIX_START_GRACE);
+        if (vi.track_id, vo.track_id) != m.tracks || !vi.loaded || !vo.loaded || !(vo.playing || old_ended) || in_stopped {
             self.cancel_mix();
             return;
         }
