@@ -840,10 +840,11 @@ pub struct MixPreview {
 }
 
 /// The Mix popup's choice of how, and what each means.
-const MIX_STYLES: [(&str, MixStyle, &str); 3] = [
+const MIX_STYLES: [(&str, MixStyle, &str); 4] = [
     ("Auto", MixStyle::Auto, "dj measures both tracks and picks Stems, EQ or Drop"),
     ("Blend", MixStyle::Stems, "Always a blend: the stems swap one by one, or an EQ blend without stems"),
     ("Drop", MixStyle::Drop, "No blend: the new track cuts in on the beat, from its drop cue if it has one"),
+    ("Mashup", MixStyle::Mashup, "The new track's vocals over this track's music (its own vocals out) for 8 to 32 bars, then the new music comes in under them. Needs stems on both decks and keys that fit; otherwise as Auto"),
 ];
 
 /// "in 3 bars · Stems · 16 bars · keys clash": when a plan starts and how it mixes.
@@ -919,7 +920,8 @@ fn mix_button(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Re
             }
             // How: remembered, for Auto-DJ too.
             let (row, _) = ui.allocate_exact_size(Vec2::new(W, 30.0), Sense::hover());
-            let w = (W - 2.0 * 6.0) / 3.0;
+            let n = MIX_STYLES.len() as f32;
+            let w = (W - (n - 1.0) * 6.0) / n;
             for (i, (name, s, tip)) in MIX_STYLES.into_iter().enumerate() {
                 let r = Rect::from_min_size(Pos2::new(row.left() + i as f32 * (w + 6.0), row.top()), Vec2::new(w, 30.0));
                 if pill(ui, r, name, style == s).on_hover_text(tip).clicked() {

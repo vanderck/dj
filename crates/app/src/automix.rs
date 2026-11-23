@@ -429,7 +429,7 @@ impl Core {
             MixStyle::Drop => (MixHow::Drop, String::new()),
             MixStyle::Stems if stems => (MixHow::Stems, String::new()),
             MixStyle::Stems => (MixHow::Eq, "no stems yet".into()),
-            MixStyle::Auto => self.assess(incoming, outgoing, when),
+            MixStyle::Auto | MixStyle::Mashup => self.assess(incoming, outgoing, when),
         }
     }
 
@@ -536,7 +536,7 @@ impl Core {
         let (blend, cut) = match style {
             // (A cut is quick: only in the old track's last 30 s. Before that, Auto blends 20 s or
             // more even where it would rather cut; it doesn't wait for the end to cut.)
-            MixStyle::Auto => (true, !can_blend),
+            MixStyle::Auto | MixStyle::Mashup => (true, !can_blend),
             MixStyle::Stems | MixStyle::Eq => (true, false),
             MixStyle::Drop => (false, true),
         };
@@ -651,7 +651,7 @@ impl Core {
                     MixHow::Drop => "a cut".to_string(),
                     _ => format!("{bars} bars"),
                 };
-                let why_how = if style != MixStyle::Auto {
+                let why_how = if !matches!(style, MixStyle::Auto | MixStyle::Mashup) {
                     String::new()
                 } else {
                     match how {
@@ -682,6 +682,61 @@ impl Core {
                 }
             })
             .collect()
+    }
+
+    /// Mashup when the two tracks allow one (see [`Self::mashup_plan`]), else as Auto, saying why.
+    fn mashup_or_auto(&self, incoming: usize, outgoing: usize, when: MixWhen) -> MixPlan {
+        match self.mashup_plan(incoming, outgoing, when) {
+            Ok(p) => p,
+            Err(why) => {
+                let mut p = if when == MixWhen::Now { self.plan_now(incoming, outgoing, MixStyle::Auto) } else { self.plan_best(incoming, outgoing, MixStyle::Auto) };
+                p.why_how = if p.why_how.is_empty() { format!("no mashup: {why}") } else { format!("no mashup: {why}; {}", p.why_how) };
+                p
+            }
+        }
+    }
+
+    /// A mashup: the new track's singing over the old track's music (its vocals out) for 8 to
+    /// 32 bars (see [`crate::transition::find_mashup`]), then the new track's drums, bass and
+    /// melodies come in under the singing as the old track's leave. Needs stems on both decks,
+    /// keys that fit (transposing a little if need be) and tempos close; or why not.
+    pub fn mashup_plan(&self, incoming: usize, outgoing: usize, when: MixWhen) -> Result<MixPlan, String> {
+        let (i, o) = (&self.snap.decks[incoming], &self.snap.decks[outgoing]);
+        let (Some((inc, _)), Some((out, _))) = (self.deck_bars(incoming), self.deck_bars(outgoing)) else { return Err("no beat grid".into()) };
+        if !(i.stems_ready && o.stems_ready && inc.stems.is_some() && out.stems.is_some()) {
+            return Err("no stems yet".into());
+        }
+        let transpose = self.key_shift(incoming, outgoing).unwrap_or(0);
+        if self.keys_clash(incoming, outgoing) && transpose == 0 {
+            return Err("keys clash".into());
+        }
+        if (i.track_bpm / o.bpm.max(1.0) - 1.0).abs() > 0.08 {
+            return Err("tempos far apart".into());
+        }
+        let lead = if i.playing { 0.5 } else { 4.5 };
+        let earliest = ((o.beat + lead) / 4.0).ceil().max(0.0) as usize;
+        let Some(m) = crate::transition::find_mashup(&inc, &out, earliest, when == MixWhen::Now) else {
+            return Err(if inc.vocal_share().unwrap_or(0) == 0 { "the new track has no vocals".into() } else { "no 8 bars of singing to bring, or no room".into() });
+        };
+        let mut notes = vec![format!("its vocals over this track's music for {} bars, then its music comes in", m.bars)];
+        if transpose != 0 {
+            notes.insert(0, format!("new track {transpose:+} semitone{} to fit", if transpose.abs() > 1 { "s" } else { "" }));
+        }
+        Ok(MixPlan {
+            incoming,
+            outgoing,
+            mode: when,
+            how: MixHow::Stems,
+            start_beat: m.out_bar as f64 * 4.0,
+            length_beats: (m.bars + MASHUP_TAIL) as f64 * 4.0,
+            reason: format!("mashup, {} bars", m.bars),
+            why_how: "mashup".into(),
+            blend: Some(mashup_blend(m.bars)),
+            entry_secs: Some(inc.secs(m.in_bar as f64)),
+            notes,
+            transpose,
+            ..MixPlan::plain()
+        })
     }
 
     /// A deck's track bar by bar (see [`crate::transition::Bars`]), with its phrases from its cue
@@ -836,6 +891,9 @@ impl Core {
     /// Mix now: a blend from the next bar line over the whole bars that fit in about 10 s; a drop
     /// on the next 8-bar phrase start (or the next bar when the track ends sooner).
     pub fn plan_now(&self, incoming: usize, outgoing: usize, style: MixStyle) -> MixPlan {
+        if style == MixStyle::Mashup {
+            return self.mashup_or_auto(incoming, outgoing, MixWhen::Now);
+        }
         if let Some(p) = self.search_plans(incoming, outgoing, MixWhen::Now, style).into_iter().next() {
             return p;
         }
@@ -867,6 +925,9 @@ impl Core {
     /// Mix at the best phrase start: where the vocals clash least over 16 bars, preferring the
     /// outgoing track's outro or break, then sooner over later.
     pub fn plan_best(&self, incoming: usize, outgoing: usize, style: MixStyle) -> MixPlan {
+        if style == MixStyle::Mashup {
+            return self.mashup_or_auto(incoming, outgoing, MixWhen::Best);
+        }
         if let Some(p) = self.search_plans(incoming, outgoing, MixWhen::Best, style).into_iter().next() {
             return p;
         }
@@ -1545,7 +1606,8 @@ impl Core {
                         None => (0.35 * len / 4.0, 0.75 * len / 4.0),
                     };
                     let ramp = d_in.min(8.0);
-                    self.mix_set(&high(i), in_high * smooth((bp - (d_in - ramp)) / ramp));
+                    let vocals_first = blend.as_ref().is_some_and(|b| b.vocals_first);
+                    self.mix_set(&high(i), if vocals_first { in_high } else { in_high * smooth((bp - (d_in - ramp)) / ramp) });
                     self.mix_set(&high(o), out_high * (1.0 - smooth((bp - (d_out - 2.0)) / 2.0)));
                 }
             }
@@ -1669,6 +1731,9 @@ pub struct Blend {
     pub swap: f64,
     /// What the plan follows ("bass swaps at bar 9, where its bass comes in").
     pub notes: Vec<String>,
+    /// The new vocals come first, over the old music (a mashup): the new track's highs are up
+    /// from the start (they don't wait for its drums).
+    pub vocals_first: bool,
 }
 
 impl Blend {
@@ -1721,6 +1786,26 @@ impl Blend {
     /// The swap as a fraction of the mix (for the EQ style).
     pub fn swap_fraction(&self) -> f64 {
         self.swap / self.bars as f64
+    }
+}
+
+/// Bars after a mashup's singing over the old music, while the old drums and melodies leave.
+const MASHUP_TAIL: usize = 2;
+
+/// A mashup's stems over `bars` bars of the new singing (and [`MASHUP_TAIL`] after): the old
+/// vocals out in the first bar as the new ones come in; at `bars` the basses switch and the new
+/// drums and melodies come in over a bar as the old ones leave.
+pub fn mashup_blend(bars: usize) -> Blend {
+    let b = bars as f64;
+    Blend {
+        bars: bars + MASHUP_TAIL,
+        in_at: [Some(b - 1.0), Some(b), Some(0.0), Some(b - 1.0)],
+        in_ramp: [1.0; 4],
+        out_at: [Some(b + 1.0), Some(b), Some(1.0), Some(b + 1.0)],
+        out_ramp: [1.0; 4],
+        swap: b,
+        notes: vec![format!("new vocals over the old music for {bars} bars")],
+        vocals_first: true,
     }
 }
 
@@ -1964,7 +2049,7 @@ pub fn plan_blend(inc: &[Vec<f32>; 4], out: &[Vec<f32>; 4], bars: usize, vocals_
         out_ramp[VOCALS] = r;
         notes.insert(1.min(notes.len()), format!("keys clash: melodies switch at bar {}", swap as usize + 1));
     }
-    let mut b = Blend { bars, in_at, in_ramp, out_at, out_ramp, swap, notes };
+    let mut b = Blend { bars, in_at, in_ramp, out_at, out_ramp, swap, notes, vocals_first: false };
     b.fully_in_before_fade();
     b
 }

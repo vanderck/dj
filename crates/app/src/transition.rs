@@ -121,6 +121,17 @@ impl Bars {
         }
     }
 
+    /// How much of the track has vocals: the share of its bars with music in which they sing
+    /// (0–100 %). `None` without stems.
+    pub fn vocal_share(&self) -> Option<u8> {
+        self.stems.as_ref()?;
+        // (Bars with music: within 14 dB of the loudest.)
+        let loudest = self.loud.iter().copied().fold(0.0f32, f32::max);
+        let playing: Vec<usize> = (0..self.len()).filter(|&k| self.loud[k] > 0.2 * loudest && loudest > 0.0).collect();
+        let sung = playing.iter().filter(|&&k| self.on(VOCALS, k)).count();
+        (!playing.is_empty()).then(|| (100.0 * sung as f64 / playing.len() as f64).round() as u8)
+    }
+
     pub fn on(&self, part: usize, k: usize) -> bool {
         k < self.len() && self.level(part, k) > PRESENT
     }
@@ -550,9 +561,69 @@ pub fn search(out: &Bars, inc: &Bars, lim: &Limits) -> Vec<Candidate> {
     best
 }
 
+/// A mashup: where the new track's singing (`inc`) rides over the old track's music (`out`, its
+/// own vocals out) before the new track's music comes in under it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Mashup {
+    /// The new track's bar it starts on (a phrase start where it sings).
+    pub in_bar: usize,
+    /// The old track's bar it starts on (a phrase start from `earliest`).
+    pub out_bar: usize,
+    /// Bars of the new vocals over the old music (8–32, whole 8-bar phrases).
+    pub bars: usize,
+}
+
+/// The longest stretch of singing to bring (8 to 32 bars from a phrase start of `inc`; a chorus
+/// first), over the old track's music from its first phrase start from `earliest` (`now`), or
+/// where its music is fullest and its own singing least (otherwise), with 2 bars after for
+/// the new music to take over. `None` when the new track has no 8 bars of singing, or the old
+/// track has no room.
+pub fn find_mashup(inc: &Bars, out: &Bars, earliest: usize, now: bool) -> Option<Mashup> {
+    const TAIL: usize = 2;
+    let on_phrase = |b: &Bars, k: usize| (k + 8 - b.phrase % 8) % 8 == 0;
+    // Bars of singing from bar k: 4-bar blocks with vocals in at least half their bars.
+    let sung = |k: usize| {
+        let mut n = 0;
+        while n < 32 && k + n + 4 <= inc.len() && (k + n..k + n + 4).filter(|&j| inc.on(VOCALS, j)).count() >= 2 {
+            n += 4;
+        }
+        n / 8 * 8
+    };
+    let (in_bar, bars) = (0..inc.len())
+        .filter(|&k| on_phrase(inc, k) && inc.on(VOCALS, k))
+        .map(|k| (k, sung(k)))
+        .filter(|&(_, n)| n >= 8)
+        .max_by_key(|&(k, n)| (n.min(16), inc.label(k) == "chorus", n, std::cmp::Reverse(k)))?;
+    // The old track: its phrase starts from `earliest` with room for it (shorter if that's all).
+    let room = |k: usize| out.len().saturating_sub(k + TAIL) / 8 * 8;
+    let starts = (earliest..out.len()).filter(|&k| on_phrase(out, k) && room(k) >= 8);
+    let music = |k: usize, n: usize| (k..k + n).map(|j| [DRUMS, BASS, OTHER].iter().filter(|&&p| out.on(p, j)).count()).sum::<usize>() as f64 / n as f64;
+    let sings = |k: usize, n: usize| (k..k + n).filter(|&j| out.on(VOCALS, j)).count() as f64 / n as f64;
+    let out_bar = if now {
+        starts.into_iter().next()?
+    } else {
+        // (A little sooner over later.)
+        let score = |k: usize| {
+            let n = bars.min(room(k));
+            music(k, n) - sings(k, n) + n as f64 / 32.0 - 0.3 * (k - earliest) as f64 / out.len().max(1) as f64
+        };
+        starts.max_by(|&a, &b| score(a).total_cmp(&score(b)))?
+    };
+    Some(Mashup { in_bar, out_bar, bars: bars.min(room(out_bar)) })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vocal_share_counts_the_bars_with_music() {
+        // 10 bars: silent for 2, then drums; vocals in bars 2-4.
+        let lv = |r: (usize, usize)| (0..10).map(|k| if (r.0..r.1).contains(&k) { 0.5 } else { 0.0 }).collect::<Vec<f32>>();
+        let bars = Bars { start: 0.0, bar_secs: 2.0, stems: Some([lv((2, 10)), lv((0, 0)), lv((2, 5)), lv((0, 0))]), bands: [lv((2, 10)), lv((2, 10)), lv((2, 10))], loud: lv((2, 10)), ..Default::default() };
+        assert_eq!(bars.vocal_share(), Some(38), "3 of the 8 bars with music");
+        assert_eq!(Bars { stems: None, ..bars }.vocal_share(), None, "no stems: not known");
+    }
 
     /// A track of `n` bars: (from, to) bar ranges where each stem plays; loudness follows.
     pub fn track(n: usize, ranges: [&[(usize, usize)]; 4]) -> Bars {
@@ -560,6 +631,27 @@ mod tests {
             std::array::from_fn(|s| (0..n).map(|k| if ranges[s].iter().any(|&(a, b)| (a..b).contains(&k)) { 0.5 } else { 0.0 }).collect());
         let loud = (0..n).map(|k| 0.2 + 0.2 * (0..4).filter(|&s| stems[s][k] > 0.0).count() as f32).collect();
         Bars { start: 0.0, bar_secs: 2.0, bands: [vec![0.3; n], vec![0.3; n], vec![0.3; n]], loud, stems: Some(stems), ..Default::default() }.finished()
+    }
+
+    #[test]
+    fn a_mashup_brings_the_longest_singing_over_the_fullest_music() {
+        // New: an 8-bar intro, singing 8-32 (24 bars), a break, singing again 40-48.
+        let inc = track(56, [&[(0, 56)], &[(8, 56)], &[(8, 32), (40, 48)], &[(0, 56)]]);
+        // Old: full music but a thin breakdown 32-40 (only other), singing 48-56.
+        let out = track(72, [&[(0, 32), (40, 72)], &[(0, 32), (40, 72)], &[(48, 56)], &[(0, 72)]]);
+        let m = find_mashup(&inc, &out, 2, false).expect("a mashup");
+        assert_eq!((m.in_bar, m.bars), (8, 24), "the long singing, in whole phrases: {m:?}");
+        assert!(m.out_bar % 8 == 0 && m.out_bar >= 2, "{m:?}");
+        // Over full music where the old track doesn't sing (its vocals would be out anyway).
+        assert_eq!(m.out_bar, 8, "{m:?}");
+        // Now: the next phrase start, whatever plays there.
+        assert_eq!(find_mashup(&inc, &out, 10, true).unwrap().out_bar, 16);
+        // Near the end of the old track: shorter, to fit.
+        assert_eq!(find_mashup(&inc, &out, 50, true).map(|m| (m.out_bar, m.bars)), Some((56, 8)));
+        assert_eq!(find_mashup(&inc, &out, 60, true), None, "no room left");
+        // No singing in the new track: no mashup.
+        let inst = track(56, [&[(0, 56)], &[(8, 56)], &[], &[(0, 56)]]);
+        assert_eq!(find_mashup(&inst, &out, 2, false), None);
     }
 
     fn limits(earliest: usize, latest: usize) -> Limits {

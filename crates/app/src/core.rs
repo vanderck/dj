@@ -812,6 +812,18 @@ impl Core {
         self.log(format!("Deck {}: grid corrected from the beats All-In-One hears: {what}", d + 1));
     }
 
+    /// Keep how much of a track has vocals (from its stems), and show it in the library.
+    fn keep_vocals(&mut self, path: &Path, vocals: u8) {
+        let o = self.trackdb.tracks.entry(TrackDb::key(path)).or_default();
+        if o.vocals != Some(vocals) {
+            o.vocals = Some(vocals);
+            self.mark_dirty();
+        }
+        if let Some(e) = self.library.iter_mut().find(|e| e.path == path) {
+            e.vocals = Some(vocals);
+        }
+    }
+
     /// Keep a detected grid corrected on a deck (unless the track is locked), and show its BPM in
     /// the library.
     fn keep_detected_grid(&mut self, d: usize, grid: dj_engine::track::BeatGrid) {
@@ -844,6 +856,9 @@ impl Core {
         let p = crate::profile::Profile::new(&path, self.snap.decks[d].track_bpm, &bars, cue_bars, &sections);
         if let Err(e) = crate::profile::write(&self.settings.stems_prepared_dir(), &path, &p) {
             eprintln!("profile: {e}");
+        }
+        if let Some(v) = p.vocals() {
+            self.keep_vocals(&path, v);
         }
         self.profiles.insert(path, Some(std::sync::Arc::new(p)));
     }
@@ -892,8 +907,12 @@ impl Core {
                 o.grid = Some(g);
                 o.grid_detected = true;
             }
+            if let Some(v) = f.vocals {
+                o.vocals = Some(v);
+            }
             if let Some(e) = self.library.iter_mut().find(|e| e.path == f.path) {
                 e.key = e.key.or(f.key);
+                e.vocals = f.vocals.or(e.vocals);
                 if let Some(g) = grid {
                     e.bpm = Some(g.bpm);
                 }
@@ -957,7 +976,7 @@ impl Core {
 
     /// Library entries without BPM / energy / key tags get the values detected earlier.
     fn fill_detected(&self, library: &mut [dj_library::scan::Entry]) {
-        for e in library.iter_mut().filter(|e| e.bpm.is_none() || e.energy.is_none() || e.key.is_none()) {
+        for e in library.iter_mut().filter(|e| e.bpm.is_none() || e.energy.is_none() || e.key.is_none() || e.vocals.is_none()) {
             if let Some(o) = self.trackdb.tracks.get(&TrackDb::key(&e.path)) {
                 if e.bpm.is_none() && o.grid_detected {
                     e.bpm = o.grid.map(|g| g.bpm);
@@ -967,6 +986,9 @@ impl Core {
                 }
                 if e.key.is_none() {
                     e.key = o.key;
+                }
+                if e.vocals.is_none() {
+                    e.vocals = o.vocals;
                 }
             }
         }
@@ -3380,6 +3402,9 @@ pub(crate) mod tests {
         let p = c.profile(&path).expect("a mix profile");
         assert!(p.stems && (p.bpm - 120.0).abs() < 0.5, "stems {} bpm {}", p.stems, p.bpm);
         assert!((14..=15).contains(&p.bars().len()), "30 s at 120 BPM: 15 bars (from its first beat): {}", p.bars().len());
+        // How much of it has vocals: kept for the library.
+        assert!(p.vocals().is_some());
+        assert_eq!(c.trackdb.tracks.get(&TrackDb::key(&path)).and_then(|o| o.vocals), p.vocals());
         // Then it loads with its stems ready (prepared), and preparing again skips it.
         c.load_track(0, &path);
         let deadline = Instant::now() + std::time::Duration::from_secs(60);
@@ -4021,6 +4046,39 @@ pub(crate) mod tests {
         assert!(!c.snap.decks[0].playing && b.playing && !b.loop_on);
         // From the drop: 16 s plus the bar of the mix (and a little).
         assert!((18.0..19.0).contains(&b.position_secs), "{} (start beat {start})", b.position_secs);
+    }
+
+    #[test]
+    fn a_mashup_brings_the_new_vocals_over_the_old_music() {
+        use crate::settings::MixStyle;
+        let (mut e, mut c, _config) = core();
+        mix_setup(&mut e, &mut c);
+        // (The test model's vocals are silent.) No singing to bring: as Auto, saying why.
+        let p = c.plan_now(1, 0, MixStyle::Mashup);
+        assert!(p.why_how.starts_with("no mashup: the new track has no vocals"), "{}", p.why_how);
+        // The new track sings throughout.
+        let w = c.decks[1].stem_wave.clone().expect("stems");
+        let sung = crate::stems::StemWave { bins_per_sec: w.bins_per_sec, levels: [w.levels[0].clone(), w.levels[1].clone(), vec![0.5; w.levels[2].len()], w.levels[3].clone()] };
+        c.decks[1].stem_wave = Some(Arc::new(sung));
+        let plan = c.plan_now(1, 0, MixStyle::Mashup);
+        assert_eq!(plan.why_how, "mashup");
+        let b = plan.blend.clone().expect("a stems plan");
+        let bars = b.swap;
+        assert!(b.vocals_first && bars >= 8.0 && bars % 8.0 == 0.0, "{b:?}");
+        assert_eq!(plan.length_beats / 4.0, bars + 2.0, "and two bars as the old music leaves");
+        c.start_mix(plan);
+        // Over the singing: the new vocals alone on the new deck, the old music without its vocals.
+        let mut seen = 0;
+        run_mix(&mut e, &mut c, |c, p| {
+            let bp = p * (bars + 2.0);
+            if (1.5..bars - 1.5).contains(&bp) {
+                seen += 1;
+                assert_eq!(c.snap.decks[1].stem_gains, [0.0, 0.0, 1.0, 0.0], "bar {bp:.1}");
+                assert_eq!(c.snap.decks[0].stem_gains, [1.0, 1.0, 0.0, 1.0], "bar {bp:.1}");
+            }
+        });
+        assert!(seen > 10, "{seen}");
+        assert_eq!(c.snap.decks[1].stem_gains, [1.0; 4], "then all of the new track");
     }
 
     #[test]

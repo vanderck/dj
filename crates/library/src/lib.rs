@@ -247,6 +247,8 @@ pub struct TrackOverrides {
     pub energy: Option<u8>,
     /// Detected key (tracks without a key tag).
     pub key: Option<key::Key>,
+    /// How much of the track has vocals (0–100 %, from its stems).
+    pub vocals: Option<u8>,
 }
 
 /// What `load` should detect.

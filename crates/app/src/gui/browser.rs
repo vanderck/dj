@@ -21,23 +21,28 @@ pub enum Col {
     Bpm,
     Key,
     Energy,
+    Vocals,
     Time,
     Genre,
 }
 
 /// (column, title, width fraction, right-aligned)
-const COLS: [(Option<Col>, &str, f32, bool); 10] = [
+const COLS: [(Option<Col>, &str, f32, bool); 11] = [
     (None, "", 0.025, false),
-    (Some(Col::Title), "Title", 0.27, false),
-    (Some(Col::Artist), "Artist", 0.215, false),
+    (Some(Col::Title), "Title", 0.25, false),
+    (Some(Col::Artist), "Artist", 0.19, false),
     (Some(Col::Bpm), "BPM", 0.06, true),
     (Some(Col::Key), "Key", 0.085, false),
     (None, "", 0.05, false),
     (Some(Col::Energy), "Energy", 0.09, false),
+    (Some(Col::Vocals), "Vocals", 0.045, true),
     (Some(Col::Time), "Time", 0.04, true),
     (Some(Col::Genre), "Genre", 0.1, false),
     (None, "Load to", 0.065, false),
 ];
+
+/// Below this share of bars with vocals (%), a track shows as instrumental.
+const INSTRUMENTAL: u8 = 5;
 
 /// Fits: tempo window around the reference deck's BPM.
 use crate::core::automix::{fit_score, key_rank, mix_bonus, FITS_PCT};
@@ -344,6 +349,7 @@ pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect) {
                 Col::Bpm => x.bpm.unwrap_or(0.0).total_cmp(&y.bpm.unwrap_or(0.0)),
                 Col::Key => x.key.map(|k| (k.camelot_number(), k.minor)).cmp(&y.key.map(|k| (k.camelot_number(), k.minor))),
                 Col::Energy => x.energy.cmp(&y.energy),
+                Col::Vocals => x.vocals.cmp(&y.vocals),
                 Col::Time => x.duration_secs.unwrap_or(0.0).total_cmp(&y.duration_secs.unwrap_or(0.0)),
                 Col::Genre => x.genre.to_lowercase().cmp(&y.genre.to_lowercase()),
             };
@@ -464,10 +470,17 @@ pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect) {
                 text(Rect::from_min_max(Pos2::new(bar.right() + 8.0, c.top()), c.right_bottom()), &en.to_string(), mono(13.0), TEXT, false);
             }
             x += widths[6];
-            text(cell(7, x), &mmss(e.duration_secs), mono(14.0), TEXT, true);
+            // How much of it has vocals (from its stems): "Inst" for (almost) none.
+            match e.vocals {
+                Some(v) if v < INSTRUMENTAL => text(cell(7, x), "Inst", sans(13.0), TEXT_DIM, true),
+                Some(v) => text(cell(7, x), &format!("{v} %"), mono(13.0), TEXT, true),
+                None => {}
+            }
             x += widths[7];
-            text(cell(8, x), &e.genre, sans(14.0), TEXT, false);
+            text(cell(8, x), &mmss(e.duration_secs), mono(14.0), TEXT, true);
             x += widths[8];
+            text(cell(9, x), &e.genre, sans(14.0), TEXT, false);
+            x += widths[9];
             // Load-to badges on hover.
             if hovered || selected {
                 let n = core.deck_count();
