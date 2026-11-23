@@ -444,13 +444,32 @@ impl Core {
         Some(k.transpose(shift.round() as i32))
     }
 
-    /// Key used as the reference for harmonic hints: the master deck, else
-    /// the first playing deck.
+    /// The deck harmonic hints and Fits go by: the one you hear. The master when it plays with
+    /// its fader up (not muted), else the loudest deck that does (the master can be a deck
+    /// left looping silently, or one a mix took out); with nothing up (or an external mixer,
+    /// where dj can't see the faders), the master, else the first deck playing.
+    pub fn reference_deck(&self) -> Option<usize> {
+        let n = self.deck_count();
+        let playing = |d: usize| self.snap.decks[d].playing && self.snap.decks[d].loaded;
+        let external = self.external_routing();
+        let up = |d: usize| {
+            let p = &self.session.channels[d].params;
+            playing(d) && !external && p.volume > 0.05 && !p.mute
+        };
+        let master = match self.snap.clock.owner {
+            ClockOwner::Deck(m) if (m as usize) < n => Some(m as usize),
+            _ => None,
+        };
+        master
+            .filter(|&m| up(m))
+            .or_else(|| (0..n).filter(|&d| up(d)).max_by(|&a, &b| self.session.channels[a].params.volume.total_cmp(&self.session.channels[b].params.volume)))
+            .or_else(|| master.filter(|&m| playing(m) || external))
+            .or_else(|| (0..n).find(|&d| playing(d)))
+    }
+
+    /// Key used as the reference for harmonic hints: that of [`Core::reference_deck`].
     pub fn reference_key(&self) -> Option<Key> {
-        match self.snap.clock.owner {
-            ClockOwner::Deck(d) => self.deck_key(d as usize),
-            ClockOwner::Header => (0..NUM_DECKS).find(|&d| self.snap.decks[d].playing).and_then(|d| self.deck_key(d)),
-        }
+        self.deck_key(self.reference_deck()?)
     }
 
     // ------------------------------------------------------------ startup / resync
@@ -3547,6 +3566,44 @@ pub(crate) mod tests {
         assert!(c.status.iter().any(|(_, m)| m.contains("BPM 120.0 → 150.0, from the drum stem")), "{:?}", c.status);
         pump(&mut e, &mut c);
         assert!((c.snap.decks[0].track_bpm - 150.0).abs() < 0.01, "{}", c.snap.decks[0].track_bpm);
+    }
+
+    #[test]
+    fn fits_follows_the_deck_you_hear_not_a_silent_master() {
+        let (mut e, mut c, _config) = core();
+        for (d, name) in [(0, "ref-a.wav"), (1, "ref-b.wav"), (2, "ref-c.wav")] {
+            c.load_track(d, &kick_wav(name, 30));
+            let deadline = Instant::now() + std::time::Duration::from_secs(60);
+            while !(c.snap.decks[d].loaded && c.decks[d].info.is_some()) {
+                assert!(Instant::now() < deadline, "track never loaded");
+                pump(&mut e, &mut c);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+        assert_eq!(c.reference_deck(), None, "nothing playing");
+        // Deck 1 plays first (the master), then deck 3; deck 1's fader goes down (looping in
+        // your headphones, say), deck 3's is full.
+        c.deck_cmd(0, DeckCmd::Play);
+        for _ in 0..20 {
+            pump(&mut e, &mut c);
+        }
+        c.deck_cmd(2, DeckCmd::Play);
+        c.route("Mixer/CH1/Volume", &[OscType::Float(0.0)]);
+        c.route("Mixer/CH2/Volume", &[OscType::Float(0.0)]);
+        c.route("Mixer/CH3/Volume", &[OscType::Float(1.0)]);
+        for _ in 0..20 {
+            pump(&mut e, &mut c);
+        }
+        assert_eq!(c.snap.clock.owner, ClockOwner::Deck(0), "deck 1 is still the master");
+        assert_eq!(c.reference_deck(), Some(2), "but deck 3 is what you hear");
+        // Its fader back up: the master again.
+        c.route("Mixer/CH1/Volume", &[OscType::Float(0.8)]);
+        assert_eq!(c.reference_deck(), Some(0));
+        // Muted counts as down; with nothing up at all, the master.
+        c.route("Mixer/CH1/Mute", &[OscType::Int(1)]);
+        assert_eq!(c.reference_deck(), Some(2));
+        c.route("Mixer/CH3/Volume", &[OscType::Float(0.0)]);
+        assert_eq!(c.reference_deck(), Some(0));
     }
 
     #[test]
