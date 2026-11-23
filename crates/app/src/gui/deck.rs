@@ -41,12 +41,13 @@ fn accept_drop(ui: &mut Ui, core: &mut Core, d: usize, rect: Rect) {
     }
 }
 
-/// Key chip border: green when it mixes with the master, red on a clash.
+/// Key chip border: green when it mixes with the deck you hear (see `Core::reference_deck`),
+/// red on a clash.
 fn key_border(core: &Core, d: usize) -> Color32 {
-    let is_master = core.snap.clock.owner == ClockOwner::Deck(d as u8);
+    let is_reference = core.reference_deck() == Some(d);
     match (core.deck_key(d), core.reference_key()) {
-        (Some(_), _) if is_master => GREEN,
-        // (From the master's key to this one: two up is the boost.)
+        (Some(_), _) if is_reference => GREEN,
+        // (From the heard deck's key to this one: two up is the boost.)
         (Some(k), Some(r)) => match r.compat(k) {
             Compat::Same | Compat::Adjacent | Compat::Relative | Compat::Boost => GREEN,
             Compat::Clash => dim(RED, 0.8),

@@ -182,12 +182,9 @@ pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect) {
         x += w + 8.0;
     }
     x = crates_pill(ui, core, st, x, y, bar_h) + 8.0;
-    // Harmonic filter against the master / playing deck.
+    // Harmonic filter against the deck you hear (see `Core::reference_deck`).
     let reference = core.reference_key();
-    let ref_deck = match core.snap.clock.owner {
-        dj_engine::engine::ClockOwner::Deck(d) => Some(d as usize),
-        _ => (0..core.deck_count()).find(|&d| core.snap.decks[d].playing),
-    };
+    let ref_deck = core.reference_deck();
     // The reference tempo: the deck's current BPM (what a new track has to match).
     let ref_bpm = ref_deck.map(|d| core.snap.decks[d].bpm).filter(|b| *b > 0.0);
     let fits_label = match (ref_deck, reference) {
@@ -200,7 +197,7 @@ pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect) {
     let w = pill_width(ui, &fits_label, 13.0) + 14.0;
     let fr = Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, bar_h));
     let resp = ui.allocate_rect(fr, Sense::click()).on_hover_text(format!(
-        "What to play next: tracks in a compatible key (or one a semitone off, which the mix shifts to fit: \"+1 st\") within {FITS_PCT:.0} % of the master deck's tempo, best first: the key, the tempo, the energy (level or a step up), and for prepared tracks how well dj would actually mix them in (hover a track for how)"
+        "What to play next after the deck you hear (playing, fader up): tracks in a compatible key (or one a semitone off, which the mix shifts to fit: \"+1 st\") within {FITS_PCT:.0} % of its tempo, best first: the key, the tempo, the energy (level or a step up), and for prepared tracks how well dj would actually mix them in (hover a track for how)"
     ));
     let p = ui.painter();
     let rad = CornerRadius::same((bar_h / 2.0) as u8);
