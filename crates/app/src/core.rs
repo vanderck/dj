@@ -606,7 +606,8 @@ impl Core {
     /// Ask the stems worker for this deck's stems (and cue points from them, if `detect_cues`).
     fn request_stems(&mut self, d: usize, path: &Path, detect_cues: bool) {
         let Some(track) = self.loaded_track(d) else { return };
-        let tempo_from_beats = self.decks[d].info.as_ref().is_some_and(|i| i.grid_source == Some(GridSource::Detected)) && track.tempo_map.is_none();
+        // (A detected grid's tempo map was measured on its tempo: if that's wrong, so is the map.)
+        let tempo_from_beats = self.decks[d].info.as_ref().is_some_and(|i| i.grid_source == Some(GridSource::Detected));
         // (Progress shows once separation starts; prepared stems just arrive.)
         self.decks[d].stems_progress = None;
         self.decks[d].stems_missing = None;
@@ -724,11 +725,11 @@ impl Core {
                     self.save_profile(deck);
                 }
             }
-            Update::Sections { deck, track_id, found, cues } if current(self, deck, track_id) => {
+            Update::Sections { deck, track_id, found, cues, drums } if current(self, deck, track_id) => {
                 if !found.sections.is_empty() {
                     self.decks[deck].sections = Some(Arc::new(found.sections.clone()));
                 }
-                self.check_grid_with_beats(deck, &found.beats);
+                self.check_grid_with_beats(deck, &found.beats, drums);
                 if let Some(c) = cues {
                     self.apply_detected_cues(deck, c);
                 }
@@ -760,20 +761,25 @@ impl Core {
     /// Check the deck's grid against the beats All-In-One hears: half a beat off (no kicks to
     /// place it), or bars starting on the wrong beat (unless the cue points, on phrase starts,
     /// say where the bars are). A grid you set yourself, or one with a tempo map, is only reported
-    /// on. The fix is for this load (the check runs again on the next).
-    fn check_grid_with_beats(&mut self, d: usize, beats: &[crate::stems::Beat]) {
+    /// on. The fix is for this load (the check runs again on the next). `drums`: the drum stem's
+    /// grid, when the heard beats are too unsteady to settle a detected tempo.
+    fn check_grid_with_beats(&mut self, d: usize, beats: &[crate::stems::Beat], drums: Option<dj_engine::track::BeatGrid>) {
         let Some(track) = self.decks[d].track.clone() else { return };
         let Some(info) = self.decks[d].info.as_ref() else { return };
         let Some(grid) = track.grid else { return };
         let heard: Vec<(f64, f32)> = beats.iter().map(|b| (b.secs, b.downbeat)).collect();
         let map = track.tempo_map.clone();
         // A detected tempo the heard beats steadily disagree with: theirs (the detector took
-        // double, half or 3:2 of the beat). Kept, and shown in the library.
-        if info.grid_source == Some(GridSource::Detected) && map.is_none() {
-            if let Some(fixed) = dj_library::analysis::tempo_from_beats(&grid, &heard) {
+        // double, half or 3:2 of the beat); when they wander, the drum stem's. Kept, and shown
+        // in the library. (Also with a tempo map: one measured on a wrong tempo is wrong too.
+        // The corrected grid replaces it.)
+        if info.grid_source == Some(GridSource::Detected) {
+            let from_beats = dj_library::analysis::tempo_from_beats(&grid, &heard);
+            let why = if from_beats.is_some() { "the steady beats All-In-One hears" } else { "the drum stem (All-In-One's beats wander)" };
+            if let Some(fixed) = crate::stems::corrected_grid(&grid, &heard, drums.as_ref()) {
                 self.deck_cmd(d, DeckCmd::SetGrid(Some(fixed)));
                 self.keep_detected_grid(d, fixed);
-                self.log(format!("Deck {}: BPM {:.1} → {:.1}, from the steady beats All-In-One hears", d + 1, grid.bpm, fixed.bpm));
+                self.log(format!("Deck {}: BPM {:.1} → {:.1}, from {why}", d + 1, grid.bpm, fixed.bpm));
                 return;
             }
         }
@@ -3434,7 +3440,7 @@ pub(crate) mod tests {
             pump(e, c);
             c.snap.decks[0].beat
         };
-        c.on_stems_update(Update::Sections { deck: 0, track_id: id, found: found.clone(), cues: None });
+        c.on_stems_update(Update::Sections { deck: 0, track_id: id, found: found.clone(), cues: None, drums: None });
         assert!(c.status.iter().any(|(_, m)| m.contains("corrected") && m.contains("bars start")), "{:?}", c.status);
         // Now the heard downbeat at 0.5 s is a bar's first beat (the deck sits at 0 s).
         let at_half = beat_now(&mut e, &mut c) + 1.0;
@@ -3445,7 +3451,7 @@ pub(crate) mod tests {
             c.decks[0].info.as_mut().unwrap().cues[i] = Some(Cue { kind: CueKind::Hot, secs: g.secs_at_beat(t * 2.0), end_secs: None, name: String::new(), color: [0; 3] });
         }
         c.status.clear();
-        c.on_stems_update(Update::Sections { deck: 0, track_id: id, found, cues: None });
+        c.on_stems_update(Update::Sections { deck: 0, track_id: id, found, cues: None, drums: None });
         assert!(!c.status.iter().any(|(_, m)| m.contains("corrected")), "{:?}", c.status);
         assert!((beat_now(&mut e, &mut c) - g.beat_at(0.0)).abs() < 0.05, "grid kept");
         assert_eq!(c.decks[0].sections, None, "no sections found: none shown");
@@ -3468,7 +3474,7 @@ pub(crate) mod tests {
         // starting on the first.
         let beats: Vec<Beat> = (0..52).map(|k| Beat { secs: 0.75 * k as f64, downbeat: if k % 4 == 0 { 0.9 } else { 0.1 } }).collect();
         let found = Arc::new(Structure { sections: vec![], beats });
-        c.on_stems_update(Update::Sections { deck: 0, track_id: id, found: found.clone(), cues: None });
+        c.on_stems_update(Update::Sections { deck: 0, track_id: id, found: found.clone(), cues: None, drums: None });
         assert!(c.status.iter().any(|(_, m)| m.contains("BPM 120.0 → 80.0")), "{:?}", c.status);
         pump(&mut e, &mut c);
         assert!((c.snap.decks[0].track_bpm - 80.0).abs() < 0.01, "{}", c.snap.decks[0].track_bpm);
@@ -3484,8 +3490,38 @@ pub(crate) mod tests {
         assert!((c.snap.decks[0].track_bpm - 80.0).abs() < 0.01, "{}", c.snap.decks[0].track_bpm);
         c.status.clear();
         let id = c.decks[0].info.as_ref().unwrap().track_id;
-        c.on_stems_update(Update::Sections { deck: 0, track_id: id, found, cues: None });
+        c.on_stems_update(Update::Sections { deck: 0, track_id: id, found, cues: None, drums: None });
         assert!(!c.status.iter().any(|(_, m)| m.contains("→") || m.contains("corrected")), "{:?}", c.status);
+    }
+
+    #[test]
+    fn the_drum_stem_settles_a_bpm_the_heard_beats_cannot() {
+        use crate::stems::{Beat, Structure, Update};
+        let (mut e, mut c, _config) = core();
+        c.load_track(0, &kick_wav("drum-bpm.wav", 40));
+        let deadline = Instant::now() + std::time::Duration::from_secs(60);
+        while !(c.snap.decks[0].loaded && c.decks[0].info.is_some()) {
+            assert!(Instant::now() < deadline, "track never loaded");
+            pump(&mut e, &mut c);
+        }
+        let id = c.decks[0].info.as_ref().unwrap().track_id;
+        // The model's beats wander (every third interval 20 % long); the drum stem keeps 150.
+        let mut t = 0.0;
+        let beats: Vec<Beat> = (0..60)
+            .map(|k| {
+                t += if k % 3 == 0 { 0.48 } else { 0.4 };
+                Beat { secs: t, downbeat: 0.1 }
+            })
+            .collect();
+        let found = Arc::new(Structure { sections: vec![], beats });
+        // Without the drums' grid: nothing to go on.
+        c.on_stems_update(Update::Sections { deck: 0, track_id: id, found: found.clone(), cues: None, drums: None });
+        assert!(!c.status.iter().any(|(_, m)| m.contains("→")), "{:?}", c.status);
+        let drums = dj_engine::track::BeatGrid { bpm: 150.0, anchor_secs: 0.0 };
+        c.on_stems_update(Update::Sections { deck: 0, track_id: id, found, cues: None, drums: Some(drums) });
+        assert!(c.status.iter().any(|(_, m)| m.contains("BPM 120.0 → 150.0, from the drum stem")), "{:?}", c.status);
+        pump(&mut e, &mut c);
+        assert!((c.snap.decks[0].track_bpm - 150.0).abs() < 0.01, "{}", c.snap.decks[0].track_bpm);
     }
 
     #[test]

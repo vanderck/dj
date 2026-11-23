@@ -962,20 +962,11 @@ pub fn check_beats(beat_at: impl Fn(f64) -> f64, spb: f64, beats: &[(f64, f32)])
 /// On GiantSteps (Beatport's BPMs): of 66 tracks the detector got wrong, this fixed 25; of
 /// the tracks it got right, it changed none. (Unsteady heard beats were wrong as often as not.)
 pub fn tempo_from_beats(grid: &BeatGrid, beats: &[(f64, f32)]) -> Option<BeatGrid> {
-    if beats.len() < 32 {
+    let (med, steady) = steadiness(beats)?;
+    if steady < STEADY {
         return None;
     }
     let ibi: Vec<f64> = beats.windows(2).map(|w| w[1].0 - w[0].0).collect();
-    let mut sorted = ibi.clone();
-    sorted.sort_by(f64::total_cmp);
-    let med = sorted[sorted.len() / 2];
-    if med <= 0.0 {
-        return None;
-    }
-    let steady = ibi.iter().filter(|i| (*i / med - 1.0).abs() < 0.05).count() as f64 / ibi.len() as f64;
-    if steady < 0.85 {
-        return None;
-    }
     // Number the beats (a gap of two intervals is a beat not heard), then a straight line
     // through them, once more without the beats off it by more than 40 ms.
     let mut n = 0.0;
@@ -998,14 +989,57 @@ pub fn tempo_from_beats(grid: &BeatGrid, beats: &[(f64, f32)]) -> Option<BeatGri
     if !(60.0..=200.0).contains(&bpm) || (bpm / grid.bpm - 1.0).abs() < 0.04 {
         return None;
     }
-    // Bars from the heard downbeats, then moved back by whole bars to the start of the track.
-    let g = BeatGrid { bpm, anchor_secs: a };
+    Some(bars_from_beats(BeatGrid { bpm, anchor_secs: a }, beats))
+}
+
+/// Heard beats steady enough to take their tempo: this share of the beat intervals within 5 %
+/// of their median.
+const STEADY: f64 = 0.85;
+
+/// The heard beats' median interval and the share of intervals within 5 % of it (`None` with
+/// fewer than 32 beats).
+fn steadiness(beats: &[(f64, f32)]) -> Option<(f64, f64)> {
+    if beats.len() < 32 {
+        return None;
+    }
+    let ibi: Vec<f64> = beats.windows(2).map(|w| w[1].0 - w[0].0).collect();
+    let mut sorted = ibi.clone();
+    sorted.sort_by(f64::total_cmp);
+    let med = sorted[sorted.len() / 2];
+    (med > 0.0).then(|| (med, ibi.iter().filter(|i| (*i / med - 1.0).abs() < 0.05).count() as f64 / ibi.len() as f64))
+}
+
+/// A grid's bars moved to where the heard beats have downbeats, then back by whole bars to the
+/// start of the track.
+fn bars_from_beats(g: BeatGrid, beats: &[(f64, f32)]) -> BeatGrid {
+    let spb = g.seconds_per_beat();
     let a = match check_beats(|t| g.beat_at(t), spb, beats) {
-        Some(c) => a + (grid_shift(&c, |t| g.beat_at(t), &[]).1 + if c.offbeat { 0.5 } else { 0.0 }) * spb,
-        None => a,
+        Some(c) => g.anchor_secs + (grid_shift(&c, |t| g.beat_at(t), &[]).1 + if c.offbeat { 0.5 } else { 0.0 }) * spb,
+        None => g.anchor_secs,
     };
     let bar = 4.0 * spb;
-    Some(BeatGrid { bpm, anchor_secs: a - (a / bar).floor() * bar })
+    BeatGrid { bpm: g.bpm, anchor_secs: a - (a / bar).floor() * bar }
+}
+
+/// Whether the heard beats are there (at least 32) but not steady enough for
+/// [`tempo_from_beats`]: then the drum stem's tempo is worth a look ([`tempo_from_drums`]).
+pub fn beats_unsteady(beats: &[(f64, f32)]) -> bool {
+    steadiness(beats).is_some_and(|(_, steady)| steady < STEADY)
+}
+
+/// A detected grid's tempo checked against the drum stem's (`drums`: [`detect_grid`] on the
+/// drums alone), when the heard beats are there but unsteady (see [`beats_unsteady`]): a drum
+/// tempo more than 4 % from the grid's, on the drums with bars where the heard beats have
+/// downbeats. (Without the rest of the music, the detector takes the beat the drums play
+/// rather than a bass line's or a vocal's.)
+///
+/// On GiantSteps: of 42 tracks still wrong after [`tempo_from_beats`], this fixed 5; on the 50
+/// right ones, the drums alone gave another tempo once, where the heard beats were steady.
+pub fn tempo_from_drums(grid: &BeatGrid, drums: &BeatGrid, beats: &[(f64, f32)]) -> Option<BeatGrid> {
+    if !beats_unsteady(beats) || !(60.0..=200.0).contains(&drums.bpm) || (drums.bpm / grid.bpm - 1.0).abs() < 0.04 {
+        return None;
+    }
+    Some(bars_from_beats(*drums, beats))
 }
 
 #[cfg(test)]
@@ -1240,6 +1274,34 @@ pub(crate) mod tests {
             })
             .collect();
         assert_eq!(tempo_from_beats(&BeatGrid { bpm: 85.33, anchor_secs: 0.3 }, &wobbly), None);
+    }
+
+    #[test]
+    fn the_drums_tempo_counts_when_the_heard_beats_wander() {
+        // Heard beats around 150 BPM that wander (every third interval 20 % long), downbeats on
+        // the 2nd; the detector said 120 on the mix, 150 on the drums.
+        let spb = 60.0 / 150.0;
+        let mut t = 0.2;
+        let wobbly: Vec<(f64, f32)> = (0..200)
+            .map(|k| {
+                t += if k % 3 == 0 { 1.2 * spb } else { spb };
+                (t, 0.1)
+            })
+            .collect();
+        assert!(beats_unsteady(&wobbly));
+        let mix = BeatGrid { bpm: 120.0, anchor_secs: 0.1 };
+        let drums = BeatGrid { bpm: 150.0, anchor_secs: 1.9 };
+        let g = tempo_from_drums(&mix, &drums, &wobbly).expect("the drums' tempo");
+        assert_eq!(g.bpm, 150.0);
+        assert!((g.beat_at(1.9) - g.beat_at(1.9).round()).abs() < 1e-9 && g.anchor_secs < 4.0 * spb, "on the drums' beats, from the first bar: {g:?}");
+        // The drums agree with the mix (within 4 %), or say something out of range: left alone.
+        assert_eq!(tempo_from_drums(&mix, &BeatGrid { bpm: 122.0, anchor_secs: 0.1 }, &wobbly), None);
+        assert_eq!(tempo_from_drums(&mix, &BeatGrid { bpm: 240.0, anchor_secs: 0.1 }, &wobbly), None);
+        // Steady heard beats are trusted over the drums (see tempo_from_beats); too few say nothing.
+        let steady: Vec<(f64, f32)> = (0..200).map(|k| (0.1 + 0.5 * k as f64, 0.1)).collect();
+        assert!(!beats_unsteady(&steady) && !beats_unsteady(&wobbly[..20]));
+        assert_eq!(tempo_from_drums(&mix, &drums, &steady), None);
+        assert_eq!(tempo_from_drums(&mix, &drums, &wobbly[..20]), None);
     }
 
     #[test]

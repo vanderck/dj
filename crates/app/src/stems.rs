@@ -25,7 +25,9 @@ pub enum Update {
     /// The track's sections (intro, verse, chorus…), found with its stems after `Done` (empty if
     /// that failed); `cues`: cue points on them, when the request asked for cue points (they wait
     /// for the sections then).
-    Sections { deck: usize, track_id: u64, found: Arc<Structure>, cues: Option<Vec<Cue>> },
+    /// `drums`: the drum stem's grid, for a detected grid the heard beats can't settle (see
+    /// `analysis::tempo_from_drums`).
+    Sections { deck: usize, track_id: u64, found: Arc<Structure>, cues: Option<Vec<Cue>>, drums: Option<dj_engine::track::BeatGrid> },
 }
 
 pub use stems_core::structure::{Beat, Section};
@@ -269,13 +271,15 @@ fn sections(job: &SectionJob, tx: &Sender<Update>, model: &mut StructureCache) {
             }
         }
     };
+    let heard: Vec<(f64, f32)> = found.beats.iter().map(|b| (b.secs, b.downbeat)).collect();
+    // Heard beats too unsteady to correct a detected tempo with: the drum stem's.
+    let drums = (job.tempo_from_beats && job.track.grid.is_some() && dj_library::analysis::beats_unsteady(&heard)).then(|| drum_grid(&job.stems, job.track.audio.sample_rate)).flatten();
     // Cue points: detected from the sound and stems, then placed on the sections and named after
     // them (without sections, as detected).
     let cues = match (job.detect_cues, job.track.grid) {
         (true, Some(grid)) => {
             // (On the grid the deck will have.)
-            let heard: Vec<(f64, f32)> = found.beats.iter().map(|b| (b.secs, b.downbeat)).collect();
-            let grid = job.tempo_from_beats.then(|| dj_library::analysis::tempo_from_beats(&grid, &heard)).flatten().unwrap_or(grid);
+            let grid = job.tempo_from_beats.then(|| corrected_grid(&grid, &heard, drums.as_ref())).flatten().unwrap_or(grid);
             let audio = &job.track.audio;
             let env = dj_library::analysis::Envelope::compute(audio);
             let detected = dj_library::analysis::detect_cues(audio, &env, &grid, Some(&job.stems));
@@ -285,7 +289,21 @@ fn sections(job: &SectionJob, tx: &Sender<Update>, model: &mut StructureCache) {
         }
         _ => None,
     };
-    let _ = tx.send(Update::Sections { deck: job.deck, track_id: job.track.id, found: Arc::new(found), cues });
+    let _ = tx.send(Update::Sections { deck: job.deck, track_id: job.track.id, found: Arc::new(found), cues, drums });
+}
+
+/// The beat grid [`analysis::detect_grid`](dj_library::analysis::detect_grid) finds on the drum
+/// stem alone.
+pub fn drum_grid(stems: &StemData, sample_rate: u32) -> Option<dj_engine::track::BeatGrid> {
+    let s = stems.scale;
+    let drums = dj_engine::track::AudioData { sample_rate, frames: stems.drums.iter().map(|f| [f[0] as f32 * s, f[1] as f32 * s]).collect() };
+    dj_library::analysis::detect_grid(&dj_library::analysis::Envelope::compute(&drums)).map(|t| t.grid)
+}
+
+/// A detected grid's tempo corrected from the beats All-In-One hears when they're steady, else
+/// from the drum stem's grid (`drums`) when they aren't. `None`: the grid stays.
+pub fn corrected_grid(grid: &dj_engine::track::BeatGrid, heard: &[(f64, f32)], drums: Option<&dj_engine::track::BeatGrid>) -> Option<dj_engine::track::BeatGrid> {
+    dj_library::analysis::tempo_from_beats(grid, heard).or_else(|| drums.and_then(|d| dj_library::analysis::tempo_from_drums(grid, d, heard)))
 }
 
 /// As text: a line per section, "section start end label", and per beat, "beat secs downbeat".
