@@ -606,6 +606,7 @@ impl Core {
     /// Ask the stems worker for this deck's stems (and cue points from them, if `detect_cues`).
     fn request_stems(&mut self, d: usize, path: &Path, detect_cues: bool) {
         let Some(track) = self.loaded_track(d) else { return };
+        let tempo_from_beats = self.decks[d].info.as_ref().is_some_and(|i| i.grid_source == Some(GridSource::Detected)) && track.tempo_map.is_none();
         // (Progress shows once separation starts; prepared stems just arrive.)
         self.decks[d].stems_progress = None;
         self.decks[d].stems_missing = None;
@@ -615,6 +616,7 @@ impl Core {
             path: path.to_path_buf(),
             demucs: self.settings.stems_demucs.clone().filter(|p| p.exists()),
             detect_cues,
+            tempo_from_beats,
             prepared: Some(self.settings.stems_prepared_dir()),
             // (Again when cue points are wanted: they're placed on the sections, kept on disk.)
             sections: self.settings.song_sections && (self.decks[d].sections.is_none() || detect_cues),
@@ -764,8 +766,18 @@ impl Core {
         let Some(info) = self.decks[d].info.as_ref() else { return };
         let Some(grid) = track.grid else { return };
         let heard: Vec<(f64, f32)> = beats.iter().map(|b| (b.secs, b.downbeat)).collect();
-        let spb = grid.seconds_per_beat();
         let map = track.tempo_map.clone();
+        // A detected tempo the heard beats steadily disagree with: theirs (the detector took
+        // double, half or 3:2 of the beat). Kept, and shown in the library.
+        if info.grid_source == Some(GridSource::Detected) && map.is_none() {
+            if let Some(fixed) = dj_library::analysis::tempo_from_beats(&grid, &heard) {
+                self.deck_cmd(d, DeckCmd::SetGrid(Some(fixed)));
+                self.keep_detected_grid(d, fixed);
+                self.log(format!("Deck {}: BPM {:.1} → {:.1}, from the steady beats All-In-One hears", d + 1, grid.bpm, fixed.bpm));
+                return;
+            }
+        }
+        let spb = grid.seconds_per_beat();
         let beat_at = |t: f64| map.as_ref().map_or_else(|| grid.beat_at(t), |m| m.beat_at(t));
         let Some(check) = dj_library::analysis::check_beats(beat_at, spb, &heard) else { return };
         let (half, bars, cues_say_bars) = dj_library::analysis::grid_shift(&check, beat_at, &info.cues);
@@ -792,6 +804,23 @@ impl Core {
         let fixed = dj_engine::track::BeatGrid { bpm: grid.bpm, anchor_secs: grid.anchor_secs + (half + bars) * spb };
         self.deck_cmd(d, DeckCmd::SetGrid(Some(fixed)));
         self.log(format!("Deck {}: grid corrected from the beats All-In-One hears: {what}", d + 1));
+    }
+
+    /// Keep a detected grid corrected on a deck (unless the track is locked), and show its BPM in
+    /// the library.
+    fn keep_detected_grid(&mut self, d: usize, grid: dj_engine::track::BeatGrid) {
+        let Some(info) = self.decks[d].info.as_ref() else { return };
+        if info.locked {
+            return;
+        }
+        let path = info.path.clone();
+        let o = self.trackdb.tracks.entry(TrackDb::key(&path)).or_default();
+        o.grid = Some(grid);
+        o.grid_detected = true;
+        if let Some(e) = self.library.iter_mut().find(|e| e.path == path) {
+            e.bpm = Some(grid.bpm);
+        }
+        self.mark_dirty();
     }
 
     /// Keep a deck's mix profile once its track is fully analysed, so it can be suggested and
@@ -845,11 +874,23 @@ impl Core {
             }
         }
         let Some(st) = self.preparer.as_ref().map(|p| p.state()) else { return };
-        // Keys found while preparing (tracks without a key tag): kept, and shown in the library.
-        for (path, k) in self.preparer.as_ref().map(|p| p.take_keys()).unwrap_or_default() {
-            self.trackdb.tracks.entry(TrackDb::key(&path)).or_default().key = Some(k);
-            if let Some(e) = self.library.iter_mut().find(|e| e.path == path && e.key.is_none()) {
-                e.key = Some(k);
+        // Keys found while preparing (tracks without a key tag), and detected tempos the heard
+        // beats corrected: kept, and shown in the library.
+        for f in self.preparer.as_ref().map(|p| p.take_found()).unwrap_or_default() {
+            let o = self.trackdb.tracks.entry(TrackDb::key(&f.path)).or_default();
+            if let Some(k) = f.key {
+                o.key = Some(k);
+            }
+            let grid = f.grid.filter(|_| !o.locked);
+            if let Some(g) = grid {
+                o.grid = Some(g);
+                o.grid_detected = true;
+            }
+            if let Some(e) = self.library.iter_mut().find(|e| e.path == f.path) {
+                e.key = e.key.or(f.key);
+                if let Some(g) = grid {
+                    e.bpm = Some(g.bpm);
+                }
             }
             self.mark_dirty();
         }
@@ -3408,6 +3449,43 @@ pub(crate) mod tests {
         assert!(!c.status.iter().any(|(_, m)| m.contains("corrected")), "{:?}", c.status);
         assert!((beat_now(&mut e, &mut c) - g.beat_at(0.0)).abs() < 0.05, "grid kept");
         assert_eq!(c.decks[0].sections, None, "no sections found: none shown");
+    }
+
+    #[test]
+    fn steady_heard_beats_correct_a_detected_bpm_and_it_is_kept() {
+        use crate::stems::{Beat, Structure, Update};
+        let (mut e, mut c, _config) = core();
+        let path = kick_wav("retempo.wav", 40);
+        c.load_track(0, &path);
+        let deadline = Instant::now() + std::time::Duration::from_secs(60);
+        while !(c.snap.decks[0].loaded && c.decks[0].info.is_some()) {
+            assert!(Instant::now() < deadline, "track never loaded");
+            pump(&mut e, &mut c);
+        }
+        assert_eq!(c.decks[0].info.as_ref().unwrap().grid_source, Some(GridSource::Detected));
+        let id = c.decks[0].info.as_ref().unwrap().track_id;
+        // The model hears a steady beat every 0.75 s (80 BPM; the detector said 120), the bars
+        // starting on the first.
+        let beats: Vec<Beat> = (0..52).map(|k| Beat { secs: 0.75 * k as f64, downbeat: if k % 4 == 0 { 0.9 } else { 0.1 } }).collect();
+        let found = Arc::new(Structure { sections: vec![], beats });
+        c.on_stems_update(Update::Sections { deck: 0, track_id: id, found: found.clone(), cues: None });
+        assert!(c.status.iter().any(|(_, m)| m.contains("BPM 120.0 → 80.0")), "{:?}", c.status);
+        pump(&mut e, &mut c);
+        assert!((c.snap.decks[0].track_bpm - 80.0).abs() < 0.01, "{}", c.snap.decks[0].track_bpm);
+        // Kept as the detected grid: the next load plays at 80.
+        let o = c.trackdb.tracks.get(&TrackDb::key(&path)).expect("kept");
+        assert!(o.grid_detected && o.grid.is_some_and(|g| (g.bpm - 80.0).abs() < 0.01 && g.anchor_secs.abs() < 0.01), "{o:?}");
+        // Loaded again: at 80, and the heard beats find nothing to correct.
+        c.load_track(0, &path);
+        while c.decks[0].info.as_ref().is_none_or(|i| i.track_id == id) || !c.snap.decks[0].loaded {
+            assert!(Instant::now() < deadline, "track never loaded again");
+            pump(&mut e, &mut c);
+        }
+        assert!((c.snap.decks[0].track_bpm - 80.0).abs() < 0.01, "{}", c.snap.decks[0].track_bpm);
+        c.status.clear();
+        let id = c.decks[0].info.as_ref().unwrap().track_id;
+        c.on_stems_update(Update::Sections { deck: 0, track_id: id, found, cues: None });
+        assert!(!c.status.iter().any(|(_, m)| m.contains("→") || m.contains("corrected")), "{:?}", c.status);
     }
 
     #[test]
