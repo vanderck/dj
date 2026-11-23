@@ -174,6 +174,8 @@ pub struct AutoMix {
     /// The new deck has been seen playing (or about to) since: the engine started it. Until
     /// then (its first blocks after `start_mix`), not playing is not a reason to give up.
     in_seen: bool,
+    /// The old track has played to its end (the mix carries on bringing the new one in).
+    old_over: bool,
 }
 
 /// After a Now mix: bring the new track's vocals back where its next vocal phrase starts.
@@ -1133,6 +1135,7 @@ impl Core {
             in_semitones: self.snap.decks[i].semitones,
             started: std::time::Instant::now(),
             in_seen: false,
+            old_over: false,
             plan,
         };
         // Its key fitted to the playing track's, while it's still silent.
@@ -1465,12 +1468,17 @@ impl Core {
             let path = i.path.clone();
             self.autodj.as_mut().unwrap().played.insert(path);
         }
-        if self.automix.is_some() || self.decks[q].loading.is_some() {
+        // While a mix runs, nothing new: unless its old track is over (that deck stopped), then
+        // the next track loads there already (a long mix may outlast the new track's time to
+        // load: else the music could run out first). It mixes once this mix is done.
+        let old_done = self.automix.as_ref().is_some_and(|m| m.plan.outgoing == q && !self.snap.decks[q].playing);
+        if (self.automix.is_some() && !old_done) || self.decks[q].loading.is_some() {
             return;
         }
         let a = self.autodj.as_ref().unwrap();
         let waiting = self.decks[q].info.as_ref().filter(|i| a.set.contains(&i.path) && !a.played.contains(&i.path)).map(|i| (i.track_id, i.cues_pending));
         match waiting {
+            Some(_) if self.automix.is_some() => {}
             Some((id, cues_pending)) => {
                 let since = match a.loaded {
                     Some((d, t, at)) if d == q && t == id => at,
@@ -1556,8 +1564,15 @@ impl Core {
             self.automix.as_mut().unwrap().in_seen = true;
         }
         let m = self.automix.as_ref().unwrap();
+        if old_ended && vo.track_id == m.tracks.1 && !m.old_over {
+            self.automix.as_mut().unwrap().old_over = true;
+        }
+        let m = self.automix.as_ref().unwrap();
         let in_stopped = !in_on && (m.in_seen || m.started.elapsed() > MIX_START_GRACE);
-        if (vi.track_id, vo.track_id) != m.tracks || !vi.loaded || !vo.loaded || !(vo.playing || old_ended) || in_stopped {
+        // The old track over and the new one in: another track on the old deck (Auto-DJ's next,
+        // loaded early so it's ready in time) ends the mix as done rather than undoing it.
+        let finish = m.old_over && m.released && vi.track_id == m.tracks.0 && vi.loaded && !in_stopped && (vo.track_id != m.tracks.1 || !vo.loaded);
+        if !finish && ((vi.track_id, vo.track_id) != m.tracks || !vi.loaded || !vo.loaded || !(vo.playing || old_ended) || in_stopped) {
             self.cancel_mix();
             return;
         }
@@ -1593,7 +1608,7 @@ impl Core {
         if beat < start {
             return;
         }
-        let p = (beat - start) / len;
+        let p = if finish { 1.0 } else { (beat - start) / len };
         let (how, external, swapped) = (m.plan.how, m.external, m.swapped);
         let (out_volume, in_low, out_low, in_high, out_high, out_mid, in_mid) =
             (m.out_volume, m.in_low, m.out_low, m.in_high, m.out_high, m.out_mid, m.in_mid);
