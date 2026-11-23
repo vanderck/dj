@@ -98,6 +98,11 @@ impl Profile {
         (!bars.is_empty()).then(|| Self::new(path, grid.bpm, &bars, cue_bars, sections))
     }
 
+    /// How much of the track has vocals (see [`Bars::vocal_share`]).
+    pub fn vocals(&self) -> Option<u8> {
+        self.bars.vocal_share()
+    }
+
     /// The track bar by bar, ready for the transition search.
     pub fn bars(&self) -> Bars {
         let sections: Vec<Section> = self.sections.iter().filter_map(|(a, b, l)| Some(Section { start: *a, end: *b, label: stems_core::structure::label(l)? })).collect();
@@ -111,8 +116,9 @@ pub enum Prepared {
     /// Already prepared (as far as the settings allow).
     Already,
     /// Done: whether stems were separated now, whether it has sections, its key if it was
-    /// detected now (no key tag), and its detected grid if the heard beats corrected its tempo.
-    Done { separated: bool, sections: bool, key: Option<dj_library::key::Key>, grid: Option<dj_engine::track::BeatGrid> },
+    /// detected now (no key tag), its detected grid if the heard beats corrected its tempo, and
+    /// how much of it has vocals (with stems).
+    Done { separated: bool, sections: bool, key: Option<dj_library::key::Key>, grid: Option<dj_engine::track::BeatGrid>, vocals: Option<u8> },
 }
 
 /// Prepare a track for mixing ahead of time, as loading it on a deck would: its grid (checked
@@ -155,7 +161,7 @@ pub fn prepare_track(
     let wave = stems.as_ref().map(|s| StemWave::compute(&audio.frames, audio.sample_rate, s));
     let profile = Profile::build(path, &lt.waveform, wave.as_ref(), grid, audio.duration_secs(), &lt.track.cues, lt.tags.energy, &found.sections).ok_or("too short")?;
     write(dir, path, &profile).map_err(|e| format!("writing the profile: {e}"))?;
-    Ok(Prepared::Done { separated, sections: !found.sections.is_empty(), key: lt.detected.key.map(|(k, _)| k), grid: retempo })
+    Ok(Prepared::Done { separated, sections: !found.sections.is_empty(), key: lt.detected.key.map(|(k, _)| k), grid: retempo, vocals: profile.vocals() })
 }
 
 #[cfg(test)]
@@ -179,6 +185,7 @@ mod tests {
         assert_eq!((b.len(), b.intro_end(), b.phrase, b.label(10)), (32, 8, 4, "chorus"));
         assert!(b.starts_section(8));
         assert!(back.stems && back.bpm == 120.0 && back.cue_bars == vec![0.0, 8.0]);
+        assert_eq!(back.vocals(), Some(38), "vocals in 12 of its 32 bars");
         // The file changed: made again.
         std::fs::write(&track, b"other audio, other length").unwrap();
         assert!(read(&dir, &track).is_none());
@@ -194,13 +201,14 @@ pub struct Preparer {
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
-/// What preparing a track found for the app to keep: its key (no key tag), and its detected
-/// grid when the heard beats corrected its tempo.
+/// What preparing a track found for the app to keep: its key (no key tag), its detected grid
+/// when the heard beats corrected its tempo, and how much of it has vocals.
 #[derive(Clone, Debug)]
 pub struct Found {
     pub path: PathBuf,
     pub key: Option<dj_library::key::Key>,
     pub grid: Option<dj_engine::track::BeatGrid>,
+    pub vocals: Option<u8>,
 }
 
 /// How far a [`Preparer`] is.
@@ -253,11 +261,15 @@ impl Preparer {
                     if let Err(e) = &r {
                         eprintln!("prepare {}: {e}", path.display());
                     }
-                    if let Ok(Prepared::Done { key, grid, .. }) = &r {
-                        if key.is_some() || grid.is_some() {
-                            if let Ok(mut ks) = ks.lock() {
-                                ks.push(Found { path: path.clone(), key: *key, grid: *grid });
-                            }
+                    // (Prepared before: how much of it has vocals, from its profile.)
+                    let found = match &r {
+                        Ok(Prepared::Done { key, grid, vocals, .. }) => Found { path: path.clone(), key: *key, grid: *grid, vocals: *vocals },
+                        Ok(Prepared::Already) => Found { path: path.clone(), key: None, grid: None, vocals: read(&dir, &path).and_then(|p| p.vocals()) },
+                        Err(_) => Found { path: path.clone(), key: None, grid: None, vocals: None },
+                    };
+                    if found.key.is_some() || found.grid.is_some() || found.vocals.is_some() {
+                        if let Ok(mut ks) = ks.lock() {
+                            ks.push(found);
                         }
                     }
                     set(&|s| {

@@ -24,6 +24,9 @@ pub struct Entry {
     pub bpm: Option<f64>,
     pub key: Option<Key>,
     pub energy: Option<u8>,
+    /// How much of the track has vocals (0–100 %), once its stems were separated.
+    #[serde(default)]
+    pub vocals: Option<u8>,
     pub cue_count: usize,
     pub modified: u64,
 }
@@ -44,6 +47,7 @@ impl Entry {
             bpm: t.bpm,
             key: t.key,
             energy: t.energy,
+            vocals: None,
             cue_count: t.cues.len(),
             modified: mtime(path),
         }
