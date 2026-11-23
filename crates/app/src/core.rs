@@ -3986,6 +3986,27 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn vocals_held_out_of_a_mix_come_back_even_without_a_vocal_phrase_to_wait_for() {
+        let (mut e, mut c, _config) = core();
+        mix_setup(&mut e, &mut c);
+        // A plan that keeps the new vocals out to its end, and no vocal waveform for the new
+        // track (not computed yet, or no phrase that clears): nothing to wait for.
+        let mut plan = c.plan_now(1, 0, crate::settings::MixStyle::Stems);
+        let b = plan.blend.as_mut().expect("a blend");
+        b.in_at[2] = Some(b.bars as f64);
+        c.decks[1].stem_wave = None;
+        c.start_mix(plan);
+        run_mix(&mut e, &mut c, |_, _| {});
+        assert_eq!(c.snap.decks[1].stem_gains[2], 0.0, "held out to the end of the mix");
+        // Back over a bar: the new track all in, not left without its vocals.
+        for _ in 0..200 {
+            pump(&mut e, &mut c);
+        }
+        assert_eq!(c.snap.decks[1].stem_gains, [1.0; 4]);
+        assert!(c.vocal_return.is_none());
+    }
+
+    #[test]
     fn after_a_mix_the_new_track_eases_back_to_its_own_tempo() {
         let (mut e, mut c, _config) = core();
         mix_setup(&mut e, &mut c);

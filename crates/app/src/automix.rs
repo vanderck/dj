@@ -1748,12 +1748,11 @@ impl Core {
                 self.set_stem_levels(i, [1.0, 1.0, if vocals_out { 0.0 } else { 1.0 }, 1.0], in_stems);
             }
             if vocals_out {
-                self.vocal_return = self.next_vocal_phrase(i).map(|b| VocalReturn {
-                    deck: i,
-                    track_id: vi.track_id,
-                    at_clock: self.snap.clock.beat + (b - vi.beat),
-                    level: in_stems[VOCALS],
-                });
+                // On its next phrase with vocals; none found (no vocal waveform yet, or none
+                // that clear): right away. Never left out for the rest of the track.
+                let clock = self.snap.clock.beat;
+                let at_clock = self.next_vocal_phrase(i).map_or(clock, |b| clock + (b - vi.beat));
+                self.vocal_return = Some(VocalReturn { deck: i, track_id: vi.track_id, at_clock, level: in_stems[VOCALS] });
             }
             // Its own key again, on its next phrase line (8 bars of its grid, a bar away at
             // least), if the mix shifted it to fit.
