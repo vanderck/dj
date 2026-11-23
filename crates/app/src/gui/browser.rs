@@ -45,7 +45,7 @@ const COLS: [(Option<Col>, &str, f32, bool); 11] = [
 const INSTRUMENTAL: u8 = 5;
 
 /// Fits: tempo window around the reference deck's BPM.
-use crate::core::automix::{fit_score, key_rank, mix_bonus, FITS_PCT};
+use crate::core::automix::{fit_score, key_fit, mix_bonus, FITS_PCT};
 
 fn mmss(s: Option<f64>) -> String {
     s.map(|s| format!("{}:{:02}", (s / 60.0) as u32, (s % 60.0) as u32)).unwrap_or_default()
@@ -200,7 +200,7 @@ pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect) {
     let w = pill_width(ui, &fits_label, 13.0) + 14.0;
     let fr = Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, bar_h));
     let resp = ui.allocate_rect(fr, Sense::click()).on_hover_text(format!(
-        "What to play next: tracks in a compatible key within {FITS_PCT:.0} % of the master deck's tempo, best first: the key, the tempo, the energy (level or a step up), and for prepared tracks how well dj would actually mix them in (hover a track for how)"
+        "What to play next: tracks in a compatible key (or one a semitone off, which the mix shifts to fit: \"+1 st\") within {FITS_PCT:.0} % of the master deck's tempo, best first: the key, the tempo, the energy (level or a step up), and for prepared tracks how well dj would actually mix them in (hover a track for how)"
     ));
     let p = ui.painter();
     let rad = CornerRadius::same((bar_h / 2.0) as u8);
@@ -298,7 +298,7 @@ pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect) {
         let lib = &core.library;
         rows.retain(|&i| {
             let e = &lib[i];
-            let key_ok = e.key.is_some_and(|k| key_rank(k.compat(rk)).is_some());
+            let key_ok = e.key.is_some_and(|k| key_fit(k, rk).is_some());
             let bpm_ok = match (ref_bpm, e.bpm) {
                 (Some(r), Some(b)) => 100.0 * (b / r - 1.0).abs() <= FITS_PCT,
                 (Some(_), None) => false,
@@ -452,9 +452,12 @@ pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect) {
             }
             x += widths[4];
             if let (Some(k), Some(rk)) = (e.key, reference) {
-                let tag = match k.compat(rk) {
-                    Compat::Same | Compat::Adjacent | Compat::Relative => Some("Match"),
-                    Compat::Boost => Some("Boost"),
+                // A key the mix shifts a semitone to fit: by how much.
+                let tag = match (rk.compat(k), key_fit(k, rk)) {
+                    (Compat::Same | Compat::Adjacent | Compat::Relative, _) => Some("Match"),
+                    (Compat::Boost, _) => Some("Boost"),
+                    (_, Some((_, 1))) => Some("+1 st"),
+                    (_, Some((_, -1))) => Some("−1 st"),
                     _ => None,
                 };
                 if let Some(t) = tag {
@@ -553,8 +556,30 @@ mod tests {
         let adjacent_exact = fit_score(&entry("9A", 124.0), r, Some(124.0), None);
         let boost = fit_score(&entry("10A", 124.0), r, Some(124.0), None);
         assert!(same_near < same_far && same_far < adjacent_exact && adjacent_exact < boost);
-        assert_eq!(key_rank(Key::parse("8B").unwrap().compat(r)), Some(1)); // relative
-        assert_eq!(key_rank(Key::parse("3A").unwrap().compat(r)), None); // clash
+        assert_eq!(key_fit(Key::parse("8B").unwrap(), r), Some((1, 0))); // relative
+    }
+
+    #[test]
+    fn fits_takes_keys_the_mix_shifts_a_semitone_after_the_natural_ones() {
+        // 10A (B minor): 3A (B♭ minor) is a semitone below, 5A (C minor) one above; the mix
+        // shifts them up or down to 10A. 4B (A♭ major) is a tritone from 10A's relative D major:
+        // out. 9B and 11B (diagonal): out too, as the mix itself treats them as a clash.
+        let r = Key::parse("10A").unwrap();
+        let k = |s: &str| Key::parse(s).unwrap();
+        assert_eq!(key_fit(k("3A"), r), Some((3, 1)));
+        assert_eq!(key_fit(k("5A"), r), Some((3, -1)));
+        assert_eq!(key_fit(k("4B"), r), None);
+        assert_eq!(key_fit(k("11B"), r), None);
+        assert_eq!(key_fit(k("9B"), r), None);
+        let fits: Vec<_> = (1..=12).flat_map(|n| ["A", "B"].map(|m| format!("{n}{m}"))).filter(|s| key_fit(k(s), r).is_some()).collect();
+        assert_eq!(fits.len(), 12, "{fits:?}");
+        // The boost is two up (12A), not two down (8A: an energy drop that doesn't fit).
+        assert_eq!(key_fit(k("12A"), r), Some((2, 0)));
+        assert_eq!(key_fit(k("8A"), r), None);
+        // After every natural fit, a boost included; ahead of a clash.
+        let shifted = fit_score(&entry("3A", 120.0), r, Some(120.0), None);
+        assert!(fit_score(&entry("12A", 120.0), r, Some(120.0), None) < shifted, "the boost first");
+        assert!(shifted < fit_score(&entry("4B", 120.0), r, Some(120.0), None));
     }
 
     #[test]

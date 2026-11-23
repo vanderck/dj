@@ -46,7 +46,8 @@ fn key_border(core: &Core, d: usize) -> Color32 {
     let is_master = core.snap.clock.owner == ClockOwner::Deck(d as u8);
     match (core.deck_key(d), core.reference_key()) {
         (Some(_), _) if is_master => GREEN,
-        (Some(k), Some(r)) => match k.compat(r) {
+        // (From the master's key to this one: two up is the boost.)
+        (Some(k), Some(r)) => match r.compat(k) {
             Compat::Same | Compat::Adjacent | Compat::Relative | Compat::Boost => GREEN,
             Compat::Clash => dim(RED, 0.8),
             Compat::Diagonal => Color32::from_gray(90),
