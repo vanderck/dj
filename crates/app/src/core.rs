@@ -3550,6 +3550,31 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn mix_now_is_over_in_about_half_a_minute() {
+        // Two long tracks that fit everywhere: Best's search would blend them for 44 bars (90 s),
+        // little happening for the first minute. Now keeps it to 16 bars (32 s at 120).
+        let (mut e, mut c, _config) = core();
+        for (d, name) in [(0, "now-a.wav"), (1, "now-b.wav")] {
+            c.load_track(d, &kick_wav(name, 180));
+            let deadline = Instant::now() + std::time::Duration::from_secs(60);
+            while !(c.snap.decks[d].loaded && c.decks[d].info.is_some()) {
+                assert!(Instant::now() < deadline, "track never loaded");
+                pump(&mut e, &mut c);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+        c.deck_cmd(0, DeckCmd::Play);
+        while c.snap.decks[0].position_secs < 20.0 {
+            pump(&mut e, &mut c);
+        }
+        for style in [crate::settings::MixStyle::Auto, crate::settings::MixStyle::Eq, crate::settings::MixStyle::Stems] {
+            let plan = c.plan_now(1, 0, style);
+            assert_eq!(plan.length_beats, 64.0, "{style:?}: {plan:?}");
+            assert!(plan.start_beat - c.snap.decks[0].beat <= 24.0, "starts within a few bars: {plan:?}");
+        }
+    }
+
+    #[test]
     fn mix_now_brings_the_looping_deck_in_and_stops_the_other() {
         let (mut e, mut c, _config) = core();
         // Deck 2 first, so it becomes the tempo master (the mix must hand that over).
@@ -3598,8 +3623,9 @@ pub(crate) mod tests {
         assert!(best.start_beat > beat, "{best:?}");
 
         let plan = c.plan_now(1, 0, crate::settings::MixStyle::Eq);
-        // Now: on the next 4-bar line or so, as long as the music allows.
-        assert!(plan.length_beats >= 16.0 && plan.length_beats % 16.0 == 0.0, "{plan:?}");
+        // Now: on the next 4-bar line or so, as long as the music allows up to about 30 s (16
+        // bars at 120: not the long blend Best may pick, in which little happens for a minute).
+        assert!(plan.length_beats >= 16.0 && plan.length_beats <= 64.0 && plan.length_beats % 16.0 == 0.0, "{plan:?}");
         assert_eq!(plan.start_beat % 16.0, 0.0);
         assert!(plan.start_beat > c.snap.decks[0].beat);
         let start = plan.start_beat;
