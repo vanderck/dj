@@ -36,7 +36,9 @@ pub use crate::settings::MixStyle;
 pub const BEST_BEATS: f64 = 64.0;
 /// A drop: one bar.
 const DROP_BEATS: f64 = 4.0;
-/// Without analysis (no beat grid or waveform), a Now mix lasts about this long (8–16 bars).
+/// A Now mix lasts at most about this long (16 bars at 120 BPM), so the new track is heard
+/// coming in and the old one going within half a minute (never shorter than 8 bars or
+/// [`MIN_MIX_SECS`]).
 const NOW_SECS: f64 = 32.0;
 /// The shortest and longest blend the search tries, in bars.
 const MIN_MIX_BARS: usize = 8;
@@ -545,9 +547,6 @@ impl Core {
         let lead = if i.playing { 0.5 } else { 4.5 } + 3.0;
         let earliest = ((o.beat + lead) / 4.0).ceil().max(0.0) as usize;
         let latest = if when == MixWhen::Now { earliest + 4 } else { out.len() };
-        // Every phrase length (4 bars) from 8 up to 128: how long is up to the two songs (the
-        // search scores each bar of the overlap where they sound right together).
-        let lengths: Vec<usize> = (MIN_MIX_BARS / 4..=MAX_MIX_BARS / 4).map(|k| 4 * k).collect();
         // Your cue (or where a paused deck stands) as a bar of the new track. It's a preference
         // only when you chose it: a cue loop, or the deck cued away from where it loaded (its start
         // or first cue); otherwise dj picks the best place to bring it in.
@@ -565,6 +564,15 @@ impl Core {
         // Nothing quick (under 20 s, or a cut) unless the old track is almost over; a cut you
         // asked for (Drop) wherever it fits.
         let (min_bars, short_from) = self.mix_floor(outgoing, &out);
+        // Every phrase length (4 bars) from 8 up to 128: how long is up to the two songs (the
+        // search scores each bar of the overlap where they sound right together). Now: up to
+        // about NOW_SECS (else it picks the long, gentle blends Best does, and for a minute
+        // little seems to happen).
+        let longest = match when {
+            MixWhen::Now => ((NOW_SECS * o.speed.max(0.01) / out.bar_secs.max(0.01)) as usize / 4 * 4).max(MIN_MIX_BARS).max(min_bars.div_ceil(4) * 4),
+            MixWhen::Best => MAX_MIX_BARS,
+        };
+        let lengths: Vec<usize> = (MIN_MIX_BARS / 4..=longest / 4).map(|k| 4 * k).collect();
         // Best starts while 30 s of the old track is left, and is over before it ends (the very
         // end only when nothing earlier fits).
         let start_before = if when == MixWhen::Best { short_from } else { usize::MAX };
