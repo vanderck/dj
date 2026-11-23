@@ -146,9 +146,13 @@ pub fn prepare_track(
     // follows a tempo map).
     let mine = lt.grid_source == Some(dj_library::GridSource::User);
     let heard: Vec<(f64, f32)> = found.beats.iter().map(|b| (b.secs, b.downbeat)).collect();
-    // A detected tempo the heard beats steadily disagree with: theirs.
-    let retempo = (lt.grid_source == Some(dj_library::GridSource::Detected) && lt.track.tempo_map.is_none())
-        .then(|| dj_library::analysis::tempo_from_beats(&grid, &heard))
+    // A detected tempo the heard beats steadily disagree with: theirs (or, when they wander, the
+    // drum stem's), also over a tempo map (measured on the wrong tempo).
+    let retempo = (lt.grid_source == Some(dj_library::GridSource::Detected))
+        .then(|| {
+            let drums = dj_library::analysis::beats_unsteady(&heard).then(|| stems.as_ref().and_then(|s| stems::drum_grid(s, audio.sample_rate))).flatten();
+            stems::corrected_grid(&grid, &heard, drums.as_ref())
+        })
         .flatten();
     if let Some(g) = retempo {
         grid = g;
