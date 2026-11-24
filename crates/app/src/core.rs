@@ -179,6 +179,17 @@ pub fn stem_level(name: &str) -> Option<usize> {
     stem_switch(name.strip_suffix("level")?)
 }
 
+/// A stem at more than this is audible: its switch (mute) reads on.
+pub const STEM_AUDIBLE: f32 = 0.01;
+
+/// A stem level address (`Deck/2/StemVocalsLevel`) as its switch (`Deck/2/StemVocals`, the
+/// stem's mute), for a button learned on a stem fader.
+pub fn stem_switch_addr(addr: &str) -> Option<String> {
+    let (head, last) = addr.rsplit_once('/')?;
+    stem_level(&last.to_ascii_lowercase())?;
+    Some(format!("{head}/{}", &last[..last.len() - "level".len()]))
+}
+
 pub const STEMS_ACAPELLA: [f32; 4] = [0.0, 0.0, 1.0, 0.0];
 pub const STEMS_INSTRUMENTAL: [f32; 4] = [1.0, 1.0, 0.0, 1.0];
 
@@ -274,6 +285,9 @@ pub struct Core {
     pub automix: Option<automix::AutoMix>,
     /// After a Now mix: the new track's vocals coming back on its next vocal phrase.
     pub vocal_return: Option<automix::VocalReturn>,
+    /// Each deck's stem levels when their switch muted them (`Deck/N/StemVocals` off): back
+    /// to that level when it unmutes. Cleared on load.
+    stem_unmute: [[Option<f32>; 4]; NUM_DECKS],
     /// Auto-DJ, when on (see `set_autodj`).
     pub autodj: Option<automix::AutoDj>,
     /// A deck whose mix profile is to be saved (deck, track, since).
@@ -375,6 +389,7 @@ impl Core {
             dirty_since: None,
             automix: None,
             vocal_return: None,
+            stem_unmute: [[None; 4]; NUM_DECKS],
             autodj: None,
             profile_due: None,
             preparer: None,
@@ -594,6 +609,7 @@ impl Core {
             return;
         }
         let overrides = self.trackdb.tracks.get(&TrackDb::key(path)).cloned();
+        self.stem_unmute[d] = [None; 4];
         self.stems.cancel(d);
         self.decks[d].stems_progress = None;
         self.decks[d].stems_source = None;
@@ -2109,9 +2125,19 @@ impl Core {
                 self.session.decks[d].keylock = o;
                 DeckCmd::KeyLock(o)
             }),
-            [s] if stem_switch(s).is_some() => on.map(|o| DeckCmd::StemGain {
-                stem: stem_switch(s).unwrap() as u8,
-                gain: if o { 1.0 } else { 0.0 },
+            // A stem's mute: off keeps the level it had, on brings that back (full if none).
+            [s] if stem_switch(s).is_some() => on.map(|o| {
+                let i = stem_switch(s).unwrap();
+                let now = self.snap.decks[d].stem_gains[i];
+                let gain = if o {
+                    self.stem_unmute[d][i].take().unwrap_or(if now > STEM_AUDIBLE { now } else { 1.0 })
+                } else {
+                    if now > STEM_AUDIBLE {
+                        self.stem_unmute[d][i] = Some(now);
+                    }
+                    0.0
+                };
+                DeckCmd::StemGain { stem: i as u8, gain }
             }),
             [s] if stem_level(s).is_some() => f.map(|v| DeckCmd::StemGain {
                 stem: stem_level(s).unwrap() as u8,
@@ -2429,7 +2455,7 @@ impl Core {
             ["deck", n, "tempomaster"] => self.snap.clock.owner == ClockOwner::Deck(idx(n)? as u8),
             ["deck", n, "loop"] => self.snap.decks[idx(n)?].loop_on,
             ["deck", n, "pitchpreserve"] => self.snap.decks[idx(n)?].keylock,
-            ["deck", n, s] if stem_switch(s).is_some() => self.snap.decks[idx(n)?].stem_gains[stem_switch(s)?] > 0.5,
+            ["deck", n, s] if stem_switch(s).is_some() => self.snap.decks[idx(n)?].stem_gains[stem_switch(s)?] > STEM_AUDIBLE,
             ["deck", n, "acapella"] => self.snap.decks[idx(n)?].stem_gains == STEMS_ACAPELLA,
             ["deck", n, "instrumental"] => self.snap.decks[idx(n)?].stem_gains == STEMS_INSTRUMENTAL,
             ["deck", n, "cueslip"] | ["deck", n, "slip"] => self.snap.decks[idx(n)?].slip,
@@ -2531,6 +2557,11 @@ impl Core {
                 if src.kind == MidiKind::Note && value == 0.0 {
                     return; // wait for a press
                 }
+                // A button on a stem fader: that stem's mute (a knob or fader: its level).
+                let addr = match (src.kind, stem_switch_addr(&addr)) {
+                    (MidiKind::Note, Some(switch)) => switch,
+                    _ => addr,
+                };
                 let kind = addr_kind(&addr);
                 let mode = match (src.kind, kind) {
                     (MidiKind::Note, Kind::Switch) => MapMode::Toggle,
@@ -4773,6 +4804,44 @@ pub(crate) mod tests {
         assert!(c.route("Deck/1/Quantize:6", &[]));
         assert_eq!(c.session.decks[0].quantize, dj_engine::deck::Quantize::Beats(0.5));
         pump(&mut e, &mut c);
+    }
+
+    #[test]
+    fn a_button_learned_on_a_stem_fader_mutes_the_stem() {
+        let (mut e, mut c, _config) = core();
+        assert_eq!(stem_switch_addr("Deck/2/StemVocalsLevel").as_deref(), Some("Deck/2/StemVocals"));
+        assert_eq!(stem_switch_addr("Mixer/CH2/Volume"), None);
+        // Learn: a stem fader (Vocals on channel 2) touched, then a button pressed: its mute.
+        c.learn = true;
+        c.touch("Deck/2/StemVocalsLevel");
+        c.handle_midi(&[0x90, 40, 127]);
+        // A knob on the Drums fader: its level.
+        c.touch("Deck/2/StemDrumsLevel");
+        c.handle_midi(&[0xb0, 21, 64]);
+        c.learn = false;
+        let m = |addr: &str| c.profile.mappings.iter().find(|m| m.address == addr).map(|m| m.mode);
+        assert_eq!(m("Deck/2/StemVocals"), Some(MapMode::Toggle));
+        assert_eq!(m("Deck/2/StemDrumsLevel"), Some(MapMode::Absolute));
+        // The vocals down to 30 %; the button mutes them, and brings them back at 30 % (not full).
+        c.route("Deck/2/StemVocalsLevel", &[OscType::Float(0.3)]);
+        pump(&mut e, &mut c);
+        assert_eq!(c.switch_state("/deck/2/stemvocals"), Some(true), "audible at 30 %");
+        let press = |e: &mut dj_engine::Engine, c: &mut Core| {
+            c.handle_midi(&[0x90, 40, 127]);
+            c.handle_midi(&[0x80, 40, 0]);
+            pump(e, c);
+        };
+        press(&mut e, &mut c);
+        assert_eq!(c.snap.decks[1].stem_gains[2], 0.0, "muted");
+        assert_eq!(c.switch_state("/deck/2/stemvocals"), Some(false));
+        press(&mut e, &mut c);
+        assert!((c.snap.decks[1].stem_gains[2] - 0.3).abs() < 1e-6, "back at its level: {:?}", c.snap.decks[1].stem_gains);
+        // Muted at full: back at full.
+        c.route("Deck/2/StemVocalsLevel", &[OscType::Float(1.0)]);
+        pump(&mut e, &mut c);
+        press(&mut e, &mut c);
+        press(&mut e, &mut c);
+        assert_eq!(c.snap.decks[1].stem_gains[2], 1.0);
     }
 
     #[test]

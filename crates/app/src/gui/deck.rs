@@ -504,7 +504,7 @@ fn stems_row(ui: &mut Ui, core: &mut Core, d: usize, r: Rect) {
     for (i, (label, addr, weight)) in items {
         let rr = Rect::from_min_size(Pos2::new(x, r.top()), Vec2::new(unit * weight, r.height()));
         x += unit * weight + gap;
-        let on_ = v.stem_gains[i] > 0.5;
+        let on_ = v.stem_gains[i] > crate::core::STEM_AUDIBLE;
         // Until the stems are ready, settings are shown in outline: they apply once separated.
         let style = match (on_, ready) {
             (true, true) => Style::Light,
