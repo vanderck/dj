@@ -183,7 +183,7 @@ pub struct AutoMix {
 pub struct VocalReturn {
     deck: usize,
     track_id: u64,
-    /// Clock beat where they come back (over one bar).
+    /// Clock beat where they come back (all at once).
     at_clock: f64,
     level: f32,
 }
@@ -344,15 +344,15 @@ fn stems_at(p: f64, vocals_out: bool, best: bool) -> ([f32; 4], [f32; 4]) {
     // Then the outgoing drums go, then its vocals and other: out by three quarters (its volume
     // closes after that).
     o[DRUMS] = 1.0 - smooth((p - 0.5) / 0.15);
-    let tail = 1.0 - smooth((p - 0.5) / 0.25);
-    o[VOCALS] = tail;
-    o[OTHER] = tail;
-    // Incoming vocals: out for Now; for Best they come in as the outgoing ones leave.
+    o[OTHER] = 1.0 - smooth((p - 0.5) / 0.25);
+    // Vocals switch, all in or all out: the old ones out once its drums are gone.
+    o[VOCALS] = (p < 0.7) as u8 as f32;
+    // Incoming vocals: out for Now; for Best they come in after the outgoing ones left
+    // (before the old track's volume closes).
     i[VOCALS] = if vocals_out {
         0.0
     } else if best {
-        // (In full by seven eighths: before the old track's volume closes.)
-        smooth((p - 0.75) / 0.125)
+        (p >= 0.75) as u8 as f32
     } else {
         1.0
     };
@@ -1276,11 +1276,9 @@ impl Core {
             // Another track, or you brought them back yourself.
             self.vocal_return = None;
         } else if clock >= vr.at_clock {
-            let x = (clock - vr.at_clock) / 4.0;
-            self.set_picked_up(&addr, vr.level * smooth(x));
-            if x >= 1.0 {
-                self.vocal_return = None;
-            }
+            // All in at once (vocals switch; see `Blend::levels`).
+            self.set_picked_up(&addr, vr.level);
+            self.vocal_return = None;
         }
     }
 
@@ -1680,8 +1678,12 @@ impl Core {
                         None => (0.35 * len / 4.0, 0.75 * len / 4.0),
                     };
                     let ramp = d_in.min(8.0);
-                    let vocals_first = blend.as_ref().is_some_and(|b| b.vocals_first);
-                    self.mix_set(&high(i), if vocals_first { in_high } else { in_high * smooth((bp - (d_in - ramp)) / ramp) });
+                    // Its vocals in (all at once): its highs open too, not a muffled voice.
+                    let vocals_in = match &blend {
+                        Some(b) => b.vocals_first || b.in_at[VOCALS].is_some_and(|v| bp >= v) && !vocals_out,
+                        None => si[VOCALS] > 0.0,
+                    };
+                    self.mix_set(&high(i), if vocals_in { in_high } else { in_high * smooth((bp - (d_in - ramp)) / ramp) });
                     self.mix_set(&high(o), out_high * (1.0 - smooth((bp - (d_out - 2.0)) / 2.0)));
                 }
             }
@@ -1814,12 +1816,15 @@ impl Blend {
     pub fn levels(&self, bp: f64, vocals_out: bool) -> ([f32; 4], [f32; 4]) {
         let mut i = [1.0f32; 4];
         let mut o = [1.0f32; 4];
+        // The bass and the vocals switch, all in or all out (a voice fading in or out sounds
+        // like a mistake): in at their bar, out where they end. The rest ramp.
+        let switch = |s: usize| s == BASS || s == VOCALS;
         for s in 0..4 {
             if let Some(b) = self.in_at[s] {
-                i[s] = if s == BASS { (bp >= b) as u8 as f32 } else { smooth((bp - b) / self.in_ramp[s].max(0.1)) };
+                i[s] = if switch(s) { (bp >= b) as u8 as f32 } else { smooth((bp - b) / self.in_ramp[s].max(0.1)) };
             }
             if let Some(b) = self.out_at[s] {
-                o[s] = if s == BASS { (bp < b) as u8 as f32 } else { 1.0 - smooth((bp - (b - self.out_ramp[s])) / self.out_ramp[s].max(0.1)) };
+                o[s] = if switch(s) { (bp < b) as u8 as f32 } else { 1.0 - smooth((bp - (b - self.out_ramp[s])) / self.out_ramp[s].max(0.1)) };
             }
         }
         if vocals_out {
@@ -1866,15 +1871,15 @@ impl Blend {
 const MASHUP_TAIL: usize = 2;
 
 /// A mashup's stems over `bars` bars of the new singing (and [`MASHUP_TAIL`] after): the old
-/// vocals out in the first bar as the new ones come in; at `bars` the basses switch and the new
-/// drums and melodies come in over a bar as the old ones leave.
+/// vocals out as the new ones come in (a switch, never both); at `bars` the basses switch and
+/// the new drums and melodies come in over a bar as the old ones leave.
 pub fn mashup_blend(bars: usize) -> Blend {
     let b = bars as f64;
     Blend {
         bars: bars + MASHUP_TAIL,
         in_at: [Some(b - 1.0), Some(b), Some(0.0), Some(b - 1.0)],
         in_ramp: [1.0; 4],
-        out_at: [Some(b + 1.0), Some(b), Some(1.0), Some(b + 1.0)],
+        out_at: [Some(b + 1.0), Some(b), Some(0.0), Some(b + 1.0)],
         out_ramp: [1.0; 4],
         swap: b,
         notes: vec![format!("new vocals over the old music for {bars} bars")],
@@ -2129,7 +2134,30 @@ pub fn plan_blend(inc: &[Vec<f32>; 4], out: &[Vec<f32>; 4], bars: usize, vocals_
 
 #[cfg(test)]
 mod tests {
-    use super::{breathe_in, breathe_out, plan_blend, smooth, stems_at, BASS, DRUMS, OTHER, VOCALS};
+    use super::{breathe_in, breathe_out, mashup_blend, plan_blend, smooth, stems_at, BASS, DRUMS, OTHER, VOCALS};
+
+    #[test]
+    fn vocals_switch_all_in_or_all_out() {
+        // A planned blend with long vocal ramps, and a mashup: at every point of the mix, the
+        // new and old vocals are each all in or all out, never both in.
+        let mut b = mashup_blend(16);
+        b.in_at[VOCALS] = Some(8.0);
+        b.in_ramp[VOCALS] = 4.0;
+        b.out_at[VOCALS] = Some(8.0);
+        b.out_ramp[VOCALS] = 4.0;
+        for blend in [mashup_blend(16), b.clone()] {
+            for k in 0..=(blend.bars * 8) {
+                let (i, o) = blend.levels(k as f64 / 8.0, false);
+                assert!([0.0, 1.0].contains(&i[VOCALS]) && [0.0, 1.0].contains(&o[VOCALS]), "bar {}: {i:?} {o:?}", k as f64 / 8.0);
+                assert!(i[VOCALS] + o[VOCALS] <= 1.0, "both singing at bar {}", k as f64 / 8.0);
+            }
+        }
+        // In at its bar, out at its end.
+        let (i, o) = b.levels(7.99, false);
+        assert_eq!((i[VOCALS], o[VOCALS]), (0.0, 1.0));
+        let (i, o) = b.levels(8.0, false);
+        assert_eq!((i[VOCALS], o[VOCALS]), (1.0, 0.0));
+    }
 
     #[test]
     fn fades_are_smooth_and_bounded() {
@@ -2150,7 +2178,16 @@ mod tests {
         assert_eq!((i[1], o[1]), (1.0, 0.0), "midpoint: the basses swap");
         assert_eq!(o[0], 1.0);
         let (_, o) = stems_at(0.65, true, false);
-        assert!(o[0] == 0.0 && o[2] > 0.0 && o[3] > 0.0, "outgoing drums gone, then vocals and other");
+        assert!(o[0] == 0.0 && o[2] == 1.0 && o[3] > 0.0, "outgoing drums gone, then vocals and other");
+        let (_, o) = stems_at(0.7, true, false);
+        assert!(o[2] == 0.0 && o[3] > 0.0, "the vocals switch out, the melody fades");
+        // Vocals only ever all in or all out, both ways.
+        for k in 0..=100 {
+            let p = k as f64 / 100.0;
+            for (i, o) in [stems_at(p, false, true), stems_at(p, true, false)] {
+                assert!([0.0, 1.0].contains(&i[2]) && [0.0, 1.0].contains(&o[2]), "at {p}: {i:?} {o:?}");
+            }
+        }
         assert_eq!(stems_at(0.75, true, false).1, [0.0; 4], "all out before its volume closes");
         let (i, o) = stems_at(1.0, true, false);
         assert_eq!(o, [0.0; 4]);
