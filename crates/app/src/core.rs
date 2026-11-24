@@ -4133,7 +4133,7 @@ pub(crate) mod tests {
         c.start_mix(plan);
         run_mix(&mut e, &mut c, |_, _| {});
         assert_eq!(c.snap.decks[1].stem_gains[2], 0.0, "held out to the end of the mix");
-        // Back over a bar: the new track all in, not left without its vocals.
+        // Back (all at once): the new track all in, not left without its vocals.
         for _ in 0..200 {
             pump(&mut e, &mut c);
         }
