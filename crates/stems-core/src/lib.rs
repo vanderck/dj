@@ -13,7 +13,7 @@ pub mod structure;
 
 pub use offline::ModelError;
 #[cfg(any(feature = "onnx", feature = "onnx-dynamic"))]
-pub use onnx::OnnxOptions;
+pub use onnx::{Device, OnnxOptions};
 pub use resample::resample;
 
 /// Number of stems.

@@ -175,6 +175,9 @@ pub struct Settings {
     /// HT-Demucs ONNX model (best quality, about 1-3 min per track; results become prepared stems).
     /// `None` = off. See `stems::demucs_files` for HT-Demucs FT.
     pub stems_demucs: Option<PathBuf>,
+    /// Separate stems on the GPU (CoreML on a Mac, DirectML on Windows) instead of the CPU;
+    /// where it can't, on the CPU (the stems log says which).
+    pub stems_gpu: bool,
     /// Where prepared stems (Demucs, `--prepare-stems`) are kept; never cleaned up
     /// automatically. `None` = `stems-prepared` in the config folder.
     pub stems_prepared_dir: Option<PathBuf>,
@@ -278,6 +281,7 @@ impl Default for Settings {
             key_notation: KeyNotation::Camelot,
             stems_enabled: true,
             stems_demucs: None,
+            stems_gpu: false,
             stems_prepared_dir: None,
             song_sections: true,
             external_mixer: false,

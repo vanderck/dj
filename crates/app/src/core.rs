@@ -3080,6 +3080,7 @@ impl Core {
 
         self.automix_tick();
         self.grid_check_tick();
+        crate::stems::GPU.store(self.settings.stems_gpu, std::sync::atomic::Ordering::Relaxed);
         // (After the mix's tick: a mix Auto-DJ starts is seen by the engine before it's checked.)
         self.autodj_tick();
         self.prepare_tick();

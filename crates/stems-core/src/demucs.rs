@@ -23,7 +23,7 @@ use ort::session::Session;
 use ort::value::TensorRef;
 
 use crate::offline::{Frame, ModelError, OfflineError, Progress, StemBuffers};
-use crate::onnx::{builder, err, OnnxOptions};
+use crate::onnx::{commit, err, Device, OnnxOptions};
 use crate::resample::resample;
 use crate::Stem;
 
@@ -51,6 +51,7 @@ pub struct DemucsModel {
     parts: Vec<Part>,
     segment: usize,
     name: String,
+    device: Device,
 }
 
 fn stem_from_name(name: &str) -> Option<Stem> {
@@ -75,11 +76,14 @@ impl DemucsModel {
         let mut parts = Vec::new();
         let mut segment = None;
         let mut name = None;
+        let mut device = None;
         for path in paths {
             let path = path.as_ref();
-            let session = builder(options)?
-                .commit_from_file(path)
-                .map_err(|e| ModelError::new(format!("loading {}: {e}", path.display())))?;
+            let (session, on) = commit(options, path)?;
+            // (All parts on the GPU, or the first reason one isn't.)
+            if device.as_ref().is_none_or(|d| matches!(d, Device::Gpu(_))) {
+                device = Some(on);
+            }
             let (n, part) = Self::part(session, path)?;
             match segment {
                 None => segment = Some(n),
@@ -122,6 +126,7 @@ impl DemucsModel {
             parts,
             segment: segment.unwrap(),
             name,
+            device: device.unwrap_or(Device::Cpu(None)),
         })
     }
 
@@ -174,6 +179,11 @@ impl DemucsModel {
                 take,
             },
         ))
+    }
+
+    /// Where it runs (see [`OnnxOptions::gpu`]).
+    pub fn device(&self) -> &Device {
+        &self.device
     }
 
     pub fn name(&self) -> &str {

@@ -38,6 +38,8 @@ jobs:
           $dir = "target/package/dj"
           New-Item -ItemType Directory -Force $dir | Out-Null
           Copy-Item target/release/dj.exe $dir
+          # ONNX Runtime's DLLs next to it, if the build has any (DirectML.dll, for stems on the GPU).
+          Get-ChildItem target/release/*.dll -ErrorAction SilentlyContinue | ForEach-Object { Copy-Item $_.FullName $dir; Write-Host "packaged $($_.Name)" }
           Copy-Item README.md $dir
           # Starts and exits (command-line use; the GUI needs a desktop session).
           & "$dir/dj.exe" --help | Out-Null

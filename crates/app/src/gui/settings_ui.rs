@@ -362,6 +362,16 @@ fn settings(ui: &mut Ui, core: &mut Core, st: &mut UiState) {
                 }
             }
         }
+        let gpu = if cfg!(target_os = "macos") {
+            "Separate on the GPU (CoreML: GPU and Neural Engine)"
+        } else if cfg!(windows) {
+            "Separate on the GPU (DirectML)"
+        } else {
+            "Separate on the GPU (not on this system: runs on the CPU)"
+        };
+        ui.checkbox(&mut core.settings.stems_gpu, gpu).on_hover_text(
+            "Usually several times faster; switch it off to compare. Takes effect from the next track separated. On a Mac the first track takes a few minutes longer while CoreML compiles the model (kept for next time). If the GPU can't be used, it runs on the CPU, and the stems status says why.",
+        );
         ui.label(
             RichText::new(
                 "Best-quality stems, made when a track loads (about 1–3 minutes; the deck plays the full mix meanwhile) and kept in the prepared-stems folder. HT-Demucs as converted by the Mixxx project; its weights are for non-commercial use only.",

@@ -16,3 +16,10 @@ onnx-dynamic = ["dep:ort", "ort/std", "ort/ndarray", "ort/load-dynamic"]
 [dependencies]
 ort = { workspace = true, optional = true }
 realfft.workspace = true
+
+# The GPU providers (OnnxOptions::gpu): ONNX Runtime with CoreML on macOS, DirectML on Windows.
+[target.'cfg(target_os = "macos")'.dependencies]
+ort = { workspace = true, optional = true, features = ["coreml"] }
+
+[target.'cfg(windows)'.dependencies]
+ort = { workspace = true, optional = true, features = ["directml"] }
