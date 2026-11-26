@@ -438,9 +438,10 @@ impl Deck {
     pub fn grid(&self) -> Option<BeatGrid> {
         self.grid_override.or_else(|| {
             let t = self.track.as_ref()?;
-            match &t.tempo_map {
-                Some(m) => Some(m.local(self.position_secs())),
-                None => t.grid,
+            // (A map past its segments' sense falls back on the steady grid.)
+            match t.tempo_map.as_ref().map(|m| m.local(self.position_secs())) {
+                Some(g) if crate::track::PLAUSIBLE_BPM.contains(&g.bpm) => Some(g),
+                _ => t.grid,
             }
         })
     }

@@ -15,6 +15,10 @@ impl AudioData {
     }
 }
 
+/// The tempos a track's beat grid can plausibly have; a grid or tempo map outside them is a bad
+/// tag or a bad measurement (a Serato marker with the wrong beat count gave a 0.4 BPM segment).
+pub const PLAUSIBLE_BPM: std::ops::RangeInclusive<f64> = 30.0..=300.0;
+
 /// Beat grid: constant tempo anchored at a "Grid Start" (the first downbeat).
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BeatGrid {
@@ -48,11 +52,25 @@ pub struct TempoMap {
 }
 
 impl TempoMap {
-    /// A map from (beat, seconds) points (sorted, duplicates dropped); `None` with fewer than two.
+    /// A map from (beat, seconds) points (sorted, duplicates dropped); `None` with fewer than two,
+    /// or when it isn't a believable tempo (see [`TempoMap::plausible`]).
     pub fn new(mut points: Vec<(f64, f64)>) -> Option<Self> {
         points.sort_by(|a, b| a.0.total_cmp(&b.0));
         points.dedup_by(|b, a| b.0 <= a.0 || b.1 <= a.1);
-        (points.len() >= 2).then_some(TempoMap { points })
+        let m = TempoMap { points };
+        (m.points.len() >= 2 && m.plausible()).then_some(m)
+    }
+
+    /// Every segment's tempo within [`PLAUSIBLE_BPM`] and within half to double of the median
+    /// segment's: a tempo that bends, not a marker with the wrong beat count.
+    pub fn plausible(&self) -> bool {
+        let mut bpms: Vec<f64> = self.points.windows(2).map(|w| 60.0 * (w[1].0 - w[0].0) / (w[1].1 - w[0].1)).collect();
+        if bpms.is_empty() || bpms.iter().any(|b| !b.is_finite() || !PLAUSIBLE_BPM.contains(b)) {
+            return false;
+        }
+        bpms.sort_by(f64::total_cmp);
+        let med = bpms[bpms.len() / 2];
+        bpms.iter().all(|b| (0.5..=2.0).contains(&(b / med)))
     }
 
     /// The segment index (into `points`, its start) covering `x` on axis `axis` (0 beats, 1 secs).
@@ -280,6 +298,15 @@ mod stem_tests {
 
 #[cfg(test)]
 mod tempo_map_tests {
+    #[test]
+    fn a_marker_with_the_wrong_beat_count_is_no_tempo_map() {
+        // One beat over two and a half minutes (0.4 BPM), then 128 BPM.
+        let spb = 60.0 / 128.0;
+        assert!(TempoMap::new(vec![(0.0, 0.1), (1.0, 146.0), (65.0, 146.0 + 64.0 * spb)]).is_none());
+        // A real bend, 120 to 132: kept.
+        assert!(TempoMap::new(vec![(0.0, 0.0), (64.0, 32.0), (128.0, 32.0 + 64.0 * 60.0 / 132.0)]).is_some());
+    }
+
     use super::*;
 
     #[test]

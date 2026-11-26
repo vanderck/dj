@@ -305,7 +305,8 @@ pub fn load(path: &Path, overrides: Option<&TrackOverrides>, match_loudness: boo
         }
     }
     if let Some(o) = overrides {
-        if let Some(g) = o.grid {
+        // (A saved grid with an impossible tempo, saved off a bad tempo map, is dropped.)
+        if let Some(g) = o.grid.filter(|g| dj_engine::track::PLAUSIBLE_BPM.contains(&g.bpm)) {
             grid = Some(g);
             source = Some(if o.grid_detected { GridSource::Detected } else { GridSource::User });
         }
