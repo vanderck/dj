@@ -81,7 +81,10 @@ impl DemucsModel {
             let path = path.as_ref();
             let (session, on) = commit(options, path)?;
             // (All parts on the GPU, or the first reason one isn't.)
-            if device.as_ref().is_none_or(|d| matches!(d, Device::Gpu(_))) {
+            if device
+                .as_ref()
+                .is_none_or(|d| matches!(d, Device::Accelerator(_)))
+            {
                 device = Some(on);
             }
             let (n, part) = Self::part(session, path)?;

@@ -12,8 +12,10 @@ use crate::offline::ModelError;
 pub struct OnnxOptions {
     /// Threads ONNX Runtime may use inside one inference.
     pub intra_threads: usize,
-    /// Run on the GPU where this build can: CoreML on macOS (GPU and Neural Engine), DirectML
-    /// on Windows. A model (or a system) it can't use runs on the CPU (see [`commit`]).
+    /// Run on an accelerator where this build can: CoreML on macOS (the Neural Engine, not the
+    /// GPU: CoreML's GPU work holds up the app's own drawing, which runs on the same GPU, until
+    /// the window hangs), DirectML on Windows. A model (or a system) it can't use runs on the CPU
+    /// (see [`commit`]).
     pub gpu: bool,
     /// Where CoreML keeps the models it compiled (compiling takes minutes the first time).
     pub gpu_cache: Option<std::path::PathBuf>,
@@ -29,20 +31,20 @@ impl Default for OnnxOptions {
     }
 }
 
-/// Where a model runs: its device for messages ("GPU (CoreML)", "CPU", or "CPU (GPU: why
-/// not)").
+/// Where a model runs, for messages: an accelerator ("Neural Engine (CoreML)", "GPU
+/// (DirectML)"), the CPU, or the CPU and why not the accelerator asked for.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Device {
-    Gpu(&'static str),
+    Accelerator(&'static str),
     Cpu(Option<String>),
 }
 
 impl std::fmt::Display for Device {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Device::Gpu(ep) => write!(f, "GPU ({ep})"),
+            Device::Accelerator(name) => write!(f, "{name}"),
             Device::Cpu(None) => write!(f, "CPU"),
-            Device::Cpu(Some(why)) => write!(f, "CPU (GPU: {why})"),
+            Device::Cpu(Some(why)) => write!(f, "CPU (no acceleration: {why})"),
         }
     }
 }
@@ -59,7 +61,7 @@ pub(crate) fn commit(
     };
     if options.gpu {
         match gpu_builder(options).and_then(|(b, ep)| Ok((load(b)?, ep))) {
-            Ok((session, ep)) => return Ok((session, Device::Gpu(ep))),
+            Ok((session, ep)) => return Ok((session, Device::Accelerator(ep))),
             Err(e) => return Ok((load(builder(options)?)?, Device::Cpu(Some(e.to_string())))),
         }
     }
@@ -73,7 +75,8 @@ fn gpu_builder(options: &OnnxOptions) -> Result<(SessionBuilder, &'static str), 
     use ort::ep::coreml::{ComputeUnits, ModelFormat};
     let mut ep = ort::ep::CoreML::default()
         .with_model_format(ModelFormat::MLProgram)
-        .with_compute_units(ComputeUnits::All);
+        // (Not the GPU: see `OnnxOptions::gpu`. Ops the Neural Engine can't run go to the CPU.)
+        .with_compute_units(ComputeUnits::CPUAndNeuralEngine);
     if let Some(dir) = &options.gpu_cache {
         let _ = std::fs::create_dir_all(dir);
         ep = ep.with_model_cache_dir(dir.display());
@@ -81,7 +84,7 @@ fn gpu_builder(options: &OnnxOptions) -> Result<(SessionBuilder, &'static str), 
     let b = builder(options)?
         .with_execution_providers([ep.build().error_on_failure()])
         .map_err(err)?;
-    Ok((b, "CoreML"))
+    Ok((b, "Neural Engine (CoreML)"))
 }
 
 #[cfg(windows)]
@@ -94,7 +97,7 @@ fn gpu_builder(options: &OnnxOptions) -> Result<(SessionBuilder, &'static str), 
         .map_err(err)?
         .with_execution_providers([ort::ep::DirectML::default().build().error_on_failure()])
         .map_err(err)?;
-    Ok((b, "DirectML"))
+    Ok((b, "GPU (DirectML)"))
 }
 
 #[cfg(not(any(target_os = "macos", windows)))]

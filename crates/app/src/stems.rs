@@ -503,15 +503,15 @@ impl DemucsCache {
         if !matches!(&self.loaded, Some((f, t, g, _)) if *f == files && *t == threads && *g == GPU.load(Ordering::Relaxed)) {
             self.loaded = None; // free the old model before loading another
             let gpu = GPU.load(Ordering::Relaxed);
-            let options = stems_core::OnnxOptions { intra_threads: threads, gpu, gpu_cache: Some(crate::settings::config_dir().join("models").join("coreml-cache")) };
+            let options = stems_core::OnnxOptions { intra_threads: threads, gpu, gpu_cache: Some(crate::settings::config_dir().join("models").join("coreml-cache-ane")) };
             let model = DemucsModel::from_files(&files, &options).map_err(|e| OfflineError::Model(e.to_string()))?;
             eprintln!("stems: {} on the {}", model.name(), model.device());
             self.loaded = Some((files, threads, gpu, model));
         }
         let (_, _, _, model) = self.loaded.as_mut().unwrap();
         let stems = model.separate(frames, rate, progress)?;
-        // With the GPU asked for, where it ran shows with the stems ("HT-Demucs · GPU (CoreML)",
-        // or "· CPU (GPU: why not)").
+        // With acceleration asked for, where it ran shows with the stems ("HT-Demucs · Neural
+        // Engine (CoreML)", or "· CPU (no acceleration: why)").
         let source = match model.device() {
             stems_core::Device::Cpu(None) => model.name().to_string(),
             d => format!("{} · {d}", model.name()),
