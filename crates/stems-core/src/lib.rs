@@ -5,6 +5,8 @@
 
 #[cfg(any(feature = "onnx", feature = "onnx-dynamic"))]
 pub mod demucs;
+#[cfg(any(feature = "onnx", feature = "onnx-dynamic"))]
+pub mod fp16;
 pub mod offline;
 #[cfg(any(feature = "onnx", feature = "onnx-dynamic"))]
 mod onnx;
@@ -13,7 +15,7 @@ pub mod structure;
 
 pub use offline::ModelError;
 #[cfg(any(feature = "onnx", feature = "onnx-dynamic"))]
-pub use onnx::{Device, OnnxOptions};
+pub use onnx::{half_model, Device, OnnxOptions};
 pub use resample::resample;
 
 /// Number of stems.

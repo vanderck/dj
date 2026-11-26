@@ -175,3 +175,81 @@ fn other_sample_rates_and_cancelling() {
         Err(stems_core::offline::OfflineError::Cancelled)
     ));
 }
+
+/// The real HT-Demucs in 16 bits (`DEMUCS_MODEL`: htdemucs.onnx; `DEMUCS_MIX`: interleaved
+/// 32-bit float stereo at 44.1 kHz) separates as the 32-bit model does: each stem within
+/// 30 dB. `cargo test -p stems-core --features onnx -- --ignored half`
+#[test]
+#[ignore]
+fn half_precision_htdemucs_separates_as_the_full_model() {
+    let (Ok(model), Ok(mix)) = (std::env::var("DEMUCS_MODEL"), std::env::var("DEMUCS_MIX")) else {
+        panic!("set DEMUCS_MODEL and DEMUCS_MIX");
+    };
+    let bytes = std::fs::read(mix).unwrap();
+    let mix: Vec<[f32; 2]> = bytes
+        .chunks_exact(8)
+        .map(|c| {
+            [
+                f32::from_le_bytes(c[0..4].try_into().unwrap()),
+                f32::from_le_bytes(c[4..8].try_into().unwrap()),
+            ]
+        })
+        .collect();
+    let dir = std::env::temp_dir().join("dj-half-test");
+    let options = OnnxOptions {
+        intra_threads: 4,
+        gpu_cache: Some(dir),
+        ..OnnxOptions::default()
+    };
+    let started = std::time::Instant::now();
+    let half = stems_core::half_model(&options, std::path::Path::new(&model)).unwrap();
+    eprintln!(
+        "16-bit model in {:.1} s: {}",
+        started.elapsed().as_secs_f64(),
+        half.display()
+    );
+    let run = |path: &std::path::Path| {
+        let mut m = DemucsModel::from_files(&[path], &options).unwrap();
+        let t = std::time::Instant::now();
+        let s = m.separate(&mix, 44_100, &mut |_| true).unwrap();
+        eprintln!("{}: {:.1} s", path.display(), t.elapsed().as_secs_f64());
+        s
+    };
+    let full = run(std::path::Path::new(&model));
+    let halved = run(&half);
+    for (i, (a, b)) in full.iter().zip(halved.iter()).enumerate() {
+        let (mut sig, mut noise) = (0.0f64, 0.0f64);
+        for (x, y) in a.iter().zip(b.iter()) {
+            for c in 0..2 {
+                sig += (x[c] as f64).powi(2);
+                noise += (x[c] as f64 - y[c] as f64).powi(2);
+            }
+        }
+        let snr = 10.0 * (sig / noise.max(1e-20)).log10();
+        eprintln!("stem {i}: {snr:.1} dB");
+        assert!(snr > 30.0, "stem {i}: {snr:.1} dB");
+    }
+}
+
+#[test]
+fn a_16_bit_model_separates_as_the_full_one() {
+    // The stand-in's "network" (its /encoder.0 node) in 16 bits, the input reshape in 32.
+    let dir = std::env::temp_dir().join(format!("dj-half-{}", std::process::id()));
+    let options = OnnxOptions {
+        gpu_cache: Some(dir.clone()),
+        ..OnnxOptions::default()
+    };
+    let src = std::path::PathBuf::from(format!("{DIR}/demucs_test.onnx"));
+    let half = stems_core::half_model(&options, &src).unwrap();
+    assert!(half.starts_with(&dir) && half.to_string_lossy().ends_with(".fp16.onnx"));
+    assert_eq!(
+        stems_core::half_model(&options, &src).unwrap(),
+        half,
+        "made once"
+    );
+    let mut model = DemucsModel::from_files(&[&half], &OnnxOptions::default()).unwrap();
+    for n in [3456, 999] {
+        check_within(&mut model, n, 2e-3);
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
