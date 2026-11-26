@@ -1809,6 +1809,9 @@ pub struct Blend {
     /// The new vocals come first, over the old music (a mashup): the new track's highs are up
     /// from the start (they don't wait for its drums).
     pub vocals_first: bool,
+    /// Where the old vocals go was placed in a pause of the singer's of at least
+    /// [`VOCAL_GAP_SECS`] (or, with none, they stay to the end): not to be moved earlier.
+    pub vocals_cut_fixed: bool,
 }
 
 impl Blend {
@@ -1848,8 +1851,20 @@ impl Blend {
             if at + self.in_ramp[s] <= done + 1e-9 {
                 continue;
             }
+            // New vocals held for after the mix as the old ones can't be cut (see
+            // `breathe_out`): they stay out (see `Core::start_mix`).
+            if s == VOCALS && self.vocals_cut_fixed && self.out_at[VOCALS].is_none() && at >= self.bars as f64 - 0.5 {
+                continue;
+            }
             let ramp = self.in_ramp[s].min(2.0).min(done);
             let at = (done - ramp).max(0.0);
+            // Taking over earlier would cut the old vocals before the pause they leave in: the
+            // new ones wait for after the mix instead.
+            if s == VOCALS && self.vocals_cut_fixed && self.out_at[VOCALS].is_none_or(|e| at < e) {
+                self.in_at[s] = Some(self.bars as f64);
+                self.notes.push("new vocals after the mix (the old ones leave only in a pause)".into());
+                continue;
+            }
             self.in_at[s] = Some(at);
             self.in_ramp[s] = ramp.max(0.25);
             if s == VOCALS {
@@ -1884,6 +1899,7 @@ pub fn mashup_blend(bars: usize) -> Blend {
         swap: b,
         notes: vec![format!("new vocals over the old music for {bars} bars")],
         vocals_first: true,
+        vocals_cut_fixed: false,
     }
 }
 
@@ -1902,41 +1918,60 @@ pub fn bar_levels(w: &crate::stems::StemWave, t0: f64, beat_secs: f64, bars: usi
     })
 }
 
-/// Move the old vocals' fade into a pause of the singer's: the vocals stay at full level until
-/// the nearest beat (within a bar or two of the planned fade) where the vocal stem is quiet, and
-/// fade out inside it. `start` is the old track's time at the mix's first bar, `spb` its seconds
-/// per beat. Unchanged when the old vocals leave on their own or no pause is near.
+/// The old vocals are cut only where the singer has been quiet at least this long: a cut in a
+/// breath between two lines is heard.
+pub const VOCAL_GAP_SECS: f64 = 2.0;
+
+/// Where the old vocals go: in a pause of the singer's, once they have been quiet for at least
+/// [`VOCAL_GAP_SECS`] (a beat below a quarter of the singing level counts as quiet), the pause
+/// nearest the planned end, before the new vocals come in. With no such pause, the old vocals
+/// aren't cut: they stay until the old track's volume closes, and the new ones wait for after the
+/// mix (so the two never sing together). `start` is the old track's time at the mix's first bar,
+/// `spb` its seconds per beat. Unchanged when the old vocals leave on their own or hardly sing.
 pub fn breathe_out(b: &mut Blend, w: &crate::stems::StemWave, start: f64, spb: f64) {
     let Some(end) = b.out_at[VOCALS] else { return };
     let v = &w.levels[VOCALS];
     let level = |beat: f64| {
-        let (a, z) = (((start + beat * spb) * w.bins_per_sec) as usize, ((start + (beat + 1.0) * spb) * w.bins_per_sec) as usize);
+        let (a, z) = (((start + beat * spb).max(0.0) * w.bins_per_sec) as usize, ((start + (beat + 1.0) * spb).max(0.0) * w.bins_per_sec) as usize);
         let (a, z) = (a.min(v.len()), z.min(v.len()));
         if z > a { v[a..z].iter().sum::<f32>() / (z - a) as f32 } else { 0.0 }
     };
-    // How loud the singing is around there (the louder half of the beats).
-    let from = ((end - b.out_ramp[VOCALS]) * 4.0 - 8.0).max(0.0);
-    // (Gone before the new vocals come in.)
-    let to = (end * 4.0 + 4.0).min(b.bars as f64 * 4.0 - 4.0).min(b.in_at[VOCALS].map_or(f64::MAX, |x| (x * 4.0).max(end * 4.0)));
-    if to <= from {
-        return;
-    }
-    let mut around: Vec<f32> = (from as usize..to as usize).map(|k| level(k as f64)).collect();
+    // Gone before the new vocals come in (and before the old track's volume closes).
+    let to = ((b.bars as f64 - 1.0) * 4.0).min(b.in_at[VOCALS].map_or(f64::MAX, |x| (x * 4.0).max(0.0)));
+    // How loud the singing is over the mix (the louder quarter of the beats), from a bar before.
+    let mut around: Vec<f32> = (-4..(b.bars as i64 * 4)).map(|k| level(k as f64)).collect();
     around.sort_by(|a, z| z.total_cmp(a));
     let sung = around.get(around.len() / 4).copied().unwrap_or(0.0);
     if sung <= PRESENT {
         return; // hardly singing there: nothing to cut
     }
-    // The pause nearest the planned end of the fade.
-    let target = end * 4.0 - 1.0;
-    let gap = (from as usize..to as usize)
-        .map(|k| k as f64)
-        .filter(|k| level(*k) < 0.25 * sung)
-        .min_by(|a, z| (a - target).abs().total_cmp(&(z - target).abs()));
-    if let Some(g) = gap {
-        b.out_at[VOCALS] = Some((g + 1.0) / 4.0);
-        b.out_ramp[VOCALS] = 0.25;
-        b.notes.push(format!("old vocals end in a pause (bar {})", (g / 4.0) as usize + 1));
+    b.vocals_cut_fixed = true;
+    // Beats where the singer has been quiet for long enough: the cut, at the beat's start.
+    // (The pause may begin before the mix.)
+    let need = (VOCAL_GAP_SECS / spb).ceil().max(1.0) as i64;
+    let mut run = 0;
+    let mut cuts = Vec::new();
+    for k in -(need + 4)..to.floor() as i64 {
+        // (Before the track starts is no evidence of a pause.)
+        let in_track = start + k as f64 * spb >= 0.0;
+        run = if in_track && level(k as f64) < 0.25 * sung { run + 1 } else { 0 };
+        if run >= need && k + 1 >= 0 && ((k + 1) as f64) <= to {
+            cuts.push((k + 1) as f64);
+        }
+    }
+    let target = end * 4.0;
+    match cuts.into_iter().min_by(|a, z| (a - target).abs().total_cmp(&(z - target).abs())) {
+        Some(c) => {
+            b.out_at[VOCALS] = Some(c / 4.0);
+            b.out_ramp[VOCALS] = 0.25;
+            b.notes.push(format!("old vocals go in a pause (bar {})", (c / 4.0) as usize + 1));
+        }
+        None => {
+            // No pause long enough: not cut; the new vocals after the mix.
+            b.out_at[VOCALS] = None;
+            b.in_at[VOCALS] = Some(b.bars as f64);
+            b.notes.push(format!("old vocals stay (no {VOCAL_GAP_SECS:.0} s pause to cut in); new vocals after the mix"));
+        }
     }
 }
 
@@ -2127,7 +2162,7 @@ pub fn plan_blend(inc: &[Vec<f32>; 4], out: &[Vec<f32>; 4], bars: usize, vocals_
         out_ramp[VOCALS] = r;
         notes.insert(1.min(notes.len()), format!("keys clash: melodies switch at bar {}", swap as usize + 1));
     }
-    let mut b = Blend { bars, in_at, in_ramp, out_at, out_ramp, swap, notes, vocals_first: false };
+    let mut b = Blend { bars, in_at, in_ramp, out_at, out_ramp, swap, notes, vocals_first: false, vocals_cut_fixed: false };
     b.fully_in_before_fade();
     b
 }
@@ -2355,22 +2390,49 @@ mod tests {
     }
 
     #[test]
-    fn old_vocals_end_in_a_pause() {
-        // 16 bars at 120 BPM (0.5 s a beat); the singer pauses on the last beat of every 2 bars.
+    fn old_vocals_go_only_after_a_few_seconds_of_quiet() {
+        // 16 bars at 120 BPM (0.5 s a beat); the singer breathes on the last beat of every 2
+        // bars (half a second: too short to cut in).
         let bins_per_sec = 100.0;
-        let v: Vec<f32> = (0..(32.0 * bins_per_sec) as usize).map(|i| if (i as f64 / bins_per_sec / 0.5) as usize % 8 == 7 { 0.01 } else { 0.6 }).collect();
-        let w = crate::stems::StemWave { bins_per_sec, levels: [vec![0.5; v.len()], vec![0.5; v.len()], v, vec![0.5; 3200]] };
+        let wave = |long_pause: bool| {
+            let v: Vec<f32> = (0..(32.0 * bins_per_sec) as usize)
+                .map(|i| {
+                    let beat = (i as f64 / bins_per_sec / 0.5) as usize;
+                    // With a long pause: beats 44-47 quiet (2 s), the singing back on beat 48.
+                    if beat % 8 == 7 || (long_pause && (44..48).contains(&beat)) { 0.01 } else { 0.6 }
+                })
+                .collect();
+            crate::stems::StemWave { bins_per_sec, levels: [vec![0.5; v.len()], vec![0.5; v.len()], v, vec![0.5; 3200]] }
+        };
         let all = lvn(16, [&[(0, 16)], &[(0, 16)], &[(0, 16)], &[(0, 16)]]);
-        let mut b = plan_blend(&all, &all, 16, false, false);
-        b.out_at[VOCALS] = Some(13.0);
-        b.out_ramp[VOCALS] = 4.0;
-        breathe_out(&mut b, &w, 0.0, 0.5);
-        let end = b.out_at[VOCALS].unwrap();
-        // Out at the end of a pause beat (beats 7, 15, … end at bars 2, 4, …), the nearest to 13.
-        assert_eq!(end, 12.0, "{:?}", b.notes);
-        assert_eq!(b.out_ramp[VOCALS], 0.25);
-        assert!(b.levels(11.7, false).1[VOCALS] >= 0.99, "full until the pause");
+        let plan = || {
+            let mut b = plan_blend(&all, &all, 16, false, false);
+            b.out_at[VOCALS] = Some(13.0);
+            b.out_ramp[VOCALS] = 4.0;
+            b.in_at[VOCALS] = Some(14.0);
+            b
+        };
+        // Only breaths: the old vocals aren't cut (they leave with the volume), and the new ones
+        // wait for after the mix: never both singing.
+        let mut b = plan();
+        breathe_out(&mut b, &wave(false), 0.0, 0.5);
+        assert_eq!(b.out_at[VOCALS], None, "{:?}", b.notes);
+        assert_eq!(b.in_at[VOCALS], Some(16.0));
+        b.fully_in_before_fade();
+        assert_eq!(b.in_at[VOCALS], Some(16.0), "still after the mix: {:?}", b.notes);
+        assert!((0..128).all(|k| b.levels(k as f64 / 8.0, false).0[VOCALS] == 0.0));
+        // A 2 s pause (beats 44-47): out once it has lasted 2 s, on beat 48 (bar 12), the
+        // nearest to the plan; full until then.
+        let mut b = plan();
+        breathe_out(&mut b, &wave(true), 0.0, 0.5);
+        assert_eq!(b.out_at[VOCALS], Some(12.0), "{:?}", b.notes);
+        assert!(b.levels(11.9, false).1[VOCALS] >= 0.99, "full until then");
         assert_eq!(b.levels(12.0, false).1[VOCALS], 0.0);
+        // Taking the new vocals in earlier (all in before the fade) never moves that cut.
+        b.in_at[VOCALS] = Some(15.5);
+        b.in_ramp[VOCALS] = 2.0;
+        b.fully_in_before_fade();
+        assert_eq!(b.out_at[VOCALS], Some(12.0), "{:?}", b.notes);
     }
 
     #[test]
