@@ -189,8 +189,10 @@ fn half_precision_htdemucs_separates_as_the_full_model() {
     let mix: Vec<[f32; 2]> = bytes
         .as_chunks::<4>()
         .0
-        .chunks_exact(2)
-        .map(|c| [f32::from_le_bytes(c[0]), f32::from_le_bytes(c[1])])
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|[l, r]| [f32::from_le_bytes(*l), f32::from_le_bytes(*r)])
         .collect();
     let dir = std::env::temp_dir().join("dj-half-test");
     let options = OnnxOptions {
