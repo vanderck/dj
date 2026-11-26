@@ -810,6 +810,19 @@ pub(crate) mod tests {
         one.extend_from_slice(&124.0f32.to_be_bytes());
         one.push(0);
         assert_eq!(serato_tempo_map(&one), None);
+        // A marker that says one beat to the next, two and a half minutes on: no 0.4 BPM
+        // stretch, the steady grid at the last marker's tempo.
+        let mut bad = vec![1u8, 0];
+        bad.extend_from_slice(&2u32.to_be_bytes());
+        for (pos, tail) in [(0.5f32, 1u32.to_be_bytes()), (146.0, 128.0f32.to_be_bytes())] {
+            bad.extend_from_slice(&pos.to_be_bytes());
+            bad.extend_from_slice(&tail);
+        }
+        bad.push(0);
+        assert_eq!(serato_tempo_map(&bad), None);
+        let mut tags = Tags::default();
+        serato_object("Serato BeatGrid", &bad, &mut tags);
+        assert_eq!(tags.grid.map(|g| g.bpm as f32), Some(128.0));
     }
 
     #[test]

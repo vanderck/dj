@@ -286,7 +286,7 @@ pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect) {
     let mut rows: Vec<usize> = if st.browser_hist {
         core.history.iter().rev().filter_map(|p| core.library.iter().position(|e| &e.path == p)).collect()
     } else {
-        core.filtered_library()
+        core.filtered_library_cached()
     };
     // Fits: compatible key and close tempo, best match first; tracks already on a deck are left out.
     let fits = st.browser_harmonic && reference.is_some();

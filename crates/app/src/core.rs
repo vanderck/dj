@@ -221,6 +221,16 @@ pub struct Recorder {
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
+/// How long the browser's filtered list is reused while nothing it depends on changed.
+const FILTER_REFRESH: Duration = Duration::from_millis(500);
+
+struct FilterCache {
+    /// Search, crate shown, that crate's size, the library's size.
+    key: (String, Option<usize>, Option<usize>, usize),
+    at: Instant,
+    rows: Vec<usize>,
+}
+
 pub struct Core {
     pub ctl: Controller,
     pub sample_rate: f32,
@@ -252,6 +262,9 @@ pub struct Core {
     /// Tracks loaded this session (for the HIST view).
     pub history: Vec<PathBuf>,
     pub browser_query: String,
+    /// The browser's last [`Core::filtered_library`], kept a moment: filtering ten thousand
+    /// tracks every frame took most of the UI's time.
+    filter_cache: std::sync::Mutex<Option<FilterCache>>,
     /// Crates (dj's own and imported from Serato / rekordbox), and the one the browser shows.
     pub crates: Vec<dj_library::crates::Crate>,
     pub browser_crate: Option<usize>,
@@ -366,6 +379,7 @@ impl Core {
             crates: Vec::new(),
             browser_crate: None,
             browser_query: String::new(),
+            filter_cache: Default::default(),
             loader_tx: job_tx,
             loader_rx: res_rx,
             stems: crate::stems::StemsWorker::new(),
@@ -1091,6 +1105,9 @@ impl Core {
 
     /// Persist a grid edit (e.g. "grid start here" or BPM correction).
     pub fn set_grid(&mut self, d: usize, grid: dj_engine::track::BeatGrid) {
+        if !dj_engine::track::PLAUSIBLE_BPM.contains(&grid.bpm) {
+            return;
+        }
         self.deck_cmd(d, DeckCmd::SetGrid(Some(grid)));
         if let Some(info) = self.decks[d].info.as_mut() {
             info.grid_source = Some(GridSource::User);
@@ -1181,6 +1198,20 @@ impl Core {
 
     /// The browser's list: the library, or the selected crate's tracks (in the crate's order;
     /// those not found are left out), matching the search.
+    /// [`Core::filtered_library`] for the browser, which asks every frame: the same search on the
+    /// same list is filtered again at most every [`FILTER_REFRESH`] (to pick up tags that changed).
+    pub fn filtered_library_cached(&self) -> Vec<usize> {
+        let crate_len = self.browser_crate.and_then(|c| self.crates.get(c)).map(|c| c.tracks.len());
+        let key = (self.browser_query.clone(), self.browser_crate, crate_len, self.library.len());
+        let mut cache = self.filter_cache.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(c) = cache.as_ref().filter(|c| c.key == key && c.at.elapsed() < FILTER_REFRESH) {
+            return c.rows.clone();
+        }
+        let rows = self.filtered_library();
+        *cache = Some(FilterCache { key, at: Instant::now(), rows: rows.clone() });
+        rows
+    }
+
     pub fn filtered_library(&self) -> Vec<usize> {
         match self.browser_crate.and_then(|c| self.crates.get(c)) {
             Some(c) => {
