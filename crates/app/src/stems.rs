@@ -17,6 +17,10 @@ use stems_core::Stem as CoreStem;
 
 pub enum Update {
     Progress { deck: usize, track_id: u64, fraction: f32 },
+    /// The separator's model loads before this track's separation starts: a second or two, but
+    /// minutes the first time on the Neural Engine (its 16-bit model is made, then CoreML
+    /// compiles it).
+    LoadingModel { deck: usize, track_id: u64 },
     /// `cues`: cue points detected with the stems, when the request asked for them.
     Done { deck: usize, track_id: u64, stems: Arc<StemData>, wave: Arc<StemWave>, source: String, cues: Option<Vec<Cue>> },
     /// No stems for this track: none prepared and no HT-Demucs model, or it failed (`error`, to
@@ -222,6 +226,9 @@ fn run(job: Request, wanted: &[AtomicU64; NUM_DECKS], tx: &Sender<Update>, demuc
         }
         done(&job, tx, stems, name)
     };
+    if job.demucs.as_ref().is_some_and(|p| demucs.needs_load(p, threads)) {
+        let _ = tx.send(Update::LoadingModel { deck, track_id: id });
+    }
     let error = match &job.demucs {
         Some(path) => match demucs.separate(path, threads, &audio.frames, audio.sample_rate, &mut progress) {
             Ok((buffers, name)) => {
@@ -489,6 +496,19 @@ pub struct DemucsCache {
 }
 
 impl DemucsCache {
+    /// Whether [`DemucsCache::separate`] would load the model first.
+    pub fn needs_load(&self, path: &Path, threads: usize) -> bool {
+        #[cfg(any(feature = "stems-onnx", feature = "stems-onnx-dynamic"))]
+        {
+            !matches!(&self.loaded, Some((f, t, g, _)) if *f == demucs_files(path) && *t == threads && *g == GPU.load(Ordering::Relaxed))
+        }
+        #[cfg(not(any(feature = "stems-onnx", feature = "stems-onnx-dynamic")))]
+        {
+            let _ = (path, threads);
+            false
+        }
+    }
+
     #[cfg(any(feature = "stems-onnx", feature = "stems-onnx-dynamic"))]
     pub fn separate(
         &mut self,
@@ -751,7 +771,7 @@ mod tests {
         let deadline = std::time::Instant::now() + Duration::from_secs(60);
         loop {
             match w.try_recv() {
-                Some(Update::Progress { .. }) => {}
+                Some(Update::Progress { .. } | Update::LoadingModel { .. }) => {}
                 Some(u) => return u,
                 None if std::time::Instant::now() > deadline => panic!("timed out"),
                 None => std::thread::sleep(Duration::from_millis(5)),
@@ -823,6 +843,27 @@ mod tests {
 
     /// Needs ONNX Runtime at run time (with `stems-onnx-dynamic`, set ORT_DYLIB_PATH).
     #[cfg(any(feature = "stems-onnx", feature = "stems-onnx-dynamic"))]
+    #[cfg(any(feature = "stems-onnx", feature = "stems-onnx-dynamic"))]
+    #[test]
+    fn the_model_loads_once_and_says_so() {
+        let model = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../stems-core/tests/data/demucs_test.onnx"));
+        let mut cache = DemucsCache::default();
+        assert!(cache.needs_load(&model, 2), "nothing loaded yet");
+        cache.separate(&model, 2, &track(64, 0.1).audio.frames, 44_100, &mut |_| true).unwrap();
+        assert!(!cache.needs_load(&model, 2), "kept");
+        assert!(cache.needs_load(&model, 3), "other threads: loaded again");
+        // The worker says it's loading before the first track's stems.
+        let w = StemsWorker::new();
+        w.request(req(track(65, 1.0), Some(model), false, None));
+        let first = loop {
+            match w.try_recv() {
+                Some(u) => break u,
+                None => std::thread::sleep(Duration::from_millis(5)),
+            }
+        };
+        assert!(matches!(first, Update::LoadingModel { track_id: 65, .. }));
+    }
+
     #[test]
     fn demucs_stems_become_prepared_stems() {
         let dir = std::env::temp_dir().join(format!("dj-demucs-test-{}", std::process::id()));

@@ -154,6 +154,7 @@ pub fn stems_status(core: &Core, d: usize) -> Option<(String, Color32)> {
     match core.decks[d].stems_progress {
         Some(f) => Some((format!("stems {:.0}%", f * 100.0), DECK[d])),
         None if v.stems_ready => None,
+        None if core.decks[d].stems_model_loading => Some(("stems: model loading…".into(), TEXT_FAINT)),
         None => Some((core.decks[d].stems_missing.unwrap_or("stems…").into(), TEXT_FAINT)),
     }
 }
@@ -534,6 +535,7 @@ fn stems_row(ui: &mut Ui, core: &mut Core, d: usize, r: Rect) {
             (format!("Separating {:.0}%", f * 100.0), TEXT)
         }
         (None, _, true) if ready => (String::new(), TEXT_DIM),
+        (None, _, true) if core.decks[d].stems_model_loading => ("Loading model…".into(), TEXT_FAINT),
         (None, _, true) => (core.decks[d].stems_missing.unwrap_or("No stems").into(), TEXT_FAINT),
         _ => ("Stems".into(), TEXT_FAINT),
     };
