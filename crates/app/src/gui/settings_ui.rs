@@ -203,11 +203,6 @@ fn settings(ui: &mut Ui, core: &mut Core, st: &mut UiState) {
         ui.selectable_value(&mut core.settings.cue_points, CuePoints::Detected, "dj's detection")
             .on_hover_text("dj finds cue points in every track from its stems (Intro, Drop, Break, Vocal, Outro). Cues you set yourself are kept.");
     });
-    ui.label(
-        RichText::new("Tracks without a BPM tag get a detected tempo and beat grid (shown with ≈), and an estimated energy. Keys are never guessed.")
-            .small()
-            .weak(),
-    );
     ui.checkbox(&mut core.settings.match_loudness, "Match loudness")
         .on_hover_text("Measure each track's loudness when it loads and bring it to the same level, so a mix doesn't jump. Applies to tracks loaded after the change.");
     ui.horizontal(|ui| {
@@ -372,13 +367,6 @@ fn settings(ui: &mut Ui, core: &mut Core, st: &mut UiState) {
         ui.checkbox(&mut core.settings.stems_gpu, gpu).on_hover_text(
             "Switch it off to compare. Takes effect from the next track separated. On a Mac it uses the Neural Engine, not the GPU (the GPU draws dj's window: busy with stems, the window hangs); the first track takes a few minutes longer while CoreML compiles the model (kept for next time). Where it can't be used, it runs on the CPU, and the stems status says why.",
         );
-        ui.label(
-            RichText::new(
-                "Best-quality stems, made when a track loads (about 1–3 minutes; the deck plays the full mix meanwhile) and kept in the prepared-stems folder. HT-Demucs as converted by the Mixxx project; its weights are for non-commercial use only.",
-            )
-            .small()
-            .weak(),
-        );
 
         let mut prepared = core.settings.stems_prepared_dir().display().to_string();
         ui.horizontal(|ui| {
@@ -388,11 +376,6 @@ fn settings(ui: &mut Ui, core: &mut Core, st: &mut UiState) {
                 core.settings.stems_prepared_dir = (!p.is_empty()).then(|| p.into());
             }
         });
-        ui.label(
-            RichText::new("Separation runs in the background after a track loads; the deck plays the full mix until the stems are ready. Prepared stems take about 32 MB per minute of audio. Without HT-Demucs (or prepared stems) tracks have no stems.")
-                .small()
-                .weak(),
-        );
     }
 
     section(ui, "VST3");
@@ -430,7 +413,6 @@ fn settings(ui: &mut Ui, core: &mut Core, st: &mut UiState) {
             core.rescan_vst3();
         }
     });
-    ui.label(RichText::new("Each plugin is scanned in a separate process, so a broken plugin is listed as failed instead of crashing the app.").small().weak());
 
     if changed_engine {
         let s = core.settings.clone();
