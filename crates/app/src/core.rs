@@ -4615,10 +4615,17 @@ pub(crate) mod tests {
             }
         });
         assert!(checked);
-        // The old vocals sang through the whole mix: the new ones took over before its end (the
-        // new track all in before the old one's volume closed), not left out for later.
-        assert_eq!(c.snap.decks[1].stem_gains, [1.0; 4]);
-        assert!(c.vocal_return.is_none());
+        // The old vocals sang through the whole mix without a pause: never cut (they left with
+        // the old track's volume), so the new ones waited, and come back on their next phrase.
+        assert_eq!(c.snap.decks[1].stem_gains, [1.0, 1.0, 0.0, 1.0]);
+        assert!(c.vocal_return.is_some());
+        let deadline = Instant::now() + std::time::Duration::from_secs(60);
+        while c.vocal_return.is_some() {
+            assert!(Instant::now() < deadline, "the vocals never came back");
+            pump(&mut e, &mut c);
+        }
+        pump(&mut e, &mut c);
+        assert_eq!(c.snap.decks[1].stem_gains, [1.0; 4], "all in again");
     }
 
     #[test]
