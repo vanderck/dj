@@ -361,7 +361,7 @@ impl StructureCache {
     pub fn analyze(&mut self, threads: usize, audio: &dj_engine::track::AudioData, stems: &StemData) -> Result<Structure, String> {
         use stems_core::structure::{mono_44k, StructureModel};
         if self.loaded.as_ref().is_none_or(|(t, _)| *t != threads) {
-            let options = stems_core::OnnxOptions { intra_threads: threads };
+            let options = stems_core::OnnxOptions { intra_threads: threads, ..Default::default() };
             self.loaded = Some((threads, StructureModel::new(&options).map_err(|e| e.to_string())?));
         }
         let (_, model) = self.loaded.as_ref().expect("loaded above");
@@ -485,7 +485,7 @@ pub fn demucs_files(path: &Path) -> Vec<PathBuf> {
 #[derive(Default)]
 pub struct DemucsCache {
     #[cfg(any(feature = "stems-onnx", feature = "stems-onnx-dynamic"))]
-    loaded: Option<(Vec<PathBuf>, usize, stems_core::demucs::DemucsModel)>,
+    loaded: Option<(Vec<PathBuf>, usize, bool, stems_core::demucs::DemucsModel)>,
 }
 
 impl DemucsCache {
@@ -500,15 +500,23 @@ impl DemucsCache {
     ) -> Result<(StemBuffers, String), OfflineError> {
         use stems_core::demucs::DemucsModel;
         let files = demucs_files(path);
-        if !matches!(&self.loaded, Some((f, t, _)) if *f == files && *t == threads) {
+        if !matches!(&self.loaded, Some((f, t, g, _)) if *f == files && *t == threads && *g == GPU.load(Ordering::Relaxed)) {
             self.loaded = None; // free the old model before loading another
-            let options = stems_core::OnnxOptions { intra_threads: threads };
+            let gpu = GPU.load(Ordering::Relaxed);
+            let options = stems_core::OnnxOptions { intra_threads: threads, gpu, gpu_cache: Some(crate::settings::config_dir().join("models").join("coreml-cache-ane")) };
             let model = DemucsModel::from_files(&files, &options).map_err(|e| OfflineError::Model(e.to_string()))?;
-            self.loaded = Some((files, threads, model));
+            eprintln!("stems: {} on the {}", model.name(), model.device());
+            self.loaded = Some((files, threads, gpu, model));
         }
-        let (_, _, model) = self.loaded.as_mut().unwrap();
+        let (_, _, _, model) = self.loaded.as_mut().unwrap();
         let stems = model.separate(frames, rate, progress)?;
-        Ok((stems, model.name().to_string()))
+        // With acceleration asked for, where it ran shows with the stems ("HT-Demucs · Neural
+        // Engine (CoreML)", or "· CPU (no acceleration: why)").
+        let source = match model.device() {
+            stems_core::Device::Cpu(None) => model.name().to_string(),
+            d => format!("{} · {d}", model.name()),
+        };
+        Ok((stems, source))
     }
 
     #[cfg(not(any(feature = "stems-onnx", feature = "stems-onnx-dynamic")))]
@@ -523,6 +531,10 @@ impl DemucsCache {
         Err(OfflineError::Model(format!("cannot use {}: built without ONNX support", path.display())))
     }
 }
+
+/// Separate stems on the GPU (`Settings::stems_gpu`, kept here for the worker threads): the
+/// model loads again, on the GPU or the CPU, when it changes.
+pub static GPU: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Where dj keeps a downloaded HT-Demucs model.
 pub fn default_demucs_path() -> PathBuf {

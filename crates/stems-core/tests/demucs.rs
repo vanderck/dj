@@ -24,6 +24,10 @@ fn signal(n: usize) -> Vec<[f32; 2]> {
 }
 
 fn check(model: &mut DemucsModel, n: usize) {
+    check_within(model, n, 1e-5);
+}
+
+fn check_within(model: &mut DemucsModel, n: usize, tol: f32) {
     let x = signal(n);
     let mut calls = Vec::new();
     let stems = model
@@ -45,7 +49,7 @@ fn check(model: &mut DemucsModel, n: usize) {
             for c in 0..2 {
                 let want = GAIN[s as usize] * (x[c] - m) + m;
                 assert!(
-                    (y[c] - want).abs() < 1e-5,
+                    (y[c] - want).abs() < tol,
                     "{} sample {i} ch {c}: {} vs {want}",
                     s.name(),
                     y[c]
@@ -54,6 +58,48 @@ fn check(model: &mut DemucsModel, n: usize) {
         }
     }
     assert_eq!(calls.last(), Some(&1.0));
+}
+
+#[test]
+fn the_gpu_option_runs_where_it_can_and_says_where() {
+    use stems_core::Device;
+    let options = OnnxOptions {
+        gpu: true,
+        ..OnnxOptions::default()
+    };
+    let mut model =
+        DemucsModel::from_files(&[format!("{DIR}/demucs_test.onnx")], &options).unwrap();
+    // On an accelerator (the Neural Engine with CoreML, the GPU with DirectML), or on the CPU
+    // with the reason it isn't (none on this system, or the model doesn't run there).
+    match model.device() {
+        Device::Accelerator(name) => {
+            assert!(["Neural Engine (CoreML)", "GPU (DirectML)"].contains(name))
+        }
+        Device::Cpu(why) => assert!(
+            why.as_deref().is_some_and(|w| !w.is_empty()),
+            "{:?}",
+            model.device()
+        ),
+    }
+    let shown = model.device().to_string();
+    assert!(
+        shown == "Neural Engine (CoreML)"
+            || shown == "GPU (DirectML)"
+            || shown.starts_with("CPU (no acceleration: "),
+        "{shown}"
+    );
+    // The same stems either way (the Neural Engine computes in half precision).
+    for n in [3456, 999] {
+        check_within(&mut model, n, 2e-3);
+    }
+    // Without it: the CPU, nothing to explain.
+    let cpu = DemucsModel::from_files(
+        &[format!("{DIR}/demucs_test.onnx")],
+        &OnnxOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(cpu.device(), &Device::Cpu(None));
+    assert_eq!(cpu.device().to_string(), "CPU");
 }
 
 #[test]
