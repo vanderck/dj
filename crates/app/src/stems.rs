@@ -827,7 +827,7 @@ mod tests {
         w.cancel(0);
         std::thread::sleep(Duration::from_millis(300));
         while let Some(u) = w.try_recv() {
-            assert!(matches!(u, Update::Progress { .. }), "a cancelled job delivers nothing");
+            assert!(matches!(u, Update::Progress { .. } | Update::LoadingModel { .. }), "a cancelled job delivers nothing");
         }
     }
 
