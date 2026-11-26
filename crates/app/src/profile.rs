@@ -242,6 +242,7 @@ impl Preparer {
         std::thread::Builder::new()
             .name("prepare".into())
             .spawn(move || {
+                stems::background_thread();
                 let mut caches = (stems::DemucsCache::default(), stems::StructureCache::default());
                 let set = |f: &dyn Fn(&mut PrepState)| {
                     if let Ok(mut s) = st.lock() {

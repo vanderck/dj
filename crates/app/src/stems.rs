@@ -85,6 +85,7 @@ impl StemsWorker {
         std::thread::Builder::new()
             .name("stems".into())
             .spawn(move || {
+                background_thread();
                 let mut demucs = DemucsCache::default();
                 while let Ok(job) = job_rx.recv() {
                     run(job, &w, &tx, &mut demucs, &section_tx);
@@ -96,6 +97,7 @@ impl StemsWorker {
         std::thread::Builder::new()
             .name("sections".into())
             .spawn(move || {
+                background_thread();
                 let mut model = StructureCache::default();
                 while let Ok(job) = section_rx.recv() {
                     if w[job.deck].load(Ordering::Relaxed) == job.track.id {
@@ -555,6 +557,25 @@ impl DemucsCache {
 /// Separate stems on the GPU (`Settings::stems_gpu`, kept here for the worker threads): the
 /// model loads again, on the GPU or the CPU, when it changes.
 pub static GPU: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Lower this thread's priority (and that of the threads it starts: ONNX Runtime's, CoreML's)
+/// below the app's: separation, sections and preparing are background work, and must never
+/// keep the audio or the screen waiting. On macOS, QoS "utility" (still on all cores, but
+/// yielding to interactive work).
+pub fn background_thread() {
+    #[cfg(target_os = "macos")]
+    {
+        // <pthread/qos.h>: QOS_CLASS_UTILITY.
+        const QOS_CLASS_UTILITY: u32 = 0x11;
+        extern "C" {
+            fn pthread_set_qos_class_self_np(class: u32, relative_priority: i32) -> i32;
+        }
+        // SAFETY: sets the calling thread's own QoS class; no memory is touched.
+        unsafe {
+            pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
+        }
+    }
+}
 
 /// Where dj keeps a downloaded HT-Demucs model.
 pub fn default_demucs_path() -> PathBuf {
