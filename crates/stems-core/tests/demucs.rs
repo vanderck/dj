@@ -246,6 +246,9 @@ fn a_16_bit_model_separates_as_the_full_one() {
         half,
         "made once"
     );
+    // With the key CoreML keeps its compiled model under, so a restart doesn't compile again.
+    let bytes = std::fs::read(&half).unwrap();
+    assert!(bytes.windows(16).any(|w| w == b"COREML_CACHE_KEY"));
     let mut model = DemucsModel::from_files(&[&half], &OnnxOptions::default()).unwrap();
     for n in [3456, 999] {
         check_within(&mut model, n, 2e-3);

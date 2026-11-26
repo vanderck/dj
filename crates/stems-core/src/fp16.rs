@@ -117,7 +117,22 @@ pub fn half_precision(model: &[u8]) -> Result<(Vec<u8>, Converted), ModelError> 
     if stats.half_nodes == 0 {
         return Err(err("no network nodes to make 16-bit"));
     }
+    // CoreML compiles a model once and keeps it in the cache folder under this key (else one
+    // ONNX Runtime works out itself): the source model's hash, so a restart finds it again
+    // and a new model doesn't reuse the old one's.
+    let mut entry = Vec::new();
+    put_bytes(&mut entry, 1, b"COREML_CACHE_KEY");
+    put_bytes(&mut entry, 2, cache_key(model).as_bytes());
+    put_bytes(&mut out, 14, &entry);
     Ok((out, stats))
+}
+
+/// "dj16" and the 64-bit FNV-1a hash of `model`, in hex (CoreML wants letters and digits only).
+pub fn cache_key(model: &[u8]) -> String {
+    let h = model.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
+        (h ^ *b as u64).wrapping_mul(0x100_0000_01b3)
+    });
+    format!("dj16{h:016x}")
 }
 
 fn err(why: &str) -> ModelError {
@@ -636,6 +651,15 @@ mod tests {
         assert_eq!(f16_bits(1.0 + 1.0 / 2048.0), 0x3c00, "a tie, to even");
         assert_eq!(f16_bits(1.0 + 3.0 / 2048.0), 0x3c02, "a tie, to even (up)");
         assert_eq!(f16_bits(0.1), 0x2e66);
+    }
+
+    #[test]
+    fn the_cache_key_follows_the_model() {
+        assert_eq!(cache_key(b""), "dj16cbf29ce484222325");
+        assert_ne!(cache_key(b"a"), cache_key(b"b"));
+        assert!(cache_key(b"model")
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric()));
     }
 
     #[test]
