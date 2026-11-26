@@ -424,15 +424,19 @@ fn encode_tensor(t: &Tensor, half: Option<&str>) -> Result<Vec<u8>, ModelError> 
         match (f.num, &f.val) {
             (9, Val::Bytes(raw)) => {
                 values.extend(
-                    raw.chunks_exact(4)
-                        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])),
+                    raw.as_chunks::<4>()
+                        .0
+                        .iter()
+                        .map(|c| f32::from_le_bytes(*c)),
                 );
             }
             (4, Val::Bytes(packed)) => {
                 values.extend(
                     packed
-                        .chunks_exact(4)
-                        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])),
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .map(|c| f32::from_le_bytes(*c)),
                 );
             }
             (4, Val::Fixed32(v)) => values.push(f32::from_bits(*v)),
