@@ -5181,7 +5181,13 @@ pub(crate) mod tests {
         c.profile.mappings.push(MidiMapping { source, address: "Mixer/CH2/Volume".into(), mode: MapMode::Absolute, invert: false, feedback: false });
         c.handle_midi(&[0xb0, 8, 0]);
         c.handle_midi(&[0xb0, 8, 90]);
-        assert!(c.automix.as_ref().is_some_and(|m| m.plan.start_beat > c.mix_beat() + 1.0), "a mix, not begun yet");
+        assert!(
+            c.automix.as_ref().is_some_and(|m| !Core::mix_released(m)),
+            "a mix, not begun yet: {:?} at {} · {:?}",
+            c.automix.as_ref().map(|m| m.plan.start_beat),
+            c.mix_beat(),
+            c.status
+        );
         c.handle_midi(&[0xb0, 8, 0]);
         assert!(c.automix.is_none(), "called off");
         pump(&mut e, &mut c);
