@@ -176,9 +176,10 @@ pub struct AutoMix {
     in_seen: bool,
     /// The old track has played to its end (the mix carries on bringing the new one in).
     old_over: bool,
-    /// Fader mix (Settings): the mix in two halves, started by the MIDI faders, which stay the
-    /// decks' volumes. The new track's stems or EQ bring it in over the plan's bars from the
-    /// start; the old one's take it out over [`FADER_OUT_BEATS`] once its fader starts down.
+    /// Fader mix (Settings): the mix in two halves, started by the MIDI faders. The new track's
+    /// stems or EQ bring it in over the plan's bars from the start, its fader its volume; the old
+    /// deck's fader coming down takes its track out on its stems and EQ, then its volume (see
+    /// [`fader_out_split`]).
     fader: bool,
     /// Fader mix: the old deck's fader has come down (its half has begun); until then the old
     /// track plays on in full.
@@ -210,8 +211,26 @@ pub struct VocalReturn {
 const FADER_BOTTOM: f32 = 0.05;
 /// Fader mix: how far the old deck's fader comes down to begin taking its track out.
 const FADER_MOVE: f32 = 0.03;
-/// Fader mix: the old track's half (its stems or EQ out), once its fader starts down: 4 bars.
-const FADER_OUT_BEATS: f64 = 16.0;
+/// Fader mix: the share of the old deck's fader's travel (from where it was) where only its
+/// stems and EQ take it out; below it, its volume goes too.
+const FADER_STEMS_SHARE: f32 = 0.6;
+
+/// Fader mix: the old deck's fader at `v`, down from `from` (where it was as the mix began): how
+/// far its track is out on its stems and EQ (0..1, over the whole travel), and its volume (as it
+/// was over the top [`FADER_STEMS_SHARE`] of the travel, then down with the fader to silence at
+/// the bottom; above `from`, the fader).
+fn fader_out_split(v: f32, from: f32) -> (f64, f32) {
+    if v >= from {
+        return (0.0, v);
+    }
+    if v <= FADER_BOTTOM {
+        return (1.0, 0.0);
+    }
+    let travel = ((from - v) / (from - FADER_BOTTOM).max(0.05)).clamp(0.0, 1.0);
+    let stems = travel as f64;
+    let vol = if travel <= FADER_STEMS_SHARE { from } else { from * (1.0 - (travel - FADER_STEMS_SHARE) / (1.0 - FADER_STEMS_SHARE)) };
+    (stems, vol)
+}
 
 /// Fits: within 5 % of the playing tempo (real DJs keep 86 % of tracks within 5 % of their own).
 pub const FITS_PCT: f64 = 5.0;
@@ -1385,8 +1404,13 @@ impl Core {
                 self.route(&format!("Mixer/CH{}/Volume", ch + 1), &[OscType::Float(0.0)]);
                 self.log(format!("Deck {}: mix called off (fader down)", ch + 1));
             } else if going_out || released {
-                // Its volume (a mix closes it over its last bar, on the tick).
-                self.mix_set(&format!("Mixer/CH{}/Volume", ch + 1), self.fader_volume(ch, Some(v)));
+                // Its volume: going out of a fader mix, only over the lower part of the fader's
+                // travel (the upper part takes it out on its stems and EQ, on the tick).
+                let vol = match self.mixes().find(|m| m.fader && m.plan.outgoing == ch) {
+                    Some(m) => fader_out_split(v, m.out_ref).1,
+                    None => self.fader_volume(ch, Some(v)),
+                };
+                self.mix_set(&format!("Mixer/CH{}/Volume", ch + 1), vol);
             }
             return true;
         }
@@ -1470,6 +1494,12 @@ impl Core {
                 self.deck_cmd(i, DeckCmd::Semitones(m.in_semitones));
             }
             // Not brought in yet: it still waits, silent (say so: the old track may be ending).
+            // With the faders: the old deck's volume is its fader again (no mix to share it with).
+            if m.fader && !self.mixes().any(|x| x.plan.outgoing == o) {
+                if let Some(v) = self.fader_hw[o] {
+                    self.mix_set(&format!("Mixer/CH{}/Volume", o + 1), self.fader_volume(o, Some(v)));
+                }
+            }
             let waiting = !m.released && !m.external;
             self.log(if waiting { format!("Mix cancelled: deck {} still waits, volume down", i + 1) } else { "Mix cancelled".to_string() });
         }
@@ -2043,30 +2073,43 @@ impl Core {
                 .max(0.0),
             _ => 0.0,
         };
+        // Fader mix: how far the old deck's fader has come down (its travel, 0..1), once its half
+        // began (and the new track has started).
+        let fader_out = (m.fader && !finish && m.out_from.is_some() && beat >= start).then(|| {
+            if old_gone {
+                1.0
+            } else {
+                fader_out_split(self.fader_hw[o].unwrap_or(m.out_ref), m.out_ref).0
+            }
+        });
         let bp_out = match (m.fader && !finish, m.out_from) {
             (false, _) => bp,
             (true, None) => -1.0,
             (true, Some(_)) if old_gone => bars_n,
-            (true, Some(t)) => {
-                // The next bar line of the mix (its bars line up with the old track's).
-                // (Never before the new track has started: no gap.)
-                let t0 = start + ((t - start) / 4.0).ceil().max(0.0) * 4.0;
-                if beat < t0 {
-                    -1.0
-                } else {
-                    (first_out + (beat - t0) / FADER_OUT_BEATS * (bars_n - first_out)).min(bars_n)
-                }
-            }
+            // As far as its fader has come down (from the plan's first move on it): pull slowly
+            // for a long blend, quickly for a short one. (Never before the new track has started:
+            // no gap.)
+            (true, Some(_)) if beat < start => -1.0,
+            (true, Some(_)) => first_out + fader_out.unwrap_or(0.0) * (bars_n - first_out),
         };
         let po = bp_out / bars_n; // the old track's half, 0..1
         let fader = m.fader;
-        // Fader mix: the faders are the volumes (the old one closed by the mix at its end).
-        let out_volume = if fader { self.fader_volume(o, self.fader_hw[o]) } else { out_volume };
+        // Fader mix: the new fader is its volume; the old one's volume goes over the lower part of
+        // its travel.
+        let out_volume = if fader {
+            match self.fader_hw[o] {
+                Some(v) => fader_out_split(v, m.out_ref).1,
+                None => self.session.channels[o].params.volume,
+            }
+        } else {
+            out_volume
+        };
         // Done when both halves are.
         let p_end = if fader && !finish { p.min(po) } else { p };
         // The old track's volume closes only over the last bar, once its EQ or stems have taken
         // it out.
-        let out_vol = 1.0 - smooth(bp_out - (bars_n - 1.0));
+        // (With the faders, the fader does that.)
+        let out_vol = if fader { 1.0 } else { 1.0 - smooth(bp_out - (bars_n - 1.0)) };
         let (filter, echo_at, echo_slot, out_cutoff) = (m.plan.filter, m.plan.echo_at, m.echo_slot, m.out_cutoff);
         let (in_stems, out_stems, vocals_out) = (m.in_stems, m.out_stems, m.vocals_out);
         let vol = |c: usize| format!("Mixer/CH{}/Volume", c + 1);
@@ -2126,6 +2169,16 @@ impl Core {
                     None => stems_at((x / bars_n).clamp(0.0, 1.0), vocals_out, true),
                 };
                 let (mut si, mut so) = (at(bp).0, at(bp_out).1);
+                // Fader mix: the old fader takes every part out along its travel, whatever the
+                // plan left to the volume: the music first, then the drums (the bass and voice,
+                // if they haven't swapped yet, as it begins); its volume goes last (see
+                // `fader_out_split`).
+                if let Some(t) = fader_out {
+                    so[OTHER] = so[OTHER].min(1.0 - smooth(t / 0.5));
+                    so[DRUMS] = so[DRUMS].min(1.0 - smooth((t - 0.25) / 0.6));
+                    so[BASS] = so[BASS].min(1.0 - smooth(t / 0.3));
+                    so[VOCALS] = so[VOCALS].min(1.0 - smooth(t / 0.3));
+                }
                 // Fader mix: the voice and the bass swap on the new track's half (its fader): the
                 // old ones go on the plan's bars even before the old fader moves, so the new ones
                 // come in; the old fader takes the rest (drums, music) out.

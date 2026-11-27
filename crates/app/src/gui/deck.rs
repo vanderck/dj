@@ -867,7 +867,7 @@ fn fader_mix_slot(ui: &mut Ui, core: &mut Core, d: usize, rect: Rect, font: egui
     if waiting_out {
         let label = if rect.width() < 120.0 { "Fader ↓" } else { "Fader ↓: out" };
         button(ui, rect, label, Style::Outline(GREEN, true), font)
-            .on_hover_text("Start this deck's fader down: its stems or EQ take the track out over 4 bars, then take the fader to the bottom (until then it plays on in full)");
+            .on_hover_text("Bring this deck's fader down: it takes the track out on its stems and EQ as you go (the music, then the drums), its volume in the lower part (until then it plays on in full)");
         return;
     }
     let style = core.settings.mix_style;
