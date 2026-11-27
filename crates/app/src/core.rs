@@ -4401,6 +4401,30 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_old_vocals_go_in_a_pause_of_theirs() {
+        let (mut e, mut c, _config) = core();
+        mix_setup(&mut e, &mut c);
+        // The old singer pauses 3 s every 8 s; the new track doesn't sing.
+        let w = c.decks[0].stem_wave.clone().expect("stems");
+        let per = w.bins_per_sec;
+        let mut levels = w.levels.clone();
+        levels[2] = (0..levels[2].len()).map(|k| if (k as f64 / per) % 8.0 < 3.0 { 0.0 } else { 0.5 }).collect();
+        c.decks[0].stem_wave = Some(Arc::new(crate::stems::StemWave { bins_per_sec: per, levels }));
+        no_singing(&mut c, 1);
+        let plan = c.plan_now(1, 0, crate::settings::MixStyle::Stems);
+        assert!(plan.blend.as_ref().is_some_and(|b| b.out_at[2].is_some()), "the plan cuts the old vocals");
+        c.start_mix(plan);
+        let mut out_at = None;
+        run_mix(&mut e, &mut c, |c, _| {
+            if out_at.is_none() && c.snap.decks[0].stem_gains[2] < 1.0 {
+                out_at = Some(c.snap.decks[0].position_secs % 8.0);
+            }
+        });
+        let t = out_at.expect("the old vocals went");
+        assert!((1.0..3.2).contains(&t), "after a second of their pause, not mid-line: {t:.2} s into the 8 s cycle");
+    }
+
+    #[test]
     fn a_mashup_brings_the_new_vocals_over_the_old_music() {
         use crate::settings::MixStyle;
         let (mut e, mut c, _config) = core();
@@ -4414,6 +4438,7 @@ pub(crate) mod tests {
         let voice = (0..w.levels[2].len()).map(|k| if (k as f64 / per) % 8.0 < 1.25 { 0.0 } else { 0.5 }).collect();
         let sung = crate::stems::StemWave { bins_per_sec: w.bins_per_sec, levels: [w.levels[0].clone(), w.levels[1].clone(), voice, w.levels[3].clone()] };
         c.decks[1].stem_wave = Some(Arc::new(sung));
+        no_singing(&mut c, 0);
         let plan = c.plan_now(1, 0, MixStyle::Mashup);
         assert_eq!(plan.why_how, "mashup");
         let b = plan.blend.clone().expect("a stems plan");
