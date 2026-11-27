@@ -4920,25 +4920,34 @@ pub(crate) mod tests {
             assert_eq!((gi[0], gi[1], gi[3]), (1.0, 1.0, 1.0), "the new drums, bass and music in: {gi:?}");
             assert_eq!(go[1], 0.0, "the old bass swapped out: {go:?}");
         }
-        // Its fader starts down: its volume follows, its stems or EQ take it out over 4 bars.
-        fader(&mut c, 7, 0.8);
-        assert_eq!(c.fader_mix_waiting_out(0), false);
-        assert!((c.session.channels[0].params.volume - 0.8).abs() < 0.01);
-        let at = c.snap.clock.beat;
-        // Nothing moves before the next bar line: the fade starts on it.
-        let bar = start + ((c.mix_beat() - start) / 4.0).ceil() * 4.0;
-        let eq = |c: &Core| c.session.channels[0].params.eq;
-        let eq0 = eq(&c);
+        // Its fader coming down: the upper part of its travel takes the old track out on its
+        // stems and EQ (as far as it's down), its volume as it was; the lower part its volume.
         let g0 = c.snap.decks[0].stem_gains;
-        while c.mix_beat() < bar - 0.3 {
+        let out_level = |g: [f32; 4]| g[0] + g[3];
+        fader(&mut c, 7, 0.5);
+        assert_eq!(c.fader_mix_waiting_out(0), false);
+        for _ in 0..8 {
             pump(&mut e, &mut c);
-            assert_eq!(c.snap.decks[0].stem_gains, g0, "before the bar");
-            assert_eq!(eq(&c), eq0, "before the bar");
         }
+        assert_eq!(c.session.channels[0].params.volume, old_volume, "the volume as it was");
+        let g1 = c.snap.decks[0].stem_gains;
+        if stems {
+            assert!(out_level(g1) < out_level(g0), "partly out on its stems: {g0:?} → {g1:?}");
+            assert!(out_level(g1) > 0.0, "not all out yet: {g1:?}");
+        }
+        fader(&mut c, 7, 0.2);
+        for _ in 0..8 {
+            pump(&mut e, &mut c);
+        }
+        let v = c.session.channels[0].params.volume;
+        assert!(v > 0.1 && v < old_volume - 0.1, "now its volume too: {v}");
+        if stems {
+            assert!(out_level(c.snap.decks[0].stem_gains) < out_level(g1), "further out");
+        }
+        assert!(c.automix.is_some(), "not over before the bottom");
+        // At the bottom: over.
+        fader(&mut c, 7, 0.0);
         run_mix(&mut e, &mut c, |_, _| {});
-        let took = c.snap.clock.beat - at;
-        // From the next bar line: 4 bars, after up to a bar's wait.
-        assert!((15.0..21.0).contains(&took), "4 bars: {took} beats");
         assert!(!c.snap.decks[0].playing);
         assert_eq!(c.session.channels[0].params.volume, 0.0);
         assert!((c.session.channels[1].params.volume - 0.8).abs() < 0.01, "still its fader");
@@ -5013,6 +5022,11 @@ pub(crate) mod tests {
         let basses = |c: &Core| (0..3).filter(|&d| c.snap.decks[d].playing && c.session.channels[d].params.volume > 0.0 && c.snap.decks[d].stem_gains[1] > 0.0).count();
         // Deck 1's fader down: out of its mix, which ends; deck 3's runs on.
         c.handle_midi(&[0xb0, 7, 60]);
+        for _ in 0..16 {
+            pump(&mut e, &mut c);
+            assert!(basses(&c) <= 1);
+        }
+        c.handle_midi(&[0xb0, 7, 0]);
         let deadline = Instant::now() + std::time::Duration::from_secs(60);
         while !c.other_mixes.is_empty() {
             assert!(Instant::now() < deadline, "deck 1 never went");
@@ -5025,6 +5039,11 @@ pub(crate) mod tests {
         assert_eq!(c.automix.as_ref().map(|m| m.plan.incoming), Some(2));
         // Deck 2's down: the last mix ends; deck 3 plays on, all in.
         c.handle_midi(&[0xb0, 8, 60]);
+        for _ in 0..16 {
+            pump(&mut e, &mut c);
+            assert!(basses(&c) <= 1);
+        }
+        c.handle_midi(&[0xb0, 8, 0]);
         let deadline = Instant::now() + std::time::Duration::from_secs(60);
         while c.automix.is_some() {
             assert!(Instant::now() < deadline, "deck 2 never went");
