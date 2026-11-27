@@ -1259,6 +1259,12 @@ impl Core {
             return false;
         }
         let prev = self.fader_hw[ch].replace(v);
+        // In this mode the fader is the volume: no pick-up to wait for (dj setting the volume,
+        // at the end of a mix say, would otherwise leave it waiting for a fader that, coming up
+        // from the bottom, never passes the volume dj left).
+        if let Some((key, _)) = self.pickup_point(&format!("Mixer/CH{}/Volume", ch + 1)) {
+            self.pickup.remove(&key);
+        }
         if let Some(m) = self.automix.as_ref() {
             let (i, o, released) = (m.plan.incoming, m.plan.outgoing, m.released);
             if ch == i {
