@@ -269,9 +269,30 @@ fn assemble(app: &Path, binary: &Path, o: &Options) -> Result<(), String> {
         None => false,
     };
 
+    // HT-Demucs's network for Core ML (the Neural Engine), compiled, when the build made one
+    // (tools/htdemucs_coreml; CI sets DJ_COREML_MODEL to the .mlmodelc).
+    if let Some(model) = std::env::var_os("DJ_COREML_MODEL").filter(|v| !v.is_empty()) {
+        copy_dir(Path::new(&model), &resources.join("htdemucs.mlmodelc"))?;
+    }
+
     let plist = info_plist(&o.bundle_id, version(), &o.min_macos, has_icon);
     fs::write(contents.join("Info.plist"), plist).map_err(|e| io("write Info.plist", e))?;
     fs::write(contents.join("PkgInfo"), "APPL????").map_err(|e| io("write PkgInfo", e))?;
+    Ok(())
+}
+
+fn copy_dir(from: &Path, to: &Path) -> Result<(), String> {
+    let err = |e: std::io::Error| format!("copy {} to {}: {e}", from.display(), to.display());
+    fs::create_dir_all(to).map_err(err)?;
+    for entry in fs::read_dir(from).map_err(err)? {
+        let entry = entry.map_err(err)?;
+        let dest = to.join(entry.file_name());
+        if entry.file_type().map_err(err)?.is_dir() {
+            copy_dir(&entry.path(), &dest)?;
+        } else {
+            fs::copy(entry.path(), &dest).map_err(err)?;
+        }
+    }
     Ok(())
 }
 

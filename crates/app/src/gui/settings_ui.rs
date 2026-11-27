@@ -358,14 +358,14 @@ fn settings(ui: &mut Ui, core: &mut Core, st: &mut UiState) {
             }
         }
         let gpu = if cfg!(target_os = "macos") {
-            "Separate on the Neural Engine (CoreML)"
+            "Separate on the Neural Engine (Core ML)"
         } else if cfg!(windows) {
             "Separate on the GPU (DirectML)"
         } else {
             "Separate with acceleration (not on this system: runs on the CPU)"
         };
         ui.checkbox(&mut core.settings.stems_gpu, gpu).on_hover_text(
-            "Switch it off to compare. Takes effect from the next track separated. On a Mac it uses the Neural Engine, not the GPU (the GPU draws dj's window: busy with stems, the window hangs); the first track takes a few minutes longer while CoreML compiles the model (kept for next time). Where it can't be used, it runs on the CPU, and the stems status says why.",
+            "Switch it off to compare. Takes effect from the next track separated. On a Mac it runs dj's own Core ML model of HT-Demucs (16-bit, in the app) on the Neural Engine, not the GPU (the GPU draws dj's window). Where it can't be used, it runs on the CPU, and the stems status says why.",
         );
 
         let mut prepared = core.settings.stems_prepared_dir().display().to_string();

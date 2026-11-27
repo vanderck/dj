@@ -40,11 +40,100 @@ pub const SAMPLE_RATE: u32 = 44_100;
 /// Fraction of each segment shared with the next (Demucs' default).
 pub const OVERLAP: f32 = 0.25;
 
+/// A network that runs without HT-Demucs's signal processing (see [`crate::spec`]): the
+/// normalised spectrogram and wave of a segment in, the sources' (still normalised) out.
+pub(crate) trait Network: Send {
+    /// `spec`: [4, BINS, frames], `wave`: [2, len] → ([S, 4, BINS, frames], [S, 2, len]).
+    fn run(&mut self, spec: &[f32], wave: &[f32]) -> Result<(Vec<f32>, Vec<f32>), String>;
+}
+
+enum Runner {
+    /// The whole of HT-Demucs in one ONNX model (Mixxx's export): wave in, sources out.
+    Whole {
+        session: Session,
+        input_name: String,
+    },
+    /// Just the network; the spectrogram and its inverse here.
+    Network(Box<dyn Network>),
+}
+
+/// The network part of HT-Demucs as ONNX (inputs `spec` and `wave`), as `tools/htdemucs_coreml`
+/// writes it with `--onnx`: the same network as the Core ML model, for systems without it.
+struct OnnxNetwork(Session);
+
+impl Network for OnnxNetwork {
+    fn run(&mut self, spec: &[f32], wave: &[f32]) -> Result<(Vec<f32>, Vec<f32>), String> {
+        let frames = spec.len() / (4 * crate::spec::BINS);
+        let len = wave.len() / 2;
+        let s = TensorRef::from_array_view(([1usize, 4, crate::spec::BINS, frames], spec))
+            .map_err(|e| e.to_string())?;
+        let w = TensorRef::from_array_view(([1usize, 2, len], wave)).map_err(|e| e.to_string())?;
+        let out = self
+            .0
+            .run(ort::inputs!["spec" => s, "wave" => w])
+            .map_err(|e| e.to_string())?;
+        let spec_out = out["spec_out"]
+            .try_extract_tensor::<f32>()
+            .map_err(|e| e.to_string())?
+            .1
+            .to_vec();
+        let wave_out = out["wave_out"]
+            .try_extract_tensor::<f32>()
+            .map_err(|e| e.to_string())?
+            .1
+            .to_vec();
+        Ok((spec_out, wave_out))
+    }
+}
+
 struct Part {
-    session: Session,
-    input_name: String,
+    runner: Runner,
     /// Output source index -> our [`Stem`], for the sources taken from this model.
     take: Vec<(usize, Stem)>,
+}
+
+impl Part {
+    /// The sources for one segment (`buf`: [2, seg]): [S, 2, seg].
+    fn run(&mut self, buf: &[f32], seg: usize) -> Result<Vec<f32>, OfflineError> {
+        let model = |e: String| OfflineError::Model(e);
+        match &mut self.runner {
+            Runner::Whole {
+                session,
+                input_name,
+            } => {
+                let tensor = TensorRef::from_array_view(([1usize, 2, seg], buf))
+                    .map_err(|e| model(e.to_string()))?;
+                let outputs = session
+                    .run(ort::inputs![input_name.as_str() => tensor])
+                    .map_err(|e| model(e.to_string()))?;
+                let (shape, data) = outputs[0]
+                    .try_extract_tensor::<f32>()
+                    .map_err(|e| model(e.to_string()))?;
+                if shape.len() != 4 || shape[2] != 2 || shape[3] as usize != seg {
+                    return Err(model(format!(
+                        "output shape {shape:?}, expected [1, S, 2, {seg}]"
+                    )));
+                }
+                Ok(data.to_vec())
+            }
+            Runner::Network(net) => {
+                let inputs = crate::spec::inputs(buf, seg);
+                let (spec_out, wave_out) = net.run(&inputs.spec, &inputs.wave).map_err(model)?;
+                let sources = wave_out.len() / (2 * seg);
+                if sources == 0
+                    || wave_out.len() != sources * 2 * seg
+                    || spec_out.len() != sources * inputs.spec.len()
+                {
+                    return Err(model(format!(
+                        "network outputs of {} and {} values, for {seg} samples",
+                        spec_out.len(),
+                        wave_out.len()
+                    )));
+                }
+                Ok(crate::spec::sources(&inputs, &spec_out, &wave_out, seg))
+            }
+        }
+    }
 }
 
 pub struct DemucsModel {
@@ -79,6 +168,21 @@ impl DemucsModel {
         let mut device = None;
         for path in paths {
             let path = path.as_ref();
+            if crate::coreml::is_coreml(path) {
+                // HT-Demucs's network for Core ML (the Neural Engine): one model, all stems.
+                let (net, n, on) = crate::coreml::load(path)?;
+                device = Some(on);
+                segment = Some(n);
+                parts.push(Part {
+                    runner: Runner::Network(net),
+                    take: DEFAULT_SOURCES
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, s)| Some((i, stem_from_name(s)?)))
+                        .collect(),
+                });
+                continue;
+            }
             let (session, on) = commit(options, path)?;
             // (All parts on the GPU, or the first reason one isn't.)
             if device
@@ -87,7 +191,7 @@ impl DemucsModel {
             {
                 device = Some(on);
             }
-            let (n, part) = Self::part(session, path)?;
+            let (n, part, meta_name) = Self::part(session, path)?;
             match segment {
                 None => segment = Some(n),
                 Some(s) if s != n => {
@@ -98,9 +202,7 @@ impl DemucsModel {
                 }
                 _ => {}
             }
-            let meta = part.session.metadata().map_err(err)?;
-            name = name.or_else(|| meta.custom(META_NAME));
-            drop(meta);
+            name = name.or(meta_name);
             parts.push(part);
         }
         // Every stem must come from exactly one model.
@@ -133,11 +235,14 @@ impl DemucsModel {
         })
     }
 
-    fn part(session: Session, path: &Path) -> Result<(usize, Part), ModelError> {
+    fn part(session: Session, path: &Path) -> Result<(usize, Part, Option<String>), ModelError> {
         let bad = |what: String| ModelError::new(format!("{}: {what}", path.display()));
+        // The whole model (one input: the wave) or just its network (`spec` and `wave`).
+        let network = session.inputs().iter().any(|i| i.name() == "spec");
         let input = session
             .inputs()
-            .first()
+            .iter()
+            .find(|i| !network || i.name() == "wave")
             .ok_or_else(|| bad("no inputs".into()))?;
         let input_name = input.name().to_string();
         let dims: Vec<i64> = input
@@ -159,6 +264,7 @@ impl DemucsModel {
             .map(|s| s.split(',').map(|x| x.trim().to_string()).collect())
             .unwrap_or_else(|| DEFAULT_SOURCES.iter().map(|s| s.to_string()).collect());
         let only = meta.custom(META_STEM);
+        let name = meta.custom(META_NAME);
         drop(meta);
         let take: Vec<(usize, Stem)> = sources
             .iter()
@@ -174,14 +280,15 @@ impl DemucsModel {
                 "no usable stems (sources {sources:?}, stem {only:?})"
             )));
         }
-        Ok((
-            segment,
-            Part {
+        let runner = if network {
+            Runner::Network(Box::new(OnnxNetwork(session)))
+        } else {
+            Runner::Whole {
                 session,
                 input_name,
-                take,
-            },
-        ))
+            }
+        };
+        Ok((segment, Part { runner, take }, name))
     }
 
     /// Where it runs (see [`OnnxOptions::gpu`]).
@@ -270,21 +377,8 @@ impl DemucsModel {
                         };
                     }
                 }
-                let tensor = TensorRef::from_array_view(([1usize, 2, seg], &buf[..]))
-                    .map_err(|e| OfflineError::Model(e.to_string()))?;
-                let outputs = part
-                    .session
-                    .run(ort::inputs![part.input_name.as_str() => tensor])
-                    .map_err(|e| OfflineError::Model(e.to_string()))?;
-                let (shape, data) = outputs[0]
-                    .try_extract_tensor::<f32>()
-                    .map_err(|e| OfflineError::Model(e.to_string()))?;
-                let sources = shape.get(1).copied().unwrap_or(0) as usize;
-                if shape.len() != 4 || shape[2] != 2 || shape[3] as usize != seg {
-                    return Err(OfflineError::Model(format!(
-                        "output shape {shape:?}, expected [1, S, 2, {seg}]"
-                    )));
-                }
+                let data = part.run(&buf, seg)?;
+                let sources = data.len() / (2 * seg);
                 // Centre trim back to the chunk (center_trim), then weight and accumulate.
                 let left = delta / 2;
                 for &(src, stem) in &part.take {

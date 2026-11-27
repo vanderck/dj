@@ -502,7 +502,7 @@ impl DemucsCache {
     pub fn needs_load(&self, path: &Path, threads: usize) -> bool {
         #[cfg(any(feature = "stems-onnx", feature = "stems-onnx-dynamic"))]
         {
-            !matches!(&self.loaded, Some((f, t, g, _)) if *f == demucs_files(path) && *t == threads && *g == GPU.load(Ordering::Relaxed))
+            !matches!(&self.loaded, Some((f, t, g, _)) if *f == model_files(path) && *t == threads && *g == GPU.load(Ordering::Relaxed))
         }
         #[cfg(not(any(feature = "stems-onnx", feature = "stems-onnx-dynamic")))]
         {
@@ -521,12 +521,20 @@ impl DemucsCache {
         progress: offline::Progress,
     ) -> Result<(StemBuffers, String), OfflineError> {
         use stems_core::demucs::DemucsModel;
-        let files = demucs_files(path);
+        let files = model_files(path);
         if !matches!(&self.loaded, Some((f, t, g, _)) if *f == files && *t == threads && *g == GPU.load(Ordering::Relaxed)) {
             self.loaded = None; // free the old model before loading another
             let gpu = GPU.load(Ordering::Relaxed);
-            let options = stems_core::OnnxOptions { intra_threads: threads, gpu, gpu_cache: Some(crate::settings::config_dir().join("models").join("coreml-cache-ane")) };
-            let model = DemucsModel::from_files(&files, &options).map_err(|e| OfflineError::Model(e.to_string()))?;
+            let options = stems_core::OnnxOptions { intra_threads: threads, gpu };
+            let model = match DemucsModel::from_files(&files, &options) {
+                Ok(m) => m,
+                // The Core ML model didn't load: the ONNX one, on the CPU.
+                Err(e) if files.first().is_some_and(|f| f.extension().is_some_and(|x| x == "mlmodelc")) => {
+                    eprintln!("stems: Core ML: {e}");
+                    DemucsModel::from_files(&demucs_files(path), &options).map_err(|e| OfflineError::Model(e.to_string()))?
+                }
+                Err(e) => return Err(OfflineError::Model(e.to_string())),
+            };
             eprintln!("stems: {} on the {}", model.name(), model.device());
             self.loaded = Some((files, threads, gpu, model));
         }
@@ -552,6 +560,30 @@ impl DemucsCache {
     ) -> Result<(StemBuffers, String), OfflineError> {
         Err(OfflineError::Model(format!("cannot use {}: built without ONNX support", path.display())))
     }
+}
+
+/// The model files to separate with: with the Neural Engine switch on (macOS), the app's Core
+/// ML model of HT-Demucs when `path` is HT-Demucs (one file); else `path`'s (see
+/// [`demucs_files`]).
+pub fn model_files(path: &Path) -> Vec<PathBuf> {
+    let files = demucs_files(path);
+    if GPU.load(Ordering::Relaxed) && files.len() == 1 {
+        if let Some(m) = coreml_model() {
+            return vec![m];
+        }
+    }
+    files
+}
+
+/// HT-Demucs's network for Core ML, in the app bundle (`Contents/Resources/htdemucs.mlmodelc`,
+/// made by `tools/htdemucs_coreml`), or where `DJ_COREML_MODEL` says.
+pub fn coreml_model() -> Option<PathBuf> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let from_env = std::env::var_os("DJ_COREML_MODEL").filter(|v| !v.is_empty()).map(PathBuf::from);
+    let bundled = || std::env::current_exe().ok()?.parent()?.parent().map(|c| c.join("Resources").join("htdemucs.mlmodelc"));
+    from_env.or_else(bundled).filter(|p| p.exists())
 }
 
 /// Separate stems on the GPU (`Settings::stems_gpu`, kept here for the worker threads): the

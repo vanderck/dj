@@ -12,13 +12,10 @@ use crate::offline::ModelError;
 pub struct OnnxOptions {
     /// Threads ONNX Runtime may use inside one inference.
     pub intra_threads: usize,
-    /// Run on an accelerator where this build can: CoreML on macOS (the Neural Engine, not the
-    /// GPU: CoreML's GPU work holds up the app's own drawing, which runs on the same GPU, until
-    /// the window hangs), DirectML on Windows. A model (or a system) it can't use runs on the CPU
-    /// (see [`commit`]).
+    /// Run on an accelerator where this build can: DirectML on Windows (an ONNX model); on macOS
+    /// the Neural Engine runs a Core ML model (see `coreml`), so an ONNX one runs on the CPU. A
+    /// model (or a system) it can't use runs on the CPU (see [`commit`]).
     pub gpu: bool,
-    /// Where CoreML keeps the models it compiled (compiling takes minutes the first time).
-    pub gpu_cache: Option<std::path::PathBuf>,
 }
 
 impl Default for OnnxOptions {
@@ -26,7 +23,6 @@ impl Default for OnnxOptions {
         Self {
             intra_threads: 2,
             gpu: false,
-            gpu_cache: None,
         }
     }
 }
@@ -60,21 +56,7 @@ pub(crate) fn commit(
             .map_err(|e| ModelError::new(format!("loading {}: {e}", path.display())))
     };
     if options.gpu {
-        // On macOS the Neural Engine needs the network in 16 bits (see `fp16`): CoreML runs a
-        // 32-bit model on the CPU, slower than ONNX Runtime's own CPU code.
-        let accelerated = || {
-            let (mut b, ep) = gpu_builder(options)?;
-            let model = if cfg!(target_os = "macos") {
-                half_model(options, path)?
-            } else {
-                path.to_path_buf()
-            };
-            let session = b
-                .commit_from_file(&model)
-                .map_err(|e| ModelError::new(format!("loading {}: {e}", model.display())))?;
-            Ok::<_, ModelError>((session, ep))
-        };
-        match accelerated() {
+        match gpu_builder(options).and_then(|(b, ep)| Ok((load(b)?, ep))) {
             Ok((session, ep)) => return Ok((session, Device::Accelerator(ep))),
             Err(e) => return Ok((load(builder(options)?)?, Device::Cpu(Some(e.to_string())))),
         }
@@ -82,65 +64,16 @@ pub(crate) fn commit(
     Ok((load(builder(options)?)?, Device::Cpu(None)))
 }
 
-/// `path`'s model with its network in 16 bits (see [`crate::fp16`]), made once (a few seconds)
-/// into `options.gpu_cache` (else next to it) and reused while the model file stays the same.
-pub fn half_model(
-    options: &OnnxOptions,
-    path: &std::path::Path,
-) -> Result<std::path::PathBuf, ModelError> {
-    let io = |e: std::io::Error| ModelError::new(format!("16-bit model: {e}"));
-    let dir = match &options.gpu_cache {
-        Some(d) => d.clone(),
-        None => path.parent().map(|p| p.to_path_buf()).unwrap_or_default(),
-    };
-    std::fs::create_dir_all(&dir).map_err(io)?;
-    let stem = path
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let len = std::fs::metadata(path).map_err(io)?.len();
-    let dst = dir.join(format!("{stem}.{len}.fp16.onnx"));
-    if dst.exists() {
-        return Ok(dst);
-    }
-    // ONNX Runtime's basic optimisations first: shapes worked out and constants folded, so
-    // what's left is the network's own operators, every tensor's type plain to see.
-    let folded = dir.join(format!("{stem}.{len}.folded.tmp"));
-    let session = builder(options)?
-        .with_optimization_level(GraphOptimizationLevel::Level1)
-        .map_err(err)?
-        .with_optimized_model_path(&folded)
-        .map_err(err)?
-        .commit_from_file(path)
-        .map_err(|e| ModelError::new(format!("loading {}: {e}", path.display())));
-    drop(session?);
-    let bytes = std::fs::read(&folded).map_err(io);
-    let _ = std::fs::remove_file(&folded);
-    let (half, _) = crate::fp16::half_precision(&bytes?)?;
-    let tmp = dst.with_extension("tmp");
-    std::fs::write(&tmp, half).map_err(io)?;
-    std::fs::rename(&tmp, &dst).map_err(io)?;
-    Ok(dst)
-}
-
 /// A session builder with this system's GPU provider, failing (rather than quietly running on
 /// the CPU) when it can't be used.
 #[cfg(target_os = "macos")]
-fn gpu_builder(options: &OnnxOptions) -> Result<(SessionBuilder, &'static str), ModelError> {
-    use ort::ep::coreml::{ComputeUnits, ModelFormat, SpecializationStrategy};
-    let mut ep = ort::ep::CoreML::default()
-        .with_model_format(ModelFormat::MLProgram)
-        .with_specialization_strategy(SpecializationStrategy::FastPrediction)
-        // (Not the GPU: see `OnnxOptions::gpu`. Ops the Neural Engine can't run go to the CPU.)
-        .with_compute_units(ComputeUnits::CPUAndNeuralEngine);
-    if let Some(dir) = &options.gpu_cache {
-        let _ = std::fs::create_dir_all(dir);
-        ep = ep.with_model_cache_dir(dir.display());
-    }
-    let b = builder(options)?
-        .with_execution_providers([ep.build().error_on_failure()])
-        .map_err(err)?;
-    Ok((b, "Neural Engine (CoreML)"))
+fn gpu_builder(_: &OnnxOptions) -> Result<(SessionBuilder, &'static str), ModelError> {
+    // ONNX Runtime's CoreML provider ran HT-Demucs on the CPU (32 bits) or in ten pieces with
+    // casts between (16 bits); the Neural Engine runs dj's own Core ML model instead (see
+    // `coreml`, and `tools/htdemucs_coreml`).
+    Err(ModelError::new(
+        "the Neural Engine runs the Core ML model (htdemucs.mlmodelc), not ONNX",
+    ))
 }
 
 #[cfg(windows)]

@@ -25,8 +25,55 @@ jobs:
       - run: cargo clippy -p stems-core --all-targets --features onnx -- -D warnings
       - run: cargo fmt -p stems-core -- --check
 
+  # HT-Demucs's network as a Core ML model (the Neural Engine), bundled with the app: converted
+  # from Demucs's weights (tools/htdemucs_coreml), compiled, and checked against Mixxx's ONNX
+  # model through dj's own code. Converted again only when the converter changes.
+  coreml-model:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/cache@v4
+        id: model
+        with:
+          path: target/coreml/htdemucs.mlmodelc
+          key: htdemucs-coreml-${{ hashFiles('tools/htdemucs_coreml/convert.py') }}
+      - name: Convert HT-Demucs to Core ML
+        if: steps.model.outputs.cache-hit != 'true'
+        run: |
+          python -m pip install --quiet "torch==2.7.0" "coremltools==9.0" "numpy<2.3" einops julius
+          python -m pip install --quiet --no-deps demucs==4.1.0 openunmix
+          mkdir -p target/coreml
+          curl -sSfL --retry 3 -o "$RUNNER_TEMP/htdemucs.th" https://dl.fbaipublicfiles.com/demucs/hybrid_transformer/955717e8-8726e21a.th
+          python tools/htdemucs_coreml/convert.py "$RUNNER_TEMP/htdemucs.th" "$RUNNER_TEMP/htdemucs.mlpackage"
+          xcrun coremlcompiler compile "$RUNNER_TEMP/htdemucs.mlpackage" target/coreml/
+          ls -la target/coreml/htdemucs.mlmodelc
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: coreml
+      - uses: actions/cache@v4
+        with:
+          path: target/mixxx-htdemucs.onnx
+          key: mixxx-htdemucs-onnx-v1
+      - name: Check it against Mixxx's HT-Demucs
+        run: |
+          [ -s target/mixxx-htdemucs.onnx ] || curl -sSfL --retry 3 -o target/mixxx-htdemucs.onnx https://github.com/mixxxdj/demucs/releases/latest/download/htdemucs.onnx
+          python -m pip install --quiet numpy
+          python tools/htdemucs_coreml/mix.py > "$RUNNER_TEMP/mix.f32"
+          DEMUCS_MODEL=target/mixxx-htdemucs.onnx DEMUCS_NETWORK=target/coreml/htdemucs.mlmodelc \
+            DEMUCS_MIX="$RUNNER_TEMP/mix.f32" MIN_DB=25 \
+            cargo test -p stems-core --features onnx --test demucs -- --ignored the_network --nocapture
+      - uses: actions/upload-artifact@v4
+        with:
+          name: htdemucs-coreml
+          path: target/coreml/htdemucs.mlmodelc
+
   package:
     runs-on: macos-latest
+    needs: coreml-model
     permissions:
       contents: write # to attach the .dmg to a release on tags
     env:
@@ -61,7 +108,14 @@ jobs:
           security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
           rm "$RUNNER_TEMP/cert.p12"
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: htdemucs-coreml
+          path: target/coreml/htdemucs.mlmodelc
+
       - name: Build and package
+        env:
+          DJ_COREML_MODEL: target/coreml/htdemucs.mlmodelc
         run: |
           ARGS=()
           [ -n "$MACOS_SIGN_IDENTITY" ] && [ -n "$APPLE_ID" ] && ARGS+=(--notarize)
@@ -72,6 +126,7 @@ jobs:
           APP=target/package/dj.app
           plutil -lint "$APP/Contents/Info.plist"
           test -s "$APP/Contents/Resources/AppIcon.icns" && /usr/libexec/PlistBuddy -c "Print :CFBundleIconFile" "$APP/Contents/Info.plist"
+          test -s "$APP/Contents/Resources/htdemucs.mlmodelc/coremldata.bin"
           codesign --verify --strict --verbose=2 "$APP"
           lipo -archs "$APP/Contents/MacOS/dj" | tee /dev/stderr | grep -qx "arm64"
           "$APP/Contents/MacOS/dj" --help > /dev/null

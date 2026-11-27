@@ -9,17 +9,22 @@ publish = false
 
 [features]
 # ONNX Runtime backend, downloading and statically linking ONNX Runtime at build time.
-onnx = ["dep:ort", "ort/std", "ort/ndarray", "ort/download-binaries", "ort/copy-dylibs", "ort/tls-native"]
+onnx = ["dep:ort", "ort/std", "ort/ndarray", "ort/download-binaries", "ort/copy-dylibs", "ort/tls-native", "coreml"]
 # ONNX Runtime backend, loading an existing libonnxruntime at runtime (ORT_DYLIB_PATH).
-onnx-dynamic = ["dep:ort", "ort/std", "ort/ndarray", "ort/load-dynamic"]
+onnx-dynamic = ["dep:ort", "ort/std", "ort/ndarray", "ort/load-dynamic", "coreml"]
+# Core ML on macOS (with either of the above; nothing elsewhere).
+coreml = ["dep:objc2", "dep:objc2-foundation", "dep:objc2-core-ml"]
 
 [dependencies]
 ort = { workspace = true, optional = true }
 realfft.workspace = true
 
-# The GPU providers (OnnxOptions::gpu): ONNX Runtime with CoreML on macOS, DirectML on Windows.
+# The accelerators (OnnxOptions::gpu): Core ML on macOS (the Neural Engine), DirectML on Windows.
 [target.'cfg(target_os = "macos")'.dependencies]
-ort = { workspace = true, optional = true, features = ["coreml"] }
+# HT-Demucs's network on Core ML (the Neural Engine), without ONNX Runtime.
+objc2 = { version = "0.6", optional = true }
+objc2-foundation = { version = "0.3", optional = true }
+objc2-core-ml = { version = "0.3", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 ort = { workspace = true, optional = true, features = ["directml"] }
