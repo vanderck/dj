@@ -63,7 +63,8 @@ jobs:
           [ -s target/mixxx-htdemucs.onnx ] || curl -sSfL --retry 3 -o target/mixxx-htdemucs.onnx https://github.com/mixxxdj/demucs/releases/latest/download/htdemucs.onnx
           python -m pip install --quiet numpy
           python tools/htdemucs_coreml/mix.py > "$RUNNER_TEMP/mix.f32"
-          DEMUCS_MODEL=target/mixxx-htdemucs.onnx DEMUCS_NETWORK=target/coreml/htdemucs.mlmodelc \
+          # (Absolute paths: the test runs in the crate's folder.)
+          DEMUCS_MODEL="$PWD/target/mixxx-htdemucs.onnx" DEMUCS_NETWORK="$PWD/target/coreml/htdemucs.mlmodelc" \
             DEMUCS_MIX="$RUNNER_TEMP/mix.f32" MIN_DB=25 \
             cargo test -p stems-core --features onnx --test demucs -- --ignored the_network --nocapture
       - uses: actions/upload-artifact@v4
