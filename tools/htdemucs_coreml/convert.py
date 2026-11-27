@@ -115,6 +115,7 @@ def main():
     ap.add_argument("weights")
     ap.add_argument("out")
     ap.add_argument("--onnx")
+    ap.add_argument("--fp32", action="store_true", help="32-bit (the CPU and GPU only)")
     a = ap.parse_args()
 
     torch.backends.mha.set_fastpath_enabled(False)  # plain attention ops, not the fused kernel
@@ -150,7 +151,7 @@ def main():
             ct.TensorType(name="wave_out", dtype=np.float32),
         ],
         convert_to="mlprogram",
-        compute_precision=ct.precision.FLOAT16,
+        compute_precision=ct.precision.FLOAT32 if a.fp32 else ct.precision.FLOAT16,
         minimum_deployment_target=ct.target.macOS13,
     )
     mlmodel.short_description = "HT-Demucs (htdemucs) network, normalised spectrogram and wave in and out"

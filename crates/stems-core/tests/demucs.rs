@@ -214,6 +214,7 @@ fn the_network_with_our_spectrogram_separates_as_the_whole_model() {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(30.0);
+    let mut worst = f64::INFINITY;
     for (i, (a, b)) in whole.iter().zip(net.iter()).enumerate() {
         let (mut sig, mut noise) = (0.0f64, 0.0f64);
         for (x, y) in a.iter().zip(b.iter()) {
@@ -224,6 +225,7 @@ fn the_network_with_our_spectrogram_separates_as_the_whole_model() {
         }
         let snr = 10.0 * (sig / noise.max(1e-20)).log10();
         eprintln!("stem {i}: {snr:.1} dB");
-        assert!(snr > min_db, "stem {i}: {snr:.1} dB");
+        worst = worst.min(snr);
     }
+    assert!(worst > min_db, "worst stem: {worst:.1} dB");
 }
