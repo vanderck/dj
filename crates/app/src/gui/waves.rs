@@ -193,9 +193,9 @@ fn draw_lane(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, lane: Rec
 
     // A planned or running mix on this deck: where it starts and ends (shaded), and where the
     // basses swap.
-    if let Some(m) = core.automix.as_ref().filter(|m| m.plan.incoming == d || m.plan.outgoing == d) {
+    if let Some(m) = core.mixes().filter(|m| m.plan.incoming == d || m.plan.outgoing == d).last() {
         let plan = &m.plan;
-        let now = core.mix_beat();
+        let now = core.mix_beat_of(m);
         let spb = 60.0 / v.track_bpm.max(1.0);
         // Track time on this deck at mix beat `b`.
         let t_of = |b: f64| {

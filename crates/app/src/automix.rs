@@ -382,6 +382,48 @@ fn stems_at(p: f64, vocals_out: bool, best: bool) -> ([f32; 4], [f32; 4]) {
 }
 
 impl Core {
+    /// The running mixes, oldest first (the newest is `automix`).
+    pub fn mixes(&self) -> impl Iterator<Item = &AutoMix> {
+        self.other_mixes.iter().chain(self.automix.iter())
+    }
+
+    /// The running mix bringing deck `d` in.
+    pub fn mix_into(&self, d: usize) -> Option<&AutoMix> {
+        self.mixes().filter(|m| m.plan.incoming == d).last()
+    }
+
+    /// Whether deck `d` is in a running mix (coming in or going out).
+    pub fn in_mix(&self, d: usize) -> bool {
+        self.mixes().any(|m| m.plan.incoming == d || m.plan.outgoing == d)
+    }
+
+    /// Whether mix `m` has started its new track (it's playing in).
+    pub fn mix_released(m: &AutoMix) -> bool {
+        m.released
+    }
+
+    /// Run `f` on the running mix bringing deck `d` in, as `automix` (where the code for one mix
+    /// looks); the others stay as they are. `None` without such a mix.
+    pub(super) fn with_mix_into<R>(&mut self, d: usize, f: impl FnOnce(&mut Self) -> R) -> Option<R> {
+        if self.automix.as_ref().is_some_and(|m| m.plan.incoming == d) {
+            return Some(f(self));
+        }
+        let k = self.other_mixes.iter().rposition(|m| m.plan.incoming == d)?;
+        Some(self.with_other_mix(k, f))
+    }
+
+    /// Run `f` on `other_mixes[k]` as `automix`; put back after (unless it ended).
+    fn with_other_mix<R>(&mut self, k: usize, f: impl FnOnce(&mut Self) -> R) -> R {
+        let m = self.other_mixes.remove(k);
+        let newest = self.automix.replace(m);
+        let r = f(self);
+        let back = std::mem::replace(&mut self.automix, newest);
+        if let Some(b) = back {
+            self.other_mixes.insert(k, b);
+        }
+        r
+    }
+
     /// The deck `d` could be mixed into (the playing deck it would replace), if `d` is ready:
     /// loaded, looping at a cue, silent (volume down) and synced or syncable, with another
     /// deck playing audibly. Not in external-mixer mode (the volumes are on the hardware).
@@ -389,11 +431,12 @@ impl Core {
     /// With an external mixer dj can't know the volumes: any deck looping at a cue while another
     /// plays is a candidate, and the outgoing deck is the master (or another playing deck).
     pub fn mix_target(&self, d: usize) -> Option<usize> {
-        if self.automix.is_some() {
+        let external = self.external_routing();
+        // Already in a mix; or (external mixer) one is running.
+        if self.in_mix(d) || (external && self.automix.is_some()) {
             return None;
         }
         let v = &self.snap.decks[d];
-        let external = self.external_routing();
         // Waiting: paused (Mix loops it where it stands), looping at a cue, or (dj's mixer) just
         // turned down: volume down is enough, it may be playing in your headphones.
         let p = &self.session.channels[d].params;
@@ -417,6 +460,11 @@ impl Core {
             let q = &self.session.channels[o].params;
             o != d && self.snap.decks[o].playing && self.snap.decks[o].has_grid && q.volume > 0.05 && !q.mute
         };
+        // Mixes running: into the newest track (mixes run side by side).
+        if let Some(m) = self.automix.as_ref() {
+            let n = m.plan.incoming;
+            return (n != d && self.snap.decks[n].playing && self.snap.decks[n].has_grid).then_some(n);
+        }
         match self.snap.clock.owner {
             ClockOwner::Deck(m) if audible(m as usize) => Some(m as usize),
             _ => (0..self.deck_count()).filter(|&o| audible(o)).max_by(|&a, &b| {
@@ -1144,7 +1192,7 @@ impl Core {
         // The new vocals stay out only if the old ones play through the whole mix; then they come
         // back on the new track's next vocal phrase.
         let vocals_out = self.snap.decks[i].stems_ready && plan.blend.as_ref().is_some_and(|b| b.in_at[VOCALS].is_some_and(|x| x >= b.bars as f64 - 0.5));
-        let mix = AutoMix {
+        let mut mix = AutoMix {
             released: false,
             swapped: false,
             out_low: params(o).eq[0],
@@ -1173,6 +1221,11 @@ impl Core {
             old_vocals_out: false,
             plan,
         };
+        // The old track still coming in on another mix: its own levels, not that mix's (its
+        // stems, EQ as they were before it).
+        if let Some(prev) = self.mixes().filter(|m| m.plan.incoming == o).last() {
+            (mix.out_low, mix.out_mid, mix.out_high, mix.out_stems) = (prev.in_low, prev.in_mid, prev.in_high, prev.in_stems);
+        }
         // Its key fitted to the playing track's, while it's still silent.
         if mix.plan.transpose != 0 {
             self.deck_cmd(i, DeckCmd::Semitones(mix.in_semitones + mix.plan.transpose as f64));
@@ -1223,6 +1276,10 @@ impl Core {
         if !why.is_empty() {
             eprintln!("  {why}");
         }
+        // Mixes run side by side: the one running goes on (this is the newest).
+        if let Some(prev) = self.automix.take() {
+            self.other_mixes.push(prev);
+        }
         self.automix = Some(mix);
     }
 
@@ -1265,32 +1322,35 @@ impl Core {
         if let Some((key, _)) = self.pickup_point(&format!("Mixer/CH{}/Volume", ch + 1)) {
             self.pickup.remove(&key);
         }
-        if let Some(m) = self.automix.as_ref() {
-            let (i, o, released) = (m.plan.incoming, m.plan.outgoing, m.released);
-            if ch == i {
-                if v <= FADER_BOTTOM {
-                    // Back to the bottom, at any point: called off (the old track back in full,
-                    // the new one silent; its fader up again mixes it in anew).
-                    self.cancel_mix();
-                    self.route(&format!("Mixer/CH{}/Volume", i + 1), &[OscType::Float(0.0)]);
-                    self.log(format!("Deck {}: mix called off (fader down)", i + 1));
-                } else if released {
-                    self.mix_set(&format!("Mixer/CH{}/Volume", i + 1), self.fader_volume(i, Some(v)));
-                }
-                return true;
-            }
-            if ch == o {
-                let beat = self.snap.clock.beat + m.beat_offset;
-                let m = self.automix.as_mut().unwrap();
+        // In running mixes (side by side: a deck may be coming in on one and going out on
+        // another): the fader is its volume; it starts the old track's half of a mix it's going
+        // out of; at the bottom it calls off the mix bringing it in (unless it's going out).
+        let going_out = self.mixes().any(|m| m.plan.outgoing == ch);
+        let coming_in = self.mix_into(ch).is_some();
+        if going_out || coming_in {
+            let clock = self.snap.clock.beat;
+            let mut started = false;
+            for m in self.other_mixes.iter_mut().chain(self.automix.iter_mut()).filter(|m| m.plan.outgoing == ch) {
                 if m.out_from.is_none() && v <= m.out_ref - FADER_MOVE {
-                    m.out_from = Some(beat);
-                    self.log(format!("Deck {}: mixing out", o + 1));
+                    m.out_from = Some(clock + m.beat_offset);
+                    started = true;
                 }
-                // Its volume (the mix closes it over its last bar, on the tick).
-                self.mix_set(&format!("Mixer/CH{}/Volume", o + 1), self.fader_volume(o, Some(v)));
-                return true;
             }
-            return false;
+            if started {
+                self.log(format!("Deck {}: mixing out", ch + 1));
+            }
+            let released = self.mix_into(ch).is_some_and(|m| m.released);
+            if coming_in && !going_out && v <= FADER_BOTTOM {
+                // Back to the bottom, at any point: called off (the old track back in full, the
+                // new one silent; its fader up again mixes it in anew).
+                self.with_mix_into(ch, |c| c.cancel_mix());
+                self.route(&format!("Mixer/CH{}/Volume", ch + 1), &[OscType::Float(0.0)]);
+                self.log(format!("Deck {}: mix called off (fader down)", ch + 1));
+            } else if going_out || released {
+                // Its volume (a mix closes it over its last bar, on the tick).
+                self.mix_set(&format!("Mixer/CH{}/Volume", ch + 1), self.fader_volume(ch, Some(v)));
+            }
+            return true;
         }
         // The fader's bottom is silence: a fader comes up in small steps (1/127, 2/127…), which
         // mustn't turn the deck up before it's past the bottom and the mix can start; and a deck
@@ -1323,16 +1383,17 @@ impl Core {
         }
     }
 
-    /// Fader mix: the deck whose fader takes the old track out, while the mix waits for it.
-    pub fn fader_mix_waiting_out(&self) -> Option<usize> {
-        self.automix.as_ref().filter(|m| m.fader && m.out_from.is_none()).map(|m| m.plan.outgoing)
+    /// Fader mix: whether deck `d`'s fader takes its track out of a mix waiting for it.
+    pub fn fader_mix_waiting_out(&self, d: usize) -> bool {
+        self.mixes().any(|m| m.fader && m.out_from.is_none() && m.plan.outgoing == d)
     }
 
-    pub fn tap_cancel_mix(&mut self) -> bool {
-        if self.automix.as_ref().is_none_or(|m| m.started.elapsed() < MIX_TAP_GUARD) {
+    /// A tap on the button of the mix bringing deck `d` in.
+    pub fn tap_cancel_mix(&mut self, d: usize) -> bool {
+        if self.mix_into(d).is_none_or(|m| m.started.elapsed() < MIX_TAP_GUARD) {
             return false;
         }
-        self.cancel_mix();
+        self.with_mix_into(d, |c| c.cancel_mix());
         true
     }
 
@@ -1376,10 +1437,21 @@ impl Core {
 
     /// Where a running mix is, in the outgoing track's beats (counted on the clock).
     pub fn mix_beat(&self) -> f64 {
-        self.automix.as_ref().map_or(0.0, |m| self.snap.clock.beat + m.beat_offset)
+        self.automix.as_ref().map_or(0.0, |m| self.mix_beat_of(m))
     }
 
+    /// Where mix `m` is, in its outgoing track's beats.
+    pub fn mix_beat_of(&self, m: &AutoMix) -> f64 {
+        self.snap.clock.beat + m.beat_offset
+    }
+
+    /// Set a control for a mix. While the mixes tick, held back: each mix's last setting, the
+    /// lowest of the mixes' applied at the end (see `automix_tick`).
     fn mix_set(&mut self, addr: &str, v: f32) {
+        if let Some(b) = self.mix_batch_one.as_mut() {
+            b.insert(addr.to_string(), v);
+            return;
+        }
         self.set_picked_up(addr, v);
     }
 
@@ -1686,6 +1758,71 @@ impl Core {
                 self.remove_insert(ch, slot);
             }
         }
+        if self.automix.is_none() {
+            return;
+        }
+        // Each mix in turn (as `automix`), what it sets held back; then the lowest of what
+        // they set, per control, applied (a deck coming in on one mix and going out on another
+        // gets both).
+        let mut all: HashMap<String, f32> = HashMap::new();
+        let mut one = |c: &mut Self| {
+            c.mix_batch_one = Some(HashMap::new());
+            c.mix_tick();
+            for (k, v) in c.mix_batch_one.take().unwrap_or_default() {
+                all.entry(k).and_modify(|x| *x = x.min(v)).or_insert(v);
+            }
+        };
+        let mut k = 0;
+        while k < self.other_mixes.len() {
+            let n = self.other_mixes.len();
+            self.with_other_mix(k, &mut one);
+            if self.other_mixes.len() == n {
+                k += 1;
+            }
+        }
+        one(self);
+        if self.automix.is_none() {
+            self.automix = self.other_mixes.pop();
+        }
+        self.one_bass_one_voice(&mut all);
+        for (k, v) in all {
+            self.set_picked_up(&k, v);
+        }
+    }
+
+    /// Mixes side by side: a track coming in gets its bass (or vocals) on its stems only once no
+    /// track before it in the chain (the one it mixes into, the one that one mixes into…) still
+    /// plays its own (each mix sees only its two tracks).
+    fn one_bass_one_voice(&self, set: &mut HashMap<String, f32>) {
+        if self.other_mixes.is_empty() {
+            return;
+        }
+        let level = |set: &HashMap<String, f32>, addr: &str, now: f32| set.get(addr).copied().unwrap_or(now);
+        let stem = |d: usize, s: usize| format!("Deck/{}/{}", d + 1, STEM_ADDR[s]);
+        for m in self.mixes().filter(|m| m.plan.how == MixHow::Stems) {
+            let i = m.plan.incoming;
+            // The tracks before it, beyond the one it mixes into (that mix sees to that one).
+            let mut up = Vec::new();
+            let mut at = m.plan.outgoing;
+            while let Some(prev) = self.mixes().filter(|p| p.plan.incoming == at && !up.contains(&p.plan.outgoing)).last() {
+                at = prev.plan.outgoing;
+                up.push(at);
+            }
+            for s in [BASS, VOCALS] {
+                let sounds = |u: usize| {
+                    let v = &self.snap.decks[u];
+                    let vol = level(set, &format!("Mixer/CH{}/Volume", u + 1), self.session.channels[u].params.volume);
+                    v.playing && vol > 0.0 && level(set, &stem(u, s), v.stem_gains[s]) > 0.0
+                };
+                if up.iter().any(|&u| sounds(u)) {
+                    set.insert(stem(i, s), 0.0);
+                }
+            }
+        }
+    }
+
+    /// Advance the mix in `automix` (one of the running mixes).
+    fn mix_tick(&mut self) {
         let Some(m) = self.automix.as_ref() else { return };
         let (i, o, start, len) = (m.plan.incoming, m.plan.outgoing, m.plan.start_beat, m.plan.length_beats);
         let (vi, vo) = (self.snap.decks[i], self.snap.decks[o]);

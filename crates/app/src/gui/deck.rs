@@ -831,7 +831,7 @@ fn sampler(ui: &mut Ui, core: &mut Core, d: usize, rect: Rect) {
 
 /// Whether deck `d` shows the Mix button: it can be mixed in now, or its mix is under way.
 fn mix_shown(core: &Core, d: usize) -> bool {
-    core.automix.as_ref().is_some_and(|m| m.plan.incoming == d) || core.mix_target(d).is_some() || core.fader_mix_waiting_out() == Some(d)
+    core.mix_into(d).is_some() || core.mix_target(d).is_some() || core.fader_mix_waiting_out(d)
 }
 
 /// What Now and Best would do for a deck, with the remembered style (shown in the Mix popup).
@@ -855,14 +855,16 @@ const MIX_STYLES: [(&str, MixStyle, &str); 4] = [
 /// with (a tap: the next one); a deck its fader started shows the mix; the playing deck, while
 /// the mix waits for it, that its fader takes it out.
 fn fader_mix_slot(ui: &mut Ui, core: &mut Core, d: usize, rect: Rect, font: egui::FontId) {
-    if let Some(m) = core.automix.as_ref().filter(|m| m.plan.incoming == d) {
-        let bars = ((m.plan.start_beat - core.mix_beat()) / 4.0).ceil();
+    // (A deck mixed in and now going out of the next mix: its fader takes it out.)
+    let waiting_out = core.fader_mix_waiting_out(d) && core.mix_into(d).is_none_or(Core::mix_released);
+    if let Some(m) = core.mix_into(d).filter(|_| !waiting_out) {
+        let bars = ((m.plan.start_beat - core.mix_beat_of(m)) / 4.0).ceil();
         let label = if bars > 0.0 { format!("Mix in {bars:.0}") } else { "Mixing…".to_string() };
         button(ui, rect, &label, Style::Fill(GREEN), font)
             .on_hover_text("Its fader started it and is its volume; its stems or EQ bring it in over the mix. Fader to the bottom: called off");
         return;
     }
-    if core.fader_mix_waiting_out() == Some(d) {
+    if waiting_out {
         let label = if rect.width() < 120.0 { "Fader ↓" } else { "Fader ↓: out" };
         button(ui, rect, label, Style::Outline(GREEN, true), font)
             .on_hover_text("Start this deck's fader down: its stems or EQ take the track out over 4 bars, then take the fader to the bottom (until then it plays on in full)");
@@ -900,12 +902,12 @@ fn mix_button(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Re
         fader_mix_slot(ui, core, d, rect, font);
         return;
     }
-    if let Some(m) = core.automix.as_ref().filter(|m| m.plan.incoming == d) {
-        let bars = ((m.plan.start_beat - core.mix_beat()) / 4.0).ceil();
+    if let Some(m) = core.mix_into(d) {
+        let bars = ((m.plan.start_beat - core.mix_beat_of(m)) / 4.0).ceil();
         let label = if bars > 0.0 { format!("Mix in {bars:.0}") } else { "Mixing…".to_string() };
         let resp = button(ui, rect, &label, Style::Fill(GREEN), font).on_hover_text("Tap to cancel");
         if resp.clicked() && !core.learn {
-            core.tap_cancel_mix();
+            core.tap_cancel_mix(d);
         }
         return;
     }
