@@ -859,7 +859,7 @@ fn fader_mix_slot(ui: &mut Ui, core: &mut Core, d: usize, rect: Rect, font: egui
         let bars = ((m.plan.start_beat - core.mix_beat()) / 4.0).ceil();
         let label = if bars > 0.0 { format!("Mix in {bars:.0}") } else { "Mixing…".to_string() };
         button(ui, rect, &label, Style::Fill(GREEN), font)
-            .on_hover_text("Its fader started it and is its volume; its stems or EQ bring it in over the mix. Fader to the bottom before it begins: called off");
+            .on_hover_text("Its fader started it and is its volume; its stems or EQ bring it in over the mix. Fader to the bottom: called off");
         return;
     }
     if core.fader_mix_waiting_out() == Some(d) {
