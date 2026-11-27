@@ -1,10 +1,7 @@
 name: Windows
 
+# Off for pushes, pull requests and tags: run it by hand (Actions → Windows → Run workflow).
 on:
-  push:
-    branches: ["**"]
-    tags: ["v*"]
-  pull_request:
   workflow_dispatch:
 
 env:
