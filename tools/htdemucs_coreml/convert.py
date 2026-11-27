@@ -110,12 +110,27 @@ class Network(torch.nn.Module):
         return x, xt
 
 
+def precision(fp32_ops):
+    """16 bits, but for the op types in `fp32_ops` (comma-separated)."""
+    import coremltools as ct
+
+    keep = {o for o in fp32_ops.split(",") if o}
+    if not keep:
+        return ct.precision.FLOAT16
+    return ct.transform.FP16ComputePrecision(op_selector=lambda op: op.op_type not in keep)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("weights")
     ap.add_argument("out")
     ap.add_argument("--onnx")
     ap.add_argument("--fp32", action="store_true", help="32-bit (the CPU and GPU only)")
+    ap.add_argument(
+        "--fp32-ops",
+        default="",
+        help="comma-separated MIL op types kept 32-bit in a 16-bit model",
+    )
     a = ap.parse_args()
 
     torch.backends.mha.set_fastpath_enabled(False)  # plain attention ops, not the fused kernel
@@ -151,7 +166,7 @@ def main():
             ct.TensorType(name="wave_out", dtype=np.float32),
         ],
         convert_to="mlprogram",
-        compute_precision=ct.precision.FLOAT32 if a.fp32 else ct.precision.FLOAT16,
+        compute_precision=ct.precision.FLOAT32 if a.fp32 else precision(a.fp32_ops),
         minimum_deployment_target=ct.target.macOS13,
     )
     mlmodel.short_description = "HT-Demucs (htdemucs) network, normalised spectrogram and wave in and out"
