@@ -117,6 +117,13 @@ pub enum Kind {
 }
 
 /// What kind of control an address is (for MIDI learn and feedback).
+/// The channel (0-based) whose volume `addr` sets (`Mixer/CH2/Volume` → 1).
+pub fn volume_channel(addr: &str) -> Option<usize> {
+    let a = addr.trim_matches('/').to_ascii_lowercase();
+    let n = a.strip_prefix("mixer/ch")?.strip_suffix("/volume")?;
+    n.parse::<usize>().ok()?.checked_sub(1).filter(|c| *c < NUM_DECKS)
+}
+
 pub fn addr_kind(addr: &str) -> Kind {
     let last = addr.rsplit('/').next().unwrap_or("");
     let l = last.to_ascii_lowercase();
@@ -316,6 +323,8 @@ pub struct Core {
     /// The two tracks the deck-order tip was last worked out for.
     order_hinted: Option<Vec<u64>>,
     /// MIDI pick-up: controls dj moved itself (lowercase address -> last MIDI value seen).
+    /// Fader mix: each channel's volume fader as the controller last sent it (0..1).
+    pub(crate) fader_hw: [Option<f32>; NUM_DECKS],
     pickup: HashMap<String, Option<f32>>,
     /// Each deck's loop size in beats (the loop buttons, and hot cue pads in Loop mode).
     pub loop_size: [f64; NUM_DECKS],
@@ -416,6 +425,7 @@ impl Core {
             echo_cleanup: Vec::new(),
             order_hinted: None,
             pickup: HashMap::new(),
+            fader_hw: [None; NUM_DECKS],
             loop_size,
         };
         // VST3 catalog from cache immediately; refresh in the background.
@@ -2687,6 +2697,12 @@ impl Core {
                     } else {
                         v
                     };
+                    // Fader mix: a channel's volume fader may start (or end) a mix instead.
+                    if let Some(ch) = volume_channel(&m.address) {
+                        if self.fader_mix_midi(ch, v) {
+                            continue;
+                        }
+                    }
                     if self.pickup_allows(&m.address, v) {
                         self.route(&m.address, &[OscType::Float(scaled)]);
                     }
@@ -2723,6 +2739,11 @@ impl Core {
         }
         self.deck_cmd(d, DeckCmd::HotCue { idx, pressed: true });
         Some(DeckCmd::HotCue { idx, pressed: false })
+    }
+
+    /// Whether a controller has a channel's volume fader mapped (what Mix with the faders needs).
+    pub fn midi_volume_faders(&self) -> bool {
+        self.profile.mappings.iter().any(|m| volume_channel(&m.address).is_some())
     }
 
     /// Set a control from dj itself (auto-mix, the fader popup's group buttons) and have MIDI pick
@@ -4668,6 +4689,80 @@ pub(crate) mod tests {
         }
         pump(&mut e, &mut c);
         assert_eq!(c.snap.decks[1].stem_gains, [1.0; 4], "all in again");
+    }
+
+    #[test]
+    fn faders_start_each_half_of_a_mix() {
+        let (mut e, mut c, _config) = core();
+        mix_setup(&mut e, &mut c);
+        c.settings.fader_mix = true;
+        assert!(!c.midi_volume_faders());
+        // A controller's channel volume faders: CC 7 (deck 1) and CC 8 (deck 2).
+        for (n, ch) in [(7u8, 1), (8u8, 2)] {
+            let source = MidiSource { kind: MidiKind::Cc, channel: 0, number: n };
+            c.profile.mappings.push(MidiMapping { source, address: format!("Mixer/CH{ch}/Volume"), mode: MapMode::Absolute, invert: false, feedback: false });
+        }
+        assert!(c.midi_volume_faders());
+        let fader = |c: &mut Core, n: u8, v: f32| c.handle_midi(&[0xb0, n, (v * 127.0).round() as u8]);
+        fader(&mut c, 7, 0.9);
+        assert!(c.automix.is_none(), "the playing deck's fader is just its volume");
+        // Deck 2's fader up from the bottom: a mix, at the best moment; the fader only triggers it.
+        fader(&mut c, 8, 0.0);
+        fader(&mut c, 8, 0.7);
+        let (start, len) = c.automix.as_ref().map(|m| (m.plan.start_beat, m.plan.length_beats)).expect("a mix");
+        assert_eq!(c.automix.as_ref().map(|m| (m.plan.incoming, m.plan.outgoing)), Some((1, 0)));
+        assert_eq!(c.session.channels[1].params.volume, 0.0, "dj sets the volume, not the fader");
+        assert_eq!(c.fader_mix_waiting_out(), Some(0));
+        // No Auto-DJ in this mode.
+        c.set_autodj(Some(vec![PathBuf::from("/nowhere.wav")]));
+        assert!(c.autodj.is_none());
+        // The new track comes in; the old one plays on in full, and the mix waits for its fader.
+        assert!(start + len + 8.0 < 170.0, "room before the old track ends: {start} {len}");
+        let old_volume = c.session.channels[0].params.volume;
+        let stems = c.automix.as_ref().is_some_and(|m| m.plan.how == crate::core::automix::MixHow::Stems);
+        assert!(old_volume > 0.85, "its fader set it: {old_volume}");
+        let mut blocks = 0;
+        while c.mix_beat() < start + len + 4.0 {
+            pump(&mut e, &mut c);
+            blocks += 4;
+            assert!(blocks < 48000 / 512 * 300, "never got there");
+            assert_eq!(c.session.channels[0].params.volume, old_volume, "the old volume untouched");
+            assert!(c.snap.decks[0].stem_gains.iter().all(|g| *g == 1.0), "the old stems untouched: {:?}", c.snap.decks[0].stem_gains);
+            if stems {
+                // Never two basses or two voices: the new ones wait for the old ones to go.
+                let g = c.snap.decks[1].stem_gains;
+                assert_eq!((g[1], g[2]), (0.0, 0.0), "{g:?}");
+            }
+        }
+        assert!(c.automix.is_some(), "waits for the old deck's fader");
+        assert_eq!(c.session.channels[1].params.volume, 1.0, "the new track in");
+        // Its fader down: dj takes the old track out on the mix's bars, and the mix ends.
+        fader(&mut c, 7, 0.75);
+        assert_eq!(c.fader_mix_waiting_out(), None);
+        run_mix(&mut e, &mut c, |_, _| {});
+        assert!(!c.snap.decks[0].playing);
+        assert_eq!(c.session.channels[0].params.volume, 0.0);
+        assert_eq!(c.session.channels[1].params.volume, 1.0);
+    }
+
+    #[test]
+    fn a_fader_back_down_calls_off_a_mix_that_has_not_begun() {
+        let (mut e, mut c, _config) = core();
+        mix_setup(&mut e, &mut c);
+        c.settings.fader_mix = true;
+        let source = MidiSource { kind: MidiKind::Cc, channel: 0, number: 8 };
+        c.profile.mappings.push(MidiMapping { source, address: "Mixer/CH2/Volume".into(), mode: MapMode::Absolute, invert: false, feedback: false });
+        c.handle_midi(&[0xb0, 8, 0]);
+        c.handle_midi(&[0xb0, 8, 90]);
+        assert!(c.automix.as_ref().is_some_and(|m| m.plan.start_beat > c.mix_beat() + 1.0), "a mix, not begun yet");
+        c.handle_midi(&[0xb0, 8, 0]);
+        assert!(c.automix.is_none(), "called off");
+        pump(&mut e, &mut c);
+        // Without the mode, the fader is the deck's volume.
+        c.settings.fader_mix = false;
+        c.handle_midi(&[0xb0, 8, 127]);
+        assert!(c.automix.is_none());
+        assert_eq!(c.session.channels[1].params.volume, 1.0);
     }
 
     #[test]

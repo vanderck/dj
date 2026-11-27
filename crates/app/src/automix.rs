@@ -176,6 +176,14 @@ pub struct AutoMix {
     in_seen: bool,
     /// The old track has played to its end (the mix carries on bringing the new one in).
     old_over: bool,
+    /// Fader mix (Settings): the mix in two halves, started by the MIDI faders. The incoming
+    /// half runs from the start; the outgoing one waits for the old deck's fader to come down.
+    fader: bool,
+    /// Fader mix: the beat (on the mix's beats) the old deck's fader came down; `None` while it
+    /// hasn't, and the old track plays on in full.
+    out_from: Option<f64>,
+    /// Fader mix: where the old deck's fader was when the mix started (coming down from there).
+    out_ref: f32,
 }
 
 /// After a Now mix: bring the new track's vocals back where its next vocal phrase starts.
@@ -187,6 +195,11 @@ pub struct VocalReturn {
     at_clock: f64,
     level: f32,
 }
+
+/// Fader mix: a fader at or below this is at the bottom.
+const FADER_BOTTOM: f32 = 0.05;
+/// Fader mix: how far the old deck's fader comes down to take its track out.
+const FADER_MOVE: f32 = 0.1;
 
 /// Fits: within 5 % of the playing tempo (real DJs keep 86 % of tracks within 5 % of their own).
 pub const FITS_PCT: f64 = 5.0;
@@ -1136,6 +1149,9 @@ impl Core {
             started: std::time::Instant::now(),
             in_seen: false,
             old_over: false,
+            fader: self.fader_mix_on(),
+            out_from: None,
+            out_ref: self.fader_hw[o].unwrap_or(1.0),
             plan,
         };
         // Its key fitted to the playing track's, while it's still silent.
@@ -1151,10 +1167,16 @@ impl Core {
                 }
             }
             MixHow::Stems => {
-                let si = match &mix.plan.blend {
-                    Some(b) => b.levels(0.0, vocals_out).0,
-                    None => stems_at(0.0, vocals_out, true).0,
+                let (mut si, so) = match &mix.plan.blend {
+                    Some(b) => (b.levels(0.0, vocals_out).0, b.levels(-1.0, vocals_out).1),
+                    None => (stems_at(0.0, vocals_out, true).0, [1.0; 4]),
                 };
+                if mix.fader {
+                    // Two halves: the new bass and vocals wait for the old ones (see the tick).
+                    for s in [BASS, VOCALS] {
+                        si[s] = si[s].min(1.0 - so[s]);
+                    }
+                }
                 self.set_stem_levels(i, si, mix.in_stems);
                 // With dj's mixer the EQ shapes it too: the new track's highs come in gradually.
                 if !external {
@@ -1194,6 +1216,62 @@ impl Core {
     /// (the second tap of a double tap, which in a track's last minute starts the mix with the
     /// first: cancelling then left the new track looping silently as the old one ended).
     /// Whether it cancelled.
+    /// Fader mix (Settings → Mix with the faders): on, and usable (dj's own mixer, so dj sees the
+    /// faders).
+    pub fn fader_mix_on(&self) -> bool {
+        self.settings.fader_mix && !self.external_routing()
+    }
+
+    /// Fader mix: a controller's volume fader for channel `ch` moved to `v` (0..1). True when the
+    /// mode took it (the deck's volume stays dj's):
+    ///
+    /// - a silent deck's fader coming up from the bottom, with a deck playing to mix into:
+    ///   dj plans the mix at the best moment (in the style on the deck) and starts the deck in
+    ///   sync if it's paused; back to the bottom before the mix begins calls it off;
+    /// - the playing deck's fader coming down, during such a mix: its half of the mix, taking
+    ///   the old track out on the plan's bars (until then it plays on in full);
+    /// - either fader while its mix runs: only the triggers count, dj sets the volume.
+    pub(super) fn fader_mix_midi(&mut self, ch: usize, v: f32) -> bool {
+        if !self.fader_mix_on() || ch >= NUM_DECKS {
+            return false;
+        }
+        let prev = self.fader_hw[ch].replace(v);
+        if let Some(m) = self.automix.as_ref() {
+            let (i, o, released) = (m.plan.incoming, m.plan.outgoing, m.released);
+            if ch == i {
+                if !released && v <= FADER_BOTTOM {
+                    self.cancel_mix();
+                    self.log(format!("Deck {}: mix called off (fader down)", i + 1));
+                }
+                return true;
+            }
+            if ch == o {
+                let beat = self.snap.clock.beat + m.beat_offset;
+                if m.out_from.is_none() && v <= m.out_ref - FADER_MOVE {
+                    self.automix.as_mut().unwrap().out_from = Some(beat);
+                    self.log(format!("Deck {}: mixing out", o + 1));
+                }
+                return true;
+            }
+            return false;
+        }
+        let up = prev.is_none_or(|p| p <= FADER_BOTTOM) && v > FADER_BOTTOM;
+        let silent = self.session.channels[ch].params.volume <= 0.02 || self.session.channels[ch].params.mute;
+        if up && silent {
+            if let Some(out) = self.mix_target(ch) {
+                let plan = self.plan_best(ch, out, self.settings.mix_style);
+                self.start_mix(plan);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Fader mix: the deck whose fader takes the old track out, while the mix waits for it.
+    pub fn fader_mix_waiting_out(&self) -> Option<usize> {
+        self.automix.as_ref().filter(|m| m.fader && m.out_from.is_none()).map(|m| m.plan.outgoing)
+    }
+
     pub fn tap_cancel_mix(&mut self) -> bool {
         if self.automix.as_ref().is_none_or(|m| m.started.elapsed() < MIX_TAP_GUARD) {
             return false;
@@ -1338,6 +1416,10 @@ impl Core {
 
     /// Start Auto-DJ on these tracks (the library's list), or stop it (`None`).
     pub fn set_autodj(&mut self, tracks: Option<Vec<std::path::PathBuf>>) {
+        if tracks.is_some() && self.fader_mix_on() {
+            self.log("Auto-DJ is off while mixing with the faders (Settings)".to_string());
+            return;
+        }
         match tracks {
             Some(t) if !t.is_empty() => {
                 let n = t.len();
@@ -1613,10 +1695,29 @@ impl Core {
         // The new track's volume is up from the start; the EQ or stems do the blending.
         let blend = m.plan.blend.clone();
         let bp = p.min(1.0) * len / 4.0; // bar position in the mix
+        let bars_n = len / 4.0;
+        // Fader mix: the old track's half runs from where its fader came down (from the next bar
+        // of the mix, starting at the plan's first move on it); until then it plays on in full.
+        // Otherwise both halves run together.
+        let first_out = match (how, &blend) {
+            (MixHow::Stems, Some(b)) => b.out_at.iter().flatten().copied().fold(bars_n - 1.0, f64::min).max(0.0),
+            _ => 0.0,
+        };
+        let bp_out = match (m.fader && !finish, m.out_from) {
+            (false, _) => bp,
+            (true, None) => -1.0,
+            (true, Some(t)) => {
+                let t0 = start + ((t - start).max(0.0) / 4.0).ceil() * 4.0;
+                (first_out + (beat - t0) / 4.0).min(bars_n)
+            }
+        };
+        let po = bp_out / bars_n; // the old track's half, 0..1
+        let fader = m.fader;
+        // Done when both halves are.
+        let p_end = if fader && !finish { p.min(po) } else { p };
         // The old track's volume closes only over the last bar, once its EQ or stems have taken
         // it out.
-        let bars_n = len / 4.0;
-        let out_vol = 1.0 - smooth(bp - (bars_n - 1.0));
+        let out_vol = 1.0 - smooth(bp_out - (bars_n - 1.0));
         let (filter, echo_at, echo_slot, out_cutoff) = (m.plan.filter, m.plan.echo_at, m.echo_slot, m.out_cutoff);
         let (in_stems, out_stems, vocals_out) = (m.in_stems, m.out_stems, m.vocals_out);
         let vol = |c: usize| format!("Mixer/CH{}/Volume", c + 1);
@@ -1637,36 +1738,51 @@ impl Core {
                 let after = (done - ps).max(0.05);
                 // Each band over at most 8 bars (a long mix spreads them out, not slows them down).
                 let span = |frac: f64| (frac * bars_n).min(8.0) / bars_n;
-                if p < ps {
-                    let (rise_h, rise_m) = (smooth(p / span(0.7 * ps)), smooth((p - 0.3 * ps) / span(0.7 * ps)));
+                let rise = |q: f64| (smooth(q / span(0.7 * ps)), smooth((q - 0.3 * ps) / span(0.7 * ps)));
+                // (With faders the new highs and mids rise on its half, and stay up until the
+                // swap; the old track's half makes room and swaps the bass.)
+                if !swapped && (p < ps || fader) {
+                    let (rise_h, rise_m) = rise(p);
                     self.mix_set(&high(i), in_high * rise_h);
                     self.mix_set(&mid(i), in_mid * rise_m);
+                }
+                if po < ps {
                     // Room for them: the old highs and mids come partly down as the new ones rise,
                     // the old bass staying until the swap (how DJs stage it: highs and mids
                     // first, bass last).
+                    let (rise_h, rise_m) = rise(po);
                     self.mix_set(&high(o), out_high * (1.0 - 0.5 * rise_h));
                     self.mix_set(&mid(o), out_mid * (1.0 - 0.4 * rise_m));
                 }
-                if p >= ps && !swapped {
+                // The bass swap on the old track's half: the new bass never plays with the old.
+                if po >= ps && !swapped {
                     self.automix.as_mut().unwrap().swapped = true;
                     self.mix_set(&low(i), in_low);
                     self.mix_set(&mid(i), in_mid);
                     self.mix_set(&high(i), in_high);
                     self.mix_set(&low(o), 0.0);
                 }
-                if p >= ps {
+                if po >= ps {
                     // Out by `done` from where they were (60 % mids, half the highs): the mids
                     // first, then the highs, each over at most 8 bars.
                     let (m, h) = (span(0.6 * after), span(0.7 * after));
-                    self.mix_set(&mid(o), 0.6 * out_mid * (1.0 - smooth((p - (ps + 0.6 * after - m)) / m)));
-                    self.mix_set(&high(o), 0.5 * out_high * (1.0 - smooth((p - (done - h)) / h)));
+                    self.mix_set(&mid(o), 0.6 * out_mid * (1.0 - smooth((po - (ps + 0.6 * after - m)) / m)));
+                    self.mix_set(&high(o), 0.5 * out_high * (1.0 - smooth((po - (done - h)) / h)));
                 }
             }
             MixHow::Stems => {
-                let (si, so) = match &blend {
-                    Some(b) => b.levels(bp, vocals_out),
-                    None => stems_at(p.min(1.0), vocals_out, true),
+                let at = |x: f64| match &blend {
+                    Some(b) => b.levels(x, vocals_out),
+                    None => stems_at((x / bars_n).clamp(0.0, 1.0), vocals_out, true),
                 };
+                let (mut si, so) = (at(bp).0, at(bp_out).1);
+                if fader {
+                    // Two halves: the new bass and vocals wait until the old ones have gone (never
+                    // two basses, never two voices).
+                    for s in [BASS, VOCALS] {
+                        si[s] = si[s].min(1.0 - so[s]);
+                    }
+                }
                 self.set_stem_levels(i, si, in_stems);
                 self.set_stem_levels(o, so, out_stems);
                 if !external {
@@ -1684,12 +1800,12 @@ impl Core {
                         None => si[VOCALS] > 0.0,
                     };
                     self.mix_set(&high(i), if vocals_in { in_high } else { in_high * smooth((bp - (d_in - ramp)) / ramp) });
-                    self.mix_set(&high(o), out_high * (1.0 - smooth((bp - (d_out - 2.0)) / 2.0)));
+                    self.mix_set(&high(o), out_high * (1.0 - smooth((bp_out - (d_out - 2.0)) / 2.0)));
                 }
             }
             MixHow::Drop => {
                 // The new track at full straight away; the old one gone within a beat.
-                let cut = 1.0 - smooth(p * len);
+                let cut = 1.0 - smooth(bp_out * 4.0);
                 if external {
                     if vo.stems_ready {
                         self.set_stem_levels(o, [cut; 4], out_stems);
@@ -1704,13 +1820,13 @@ impl Core {
             self.mix_set(&vol(o), out_volume * out_vol);
             // A high-pass sweep on the old track where the plan puts one.
             if let Some((a, b)) = filter {
-                let x = smooth((bp - a) / (b - a).max(0.5));
+                let x = smooth((bp_out - a) / (b - a).max(0.5));
                 self.mix_set(&format!("Mixer/CH{}/Filter1", o + 1), out_cutoff + (0.85 - out_cutoff) * x);
             }
         }
         // An echo-out: an echo after the old channel's fader, so its tail rings on.
         if let (Some(at), None, false) = (echo_at, echo_slot, external) {
-            if bp >= at {
+            if bp_out >= at {
                 // One try: a full chain gets no echo (and a note), not a retry every tick.
                 self.automix.as_mut().unwrap().plan.echo_at = None;
                 match self.add_insert(o, ECHO_ID, InsertPos::Post) {
@@ -1719,7 +1835,7 @@ impl Core {
                 }
             }
         }
-        if p >= 1.0 {
+        if p_end >= 1.0 {
             // Put the filter back; the echo goes two bars later (its tail).
             if !external && filter.is_some() {
                 self.mix_set(&format!("Mixer/CH{}/Filter1", o + 1), out_cutoff);

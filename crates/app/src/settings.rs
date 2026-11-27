@@ -147,6 +147,9 @@ pub struct Settings {
     pub tempo_home: bool,
     /// How Mix (and Auto-DJ) mixes: Auto, Blend (Stems, else EQ) or Drop; picked under Mix.
     pub mix_style: MixStyle,
+    /// Mix with the faders (a MIDI mixer): no Mix button; a silent deck's fader coming up mixes it
+    /// in at the best moment, the playing deck's coming down takes it out; no Auto-DJ.
+    pub fader_mix: bool,
     pub tape_stop_ms: f64,
     pub default_loop_beats: f64,
     pub skip_beats: f64,
@@ -260,6 +263,7 @@ impl Default for Settings {
             keylock_on_load: true,
             tempo_home: true,
             mix_style: MixStyle::Auto,
+            fader_mix: false,
             tape_stop_ms: 25.0,
             default_loop_beats: 4.0,
             skip_beats: 16.0,

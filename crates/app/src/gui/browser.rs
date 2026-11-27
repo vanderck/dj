@@ -261,7 +261,9 @@ pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect) {
     };
     let aw = pill_width(ui, &auto_label, 13.0);
     let ar = Rect::from_min_size(Pos2::new(prr.left() - 8.0 - aw, y), Vec2::new(aw, bar_h));
-    let auto_hover = if core.autodj.is_some() {
+    let auto_hover = if core.fader_mix_on() {
+        "Off while you mix with the faders (Settings)"
+    } else if core.autodj.is_some() {
         "Click to stop (the playing track plays on)"
     } else {
         "Play the tracks listed as a set on decks 1 and 2: dj picks each next track (key, tempo, energy, and how well it would mix in: as Fits) and mixes it in at the best moment. Prepare them first so each is ready at once."
