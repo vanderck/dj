@@ -4774,6 +4774,44 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_fader_back_down_calls_off_a_running_mix() {
+        let (mut e, mut c, _config) = core();
+        mix_setup(&mut e, &mut c);
+        c.settings.fader_mix = true;
+        for (n, ch) in [(7u8, 1), (8u8, 2)] {
+            let source = MidiSource { kind: MidiKind::Cc, channel: 0, number: n };
+            c.profile.mappings.push(MidiMapping { source, address: format!("Mixer/CH{ch}/Volume"), mode: MapMode::Absolute, invert: false, feedback: false });
+        }
+        c.handle_midi(&[0xb0, 7, 114]);
+        let old_volume = c.session.channels[0].params.volume;
+        c.handle_midi(&[0xb0, 8, 0]);
+        c.handle_midi(&[0xb0, 8, 100]);
+        let start = c.automix.as_ref().map(|m| m.plan.start_beat).expect("a mix");
+        // Under way, the old track on its way out too.
+        while c.mix_beat() < start + 8.0 {
+            pump(&mut e, &mut c);
+        }
+        c.handle_midi(&[0xb0, 7, 90]);
+        let bar = start + ((c.mix_beat() - start) / 4.0).ceil() * 4.0;
+        while c.mix_beat() < bar + 4.0 {
+            pump(&mut e, &mut c);
+        }
+        assert!(c.automix.is_some() && c.session.channels[1].params.volume > 0.0, "the new track in");
+        // The new deck's fader back to the bottom: called off.
+        c.handle_midi(&[0xb0, 8, 0]);
+        assert!(c.automix.is_none(), "called off");
+        pump(&mut e, &mut c);
+        pump(&mut e, &mut c);
+        assert_eq!(c.session.channels[1].params.volume, 0.0, "the new track silent");
+        assert_eq!(c.snap.decks[0].stem_gains, [1.0; 4], "the old track back in full");
+        assert!(c.snap.decks[0].playing);
+        assert!(c.session.channels[0].params.volume > 0.6 && c.session.channels[0].params.volume < old_volume, "the old volume its fader");
+        // Its fader up again: a new mix.
+        c.handle_midi(&[0xb0, 8, 100]);
+        assert!(c.automix.is_some(), "mixing in anew");
+    }
+
+    #[test]
     fn a_fader_back_down_calls_off_a_mix_that_has_not_begun() {
         let (mut e, mut c, _config) = core();
         mix_setup(&mut e, &mut c);

@@ -1230,8 +1230,8 @@ impl Core {
     ///
     /// - a silent deck's fader coming up from the bottom, with a deck playing to mix into:
     ///   dj plans a mix from the next phrase line (at most 4 bars away; in the style on the
-    ///   deck) and starts the deck in sync if it's paused; back to the bottom before the mix
-    ///   begins calls it off;
+    ///   deck) and starts the deck in sync if it's paused; back to the bottom, at any point,
+    ///   calls it off;
     /// - that fader, once the new track has started: its volume (its stems or EQ bring it in over
     ///   the plan's bars);
     /// - the playing deck's fader: its volume; coming down, it starts the old track's half (its
@@ -1244,8 +1244,11 @@ impl Core {
         if let Some(m) = self.automix.as_ref() {
             let (i, o, released) = (m.plan.incoming, m.plan.outgoing, m.released);
             if ch == i {
-                if !released && v <= FADER_BOTTOM {
+                if v <= FADER_BOTTOM {
+                    // Back to the bottom, at any point: called off (the old track back in full,
+                    // the new one silent; its fader up again mixes it in anew).
                     self.cancel_mix();
+                    self.route(&format!("Mixer/CH{}/Volume", i + 1), &[OscType::Float(0.0)]);
                     self.log(format!("Deck {}: mix called off (fader down)", i + 1));
                 } else if released {
                     self.mix_set(&format!("Mixer/CH{}/Volume", i + 1), self.fader_volume(i, Some(v)));
