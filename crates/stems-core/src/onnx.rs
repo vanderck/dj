@@ -13,8 +13,8 @@ pub struct OnnxOptions {
     /// Threads ONNX Runtime may use inside one inference.
     pub intra_threads: usize,
     /// Run on an accelerator where this build can: DirectML on Windows (an ONNX model); on macOS
-    /// the Neural Engine runs a Core ML model (see `coreml`), so an ONNX one runs on the CPU. A
-    /// model (or a system) it can't use runs on the CPU (see [`commit`]).
+    /// Core ML runs a Core ML model (see `coreml`), so an ONNX one runs on the CPU. A model (or
+    /// a system) it can't use runs on the CPU (see [`commit`]).
     pub gpu: bool,
 }
 
@@ -27,7 +27,7 @@ impl Default for OnnxOptions {
     }
 }
 
-/// Where a model runs, for messages: an accelerator ("Neural Engine (CoreML)", "GPU
+/// Where a model runs, for messages: an accelerator ("Core ML", "GPU
 /// (DirectML)"), the CPU, or the CPU and why not the accelerator asked for.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Device {
@@ -68,11 +68,10 @@ pub(crate) fn commit(
 /// the CPU) when it can't be used.
 #[cfg(target_os = "macos")]
 fn gpu_builder(_: &OnnxOptions) -> Result<(SessionBuilder, &'static str), ModelError> {
-    // ONNX Runtime's CoreML provider ran HT-Demucs on the CPU (32 bits) or in ten pieces with
-    // casts between (16 bits); the Neural Engine runs dj's own Core ML model instead (see
-    // `coreml`, and `tools/htdemucs_coreml`).
+    // ONNX Runtime's CoreML provider ran HT-Demucs slowly or in ten pieces; dj's own Core ML
+    // model runs instead (see `coreml`, and `tools/htdemucs_coreml`).
     Err(ModelError::new(
-        "the Neural Engine runs the Core ML model (htdemucs.mlmodelc), not ONNX",
+        "Core ML runs dj's Core ML model (htdemucs.mlmodelc), not ONNX",
     ))
 }
 

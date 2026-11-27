@@ -69,11 +69,11 @@ fn the_gpu_option_runs_where_it_can_and_says_where() {
     };
     let mut model =
         DemucsModel::from_files(&[format!("{DIR}/demucs_test.onnx")], &options).unwrap();
-    // On an accelerator (the Neural Engine with CoreML, the GPU with DirectML), or on the CPU
+    // On an accelerator (Core ML, the GPU with DirectML), or on the CPU
     // with the reason it isn't (none on this system, or the model doesn't run there).
     match model.device() {
         Device::Accelerator(name) => {
-            assert!(["Neural Engine (CoreML)", "GPU (DirectML)"].contains(name))
+            assert!(["Core ML", "GPU (DirectML)"].contains(name))
         }
         Device::Cpu(why) => assert!(
             why.as_deref().is_some_and(|w| !w.is_empty()),
@@ -83,12 +83,12 @@ fn the_gpu_option_runs_where_it_can_and_says_where() {
     }
     let shown = model.device().to_string();
     assert!(
-        shown == "Neural Engine (CoreML)"
+        shown == "Core ML"
             || shown == "GPU (DirectML)"
             || shown.starts_with("CPU (no acceleration: "),
         "{shown}"
     );
-    // The same stems either way (the Neural Engine computes in half precision).
+    // The same stems either way (the GPU may compute in half precision).
     for n in [3456, 999] {
         check_within(&mut model, n, 2e-3);
     }

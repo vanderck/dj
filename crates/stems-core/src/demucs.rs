@@ -169,7 +169,7 @@ impl DemucsModel {
         for path in paths {
             let path = path.as_ref();
             if crate::coreml::is_coreml(path) {
-                // HT-Demucs's network for Core ML (the Neural Engine): one model, all stems.
+                // HT-Demucs's network for Core ML: one model, all stems.
                 let (net, n, on) = crate::coreml::load(path)?;
                 device = Some(on);
                 segment = Some(n);

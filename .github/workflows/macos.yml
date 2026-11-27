@@ -25,7 +25,7 @@ jobs:
       - run: cargo clippy -p stems-core --all-targets --features onnx -- -D warnings
       - run: cargo fmt -p stems-core -- --check
 
-  # HT-Demucs's network as a Core ML model (the Neural Engine), bundled with the app: converted
+  # HT-Demucs's network as a Core ML model (32-bit), bundled with the app: converted
   # from Demucs's weights (tools/htdemucs_coreml), compiled, and checked against Mixxx's ONNX
   # model through dj's own code. Converted again only when the converter changes.
   coreml-model:
@@ -59,31 +59,15 @@ jobs:
           path: target/mixxx-htdemucs.onnx
           key: mixxx-htdemucs-onnx-v1
       - name: Check it against Mixxx's HT-Demucs
-        continue-on-error: true # TEMPORARY, with the diagnosis below
         run: |
           [ -s target/mixxx-htdemucs.onnx ] || curl -sSfL --retry 3 -o target/mixxx-htdemucs.onnx https://github.com/mixxxdj/demucs/releases/latest/download/htdemucs.onnx
           python -m pip install --quiet numpy
           python tools/htdemucs_coreml/mix.py > "$RUNNER_TEMP/mix.f32"
           # (Absolute paths: the test runs in the crate's folder.)
           DEMUCS_MODEL="$PWD/target/mixxx-htdemucs.onnx" DEMUCS_NETWORK="$PWD/target/coreml/htdemucs.mlmodelc" \
-            DEMUCS_MIX="$RUNNER_TEMP/mix.f32" MIN_DB=25 \
+            DEMUCS_MIX="$RUNNER_TEMP/mix.f32" MIN_DB=50 \
             cargo test -p stems-core --features onnx --test demucs -- --ignored the_network --nocapture
       # TEMPORARY diagnosis: a 32-bit model next to the 16-bit one.
-      - name: Diagnose (mixed precision)
-        run: |
-          python -m pip install --quiet "torch==2.7.0" "coremltools==9.0" "numpy<2.3" einops julius
-          python -m pip install --quiet --no-deps demucs==4.1.0 openunmix
-          curl -sSfL --retry 3 -o "$RUNNER_TEMP/htdemucs.th" https://dl.fbaipublicfiles.com/demucs/hybrid_transformer/955717e8-8726e21a.th
-          python tools/htdemucs_coreml/mix.py > "$RUNNER_TEMP/mix.f32"
-          for v in "conv,conv_transpose" "linear,matmul" "gelu,sigmoid"; do
-            echo "=== fp32 ops: $v"
-            rm -rf "$RUNNER_TEMP/v.mlpackage" "$RUNNER_TEMP/cv"
-            python tools/htdemucs_coreml/convert.py --fp32-ops "$v" "$RUNNER_TEMP/htdemucs.th" "$RUNNER_TEMP/v.mlpackage" > /dev/null 2>&1
-            mkdir -p "$RUNNER_TEMP/cv" && xcrun coremlcompiler compile "$RUNNER_TEMP/v.mlpackage" "$RUNNER_TEMP/cv/" > /dev/null
-            DEMUCS_MODEL="$PWD/target/mixxx-htdemucs.onnx" DEMUCS_NETWORK="$RUNNER_TEMP/cv/v.mlmodelc" \
-              DEMUCS_MIX="$RUNNER_TEMP/mix.f32" MIN_DB=0 \
-              cargo test -p stems-core --features onnx --test demucs -- --ignored the_network --nocapture 2>&1 | grep -E "stem |s$"
-          done
       - uses: actions/upload-artifact@v4
         with:
           name: htdemucs-coreml

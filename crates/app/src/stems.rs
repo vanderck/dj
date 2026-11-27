@@ -18,8 +18,7 @@ use stems_core::Stem as CoreStem;
 pub enum Update {
     Progress { deck: usize, track_id: u64, fraction: f32 },
     /// The separator's model loads before this track's separation starts: a second or two, but
-    /// minutes the first time on the Neural Engine (its 16-bit model is made, then CoreML
-    /// compiles it).
+    /// longer the first time with Core ML (it specialises the model for this Mac).
     LoadingModel { deck: usize, track_id: u64 },
     /// `cues`: cue points detected with the stems, when the request asked for them.
     Done { deck: usize, track_id: u64, stems: Arc<StemData>, wave: Arc<StemWave>, source: String, cues: Option<Vec<Cue>> },
@@ -562,7 +561,7 @@ impl DemucsCache {
     }
 }
 
-/// The model files to separate with: with the Neural Engine switch on (macOS), the app's Core
+/// The model files to separate with: with the Core ML switch on (macOS), the app's Core
 /// ML model of HT-Demucs when `path` is HT-Demucs (one file); else `path`'s (see
 /// [`demucs_files`]).
 pub fn model_files(path: &Path) -> Vec<PathBuf> {

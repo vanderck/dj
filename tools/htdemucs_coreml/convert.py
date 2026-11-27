@@ -1,9 +1,13 @@
-"""HT-Demucs's network as a Core ML model, for the Neural Engine.
+"""HT-Demucs's network as a Core ML model.
 
 The model is the part of HT-Demucs between its inputs and outputs once normalised: dj computes
 the spectrogram (STFT), the normalisation, the mask and the inverse STFT itself (stems-core,
-`demucs::spec`), so what Core ML runs is only the network (convolutions, the transformer), in
-16 bits, as the Neural Engine computes.
+`spec`), so what Core ML runs is only the network (convolutions, the transformer).
+
+In 32 bits: in 16 bits (the Neural Engine's) the stems come out audibly different from
+Demucs's (on a test mix, drums 15 dB and other 29 dB from the 32-bit result, on a Mac's CPU;
+the transformer's linear layers and the convolutions both lose too much). 32 bits on Core ML
+gives Demucs's stems (63-85 dB), several times faster than ONNX Runtime on the CPU.
 
     inputs:  spec  [1, 4, 2048, 336]  the mix's spectrogram, complex as channels, normalised
              wave  [1, 2, 343980]     the mix, normalised
@@ -125,11 +129,11 @@ def main():
     ap.add_argument("weights")
     ap.add_argument("out")
     ap.add_argument("--onnx")
-    ap.add_argument("--fp32", action="store_true", help="32-bit (the CPU and GPU only)")
+    ap.add_argument("--fp16", action="store_true", help="16-bit (see above: not accurate enough)")
     ap.add_argument(
         "--fp32-ops",
         default="",
-        help="comma-separated MIL op types kept 32-bit in a 16-bit model",
+        help="with --fp16: comma-separated MIL op types kept 32-bit",
     )
     a = ap.parse_args()
 
@@ -166,10 +170,12 @@ def main():
             ct.TensorType(name="wave_out", dtype=np.float32),
         ],
         convert_to="mlprogram",
-        compute_precision=ct.precision.FLOAT32 if a.fp32 else precision(a.fp32_ops),
+        compute_precision=precision(a.fp32_ops) if a.fp16 else ct.precision.FLOAT32,
         minimum_deployment_target=ct.target.macOS13,
     )
-    mlmodel.short_description = "HT-Demucs (htdemucs) network, normalised spectrogram and wave in and out"
+    mlmodel.short_description = (
+        "HT-Demucs (htdemucs) network, normalised spectrogram and wave in and out"
+    )
     mlmodel.save(a.out)
     print("wrote", a.out)
 

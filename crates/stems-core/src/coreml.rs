@@ -1,6 +1,7 @@
-//! HT-Demucs's network on Core ML, for the Neural Engine (macOS): a model made by
-//! `tools/htdemucs_coreml` (16-bit, inputs `spec` and `wave`, outputs `spec_out` and
-//! `wave_out`), with the spectrogram and its inverse done here ([`crate::spec`]).
+//! HT-Demucs's network on Core ML (macOS): a model made by `tools/htdemucs_coreml` (32-bit:
+//! 16 bits changes the stems audibly; inputs `spec` and `wave`, outputs `spec_out` and
+//! `wave_out`), with the spectrogram and its inverse done here ([`crate::spec`]). Several times
+//! faster than ONNX Runtime on the CPU.
 //!
 //! A compiled model (`.mlmodelc`) loads in a second; a package (`.mlpackage`) is compiled first.
 
@@ -17,7 +18,7 @@ pub(crate) fn is_coreml(path: &Path) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("mlmodelc") || e.eq_ignore_ascii_case("mlpackage"))
 }
 
-/// The model at `path`, on the CPU and the Neural Engine: the network, its segment length.
+/// The model at `path`, on Core ML: the network, its segment length.
 #[cfg(not(all(target_os = "macos", feature = "coreml")))]
 pub(crate) fn load(path: &Path) -> Result<(Box<dyn Network>, usize, Device), ModelError> {
     Err(ModelError::new(format!(
@@ -71,8 +72,8 @@ mod mac {
         // SAFETY: plain Core ML calls with valid arguments.
         let model = unsafe {
             let config = MLModelConfiguration::new();
-            // The Neural Engine, and the CPU for what it can't run (not the GPU: the app draws
-            // on it, and Core ML's work there holds up the window).
+            // Not the GPU: the app draws on it, and Core ML's work there holds up the window. (A
+            // 32-bit model runs on the CPU; the Neural Engine takes only 16-bit work.)
             config.setComputeUnits(MLComputeUnits::CPUAndNeuralEngine);
             MLModel::modelWithContentsOfURL_configuration_error(&compiled, &config)
         }
@@ -99,7 +100,7 @@ mod mac {
         Ok((
             Box::new(CoreMl { model }),
             segment,
-            Device::Accelerator("Neural Engine (Core ML)"),
+            Device::Accelerator("Core ML"),
         ))
     }
 
