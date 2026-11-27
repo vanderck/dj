@@ -288,7 +288,10 @@ pub fn import_mapping_file(path: &std::path::Path, profile: &mut settings::Mappi
 /// Build the core (audio + engine + session restore).
 pub fn boot() -> (audio::AudioHost, Core) {
     let settings = Settings::load();
-    let session = Session::load();
+    let mut session = Session::load();
+    // A new start: the EQ and filters neutral (the tracks reload with every stem in, the clock
+    // and tempos as they load).
+    session.fresh_start();
     let (host, ctl, sr) = audio::start(&settings.audio).expect("audio");
     let mut core = Core::new(ctl, sr, audio::MAX_BLOCK, settings, session);
     core.audio_channels = host.channels;

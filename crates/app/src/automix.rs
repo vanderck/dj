@@ -191,6 +191,9 @@ pub struct AutoMix {
     /// The old vocals have gone (their stem silent long enough first); until then they stay,
     /// and the new ones wait for them.
     old_vocals_out: bool,
+    /// Since when (clock beats) the new vocals, and the old ones, wait for a quiet second.
+    vocals_wait_from: Option<f64>,
+    old_vocals_wait_from: Option<f64>,
 }
 
 /// After a Now mix: bring the new track's vocals back where its next vocal phrase starts.
@@ -715,11 +718,11 @@ impl Core {
                 let out_w: [Vec<f32>; 4] = std::array::from_fn(|p| (0..bars).map(|k| out.level(p, ob(k))).collect());
                 let mut blend = (how != MixHow::Drop).then(|| plan_blend(&inc_w, &out_w, bars, vocals_out, clash));
                 // The old vocals end in a breath, not mid-line.
-                if let (Some(b), Some(w)) = (blend.as_mut(), self.decks[outgoing].stem_wave.as_deref()) {
+                if let (Some(b), Some(w)) = (blend.as_mut(), self.heard_wave(outgoing).as_deref()) {
                     breathe_out(b, w, out.secs(c.out_bar as f64), out.bar_secs / 4.0);
                 }
                 // The new vocals start with a line, not in the middle of one.
-                if let (Some(b), Some(w)) = (blend.as_mut(), self.decks[incoming].stem_wave.as_deref()) {
+                if let (Some(b), Some(w)) = (blend.as_mut(), self.heard_wave(incoming).as_deref()) {
                     let spb_i = inc.bar_secs / 4.0;
                     breathe_in(b, w, entry_secs.unwrap_or(inc.secs(c.in_bar as f64)) + lead_in * spb_i, spb_i);
                 }
@@ -869,7 +872,8 @@ impl Core {
                 Some(((t - start) / (4.0 * spb), n.clamp(1, 10)))
             })
             .collect();
-        let bars = crate::transition::Bars::new(&info.waveform, self.decks[d].stem_wave.as_deref(), start, spb, v.duration_secs)
+        let heard = self.heard_wave(d);
+        let bars = crate::transition::Bars::new(&info.waveform, heard.as_deref(), start, spb, v.duration_secs)
             .with_phrase(crate::transition::phrase_offset(&cues))
             .with_energy(&energy, self.deck_energy(d));
         let bars = match self.decks[d].sections.as_deref() {
@@ -1099,7 +1103,7 @@ impl Core {
     /// Plan a blend of `bars` bars from `start` (outgoing beats) from both tracks' stems; `None`
     /// when either deck has none.
     pub fn analyse(&self, incoming: usize, outgoing: usize, start: f64, bars: usize, vocals_out: bool) -> Option<Blend> {
-        let (wi, wo) = (self.decks[incoming].stem_wave.as_ref()?, self.decks[outgoing].stem_wave.as_ref()?);
+        let (wi, wo) = (self.heard_wave(incoming)?, self.heard_wave(outgoing)?);
         let (i, o) = (&self.snap.decks[incoming], &self.snap.decks[outgoing]);
         let (spb_i, spb_o) = (60.0 / i.track_bpm.max(1.0), 60.0 / o.track_bpm.max(1.0));
         // Where each track will be when the mix starts: the outgoing one plays on; the incoming
@@ -1108,9 +1112,22 @@ impl Core {
         let t_in = if i.loop_on { i.loop_start_secs } else { i.position_secs };
         // (Its bars line up with the mix's: count them from its first downbeat.)
         let t_in = t_in + self.lead_in(incoming, t_in) * spb_i;
-        let inc = bar_levels(wi, t_in, spb_i, bars);
-        let out = bar_levels(wo, t_out, spb_o, bars);
+        let inc = bar_levels(&wi, t_in, spb_i, bars);
+        let out = bar_levels(&wo, t_out, spb_o, bars);
         Some(plan_blend(&inc, &out, bars, vocals_out, self.keys_clash(incoming, outgoing)))
+    }
+
+    /// Deck `d`'s stem levels as you hear them: a stem turned down (held out after a mix, or by
+    /// you) is quiet, whatever the track does there (so a mix doesn't wait for vocals already
+    /// off).
+    pub(crate) fn heard_wave(&self, d: usize) -> Option<std::sync::Arc<crate::stems::StemWave>> {
+        let w = self.decks[d].stem_wave.as_ref()?;
+        let g = self.snap.decks[d].stem_gains;
+        if g.iter().all(|x| *x >= 0.99) {
+            return Some(w.clone());
+        }
+        let levels = std::array::from_fn(|s| w.levels[s].iter().map(|x| x * g[s].clamp(0.0, 1.0)).collect());
+        Some(std::sync::Arc::new(crate::stems::StemWave { bins_per_sec: w.bins_per_sec, levels }))
     }
 
     /// A deck's energy (tag, else dj's estimate).
@@ -1149,9 +1166,9 @@ impl Core {
     /// Whether deck `d`'s vocal stem has been silent for the last [`VOCAL_IN_GAP_SECS`] (below a
     /// quarter of the singing level around there), so its vocals can come in without cutting
     /// into a line. True without stems, or with hardly any singing around.
-    pub(crate) fn vocals_quiet(&self, d: usize) -> bool {
+    pub(crate) fn vocals_quiet(&self, d: usize, waited: f64) -> bool {
         let Some(w) = self.decks[d].stem_wave.as_ref() else { return true };
-        vocals_quiet_at(w, self.snap.decks[d].position_secs)
+        vocals_quiet_at(w, self.snap.decks[d].position_secs, waited)
     }
 
     /// Mean vocal level (0..1, relative to the track's loudest moments) between two track
@@ -1222,12 +1239,19 @@ impl Core {
             out_ref: self.fader_hw[o].unwrap_or(1.0),
             vocals_let_in: false,
             old_vocals_out: false,
+            vocals_wait_from: None,
+            old_vocals_wait_from: None,
             plan,
         };
         // The old track still coming in on another mix: its own levels, not that mix's (its
         // stems, EQ as they were before it).
         if let Some(prev) = self.mixes().filter(|m| m.plan.incoming == o).last() {
             (mix.out_low, mix.out_mid, mix.out_high, mix.out_stems) = (prev.in_low, prev.in_mid, prev.in_high, prev.in_stems);
+        }
+        // The old deck's vocals held out after an earlier mix (waiting for a pause to come
+        // back): they stay out, it's going.
+        if self.vocal_return.is_some_and(|vr| vr.deck == o) {
+            self.vocal_return = None;
         }
         // Its key fitted to the playing track's, while it's still silent.
         if mix.plan.transpose != 0 {
@@ -1521,6 +1545,9 @@ impl Core {
                         "bpm": (v.bpm * 100.0).round() / 100.0, "semitones": v.semitones,
                         "volume": p.volume, "eq": p.eq, "filter": p.cutoff, "stems": v.stem_gains,
                         "fader": self.fader_hw[d],
+                        // The vocal stem's mean over the last second, and the singing level around
+                        // (what decides when vocals come in or go).
+                        "vox": self.decks[d].stem_wave.as_ref().and_then(|w| vocal_levels_at(w, v.position_secs)).map(|(m, s)| [(m * 1000.0).round() / 1000.0, (s * 1000.0).round() / 1000.0]),
                     })
                 })
                 .collect();
@@ -1531,6 +1558,7 @@ impl Core {
                         "in": m.plan.incoming + 1, "out": m.plan.outgoing + 1, "how": m.plan.how.name(m.external),
                         "beat": (self.mix_beat_of(m) * 100.0).round() / 100.0, "start": m.plan.start_beat, "length": m.plan.length_beats,
                         "released": m.released, "out_from": m.out_from, "vocals_in": m.vocals_let_in, "old_vocals_out": m.old_vocals_out,
+                        "vocals_wait_from": m.vocals_wait_from, "old_vocals_wait_from": m.old_vocals_wait_from,
                     })
                 })
                 .collect();
@@ -1579,7 +1607,7 @@ impl Core {
         if v.track_id != vr.track_id || !v.loaded || (clock < vr.at_clock && v.stem_gains[VOCALS] > 0.01) {
             // Another track, or you brought them back yourself.
             self.vocal_return = None;
-        } else if clock >= vr.at_clock && self.vocals_quiet(vr.deck) {
+        } else if clock >= vr.at_clock && self.vocals_quiet(vr.deck, clock - vr.at_clock) {
             // All in at once (vocals switch; see `Blend::levels`), where their stem has been
             // silent for over a second.
             self.set_picked_up(&addr, vr.level);
@@ -2114,10 +2142,16 @@ impl Core {
                 // (Up to half a beat early, still in the pause: a cut planned where the next line
                 // starts would find the singer back by the time it's due.)
                 let due = so[VOCALS] < 1.0 || (bp_swap >= 0.0 && at(bp_swap + 0.125).1[VOCALS] < 1.0);
+                // (Old vocals already silent, held out by an earlier mix or turned down: gone.)
+                if out_stems[VOCALS] <= 0.01 {
+                    self.automix.as_mut().unwrap().old_vocals_out = true;
+                }
+                let clock = self.snap.clock.beat;
                 if self.automix.as_ref().unwrap().old_vocals_out {
                     so[VOCALS] = 0.0;
                 } else if due {
-                    if self.vocals_quiet(o) {
+                    let from = *self.automix.as_mut().unwrap().old_vocals_wait_from.get_or_insert(clock);
+                    if self.vocals_quiet(o, clock - from) {
                         so[VOCALS] = 0.0;
                         self.automix.as_mut().unwrap().old_vocals_out = true;
                     } else {
@@ -2135,7 +2169,8 @@ impl Core {
                 // The new vocals come in only where their stem has been silent for over a second
                 // (a line starting, never mid-word); once in, they stay.
                 if si[VOCALS] > 0.0 && !self.automix.as_ref().unwrap().vocals_let_in {
-                    if self.vocals_quiet(i) {
+                    let from = *self.automix.as_mut().unwrap().vocals_wait_from.get_or_insert(clock);
+                    if self.vocals_quiet(i, clock - from) {
                         self.automix.as_mut().unwrap().vocals_let_in = true;
                     } else {
                         si[VOCALS] = 0.0;
@@ -2240,12 +2275,14 @@ impl Core {
             // back on its next phrase that has vocals.
             // New vocals the mix was still holding out (no second of silence yet): they come in
             // as soon as there is one.
-            let held = how == MixHow::Stems && !vocals_out && !self.automix.as_ref().is_some_and(|m| m.vocals_let_in) && !self.vocals_quiet(i);
+            let waited = self.automix.as_ref().and_then(|m| m.vocals_wait_from).map_or(0.0, |f| self.snap.clock.beat - f);
+            let held = how == MixHow::Stems && !vocals_out && !self.automix.as_ref().is_some_and(|m| m.vocals_let_in) && !self.vocals_quiet(i, waited);
             if how == MixHow::Stems {
                 self.set_stem_levels(i, [1.0, 1.0, if vocals_out || held { 0.0 } else { 1.0 }, 1.0], in_stems);
             }
             if held {
-                let at_clock = self.snap.clock.beat;
+                // (Counting the wait from when it began: it may take a less quiet second soon.)
+                let at_clock = self.automix.as_ref().and_then(|m| m.vocals_wait_from).unwrap_or(self.snap.clock.beat);
                 self.vocal_return = Some(VocalReturn { deck: i, track_id: vi.track_id, at_clock, level: in_stems[VOCALS] });
             }
             if vocals_out {
@@ -2402,23 +2439,47 @@ pub fn bar_levels(w: &crate::stems::StemWave, t0: f64, beat_secs: f64, bars: usi
     })
 }
 
-/// New vocals come in only where their stem has been silent at least this long: never into the
-/// middle of a line.
+/// New vocals come in (old ones go) only where their stem has been quiet at least this long:
+/// never into the middle of a line.
 pub const VOCAL_IN_GAP_SECS: f64 = 1.0;
 
-/// Whether the vocal stem in `w` has been silent for the [`VOCAL_IN_GAP_SECS`] before track
-/// time `pos`: below a quarter of how loud the singing is around there (the louder quarter of
-/// the 30 s around), or nothing sung around at all.
-pub fn vocals_quiet_at(w: &crate::stems::StemWave, pos: f64) -> bool {
+/// Deck vocals waiting this long (beats) for a quiet second accept a less quiet one; this long
+/// again, they don't wait any more (a singer who never pauses for a second: reverb, backing
+/// vocals and bleed keep the stem up).
+pub const VOCAL_WAIT_BEATS: f64 = 32.0;
+
+/// The vocal stem in `w` before track time `pos`: its mean level over the last
+/// [`VOCAL_IN_GAP_SECS`], and how loud the singing is around there (the louder quarter of the
+/// sung moments in the 30 s around); `None` with nothing sung around.
+pub fn vocal_levels_at(w: &crate::stems::StemWave, pos: f64) -> Option<(f32, f32)> {
     let v = &w.levels[VOCALS];
     let bin = |t: f64| ((t.max(0.0) * w.bins_per_sec) as usize).min(v.len());
     let mut around: Vec<f32> = v[bin(pos - 15.0)..bin(pos + 15.0)].iter().copied().filter(|x| *x > PRESENT).collect();
     if around.is_empty() {
-        return true;
+        return None;
     }
     let k = around.len() / 4;
     let sung = *around.select_nth_unstable_by(k, |a, z| z.total_cmp(a)).1;
-    v[bin(pos - VOCAL_IN_GAP_SECS)..bin(pos)].iter().all(|x| *x < 0.25 * sung)
+    let last = &v[bin(pos - VOCAL_IN_GAP_SECS)..bin(pos)];
+    let mean = if last.is_empty() { 0.0 } else { last.iter().sum::<f32>() / last.len() as f32 };
+    Some((mean, sung))
+}
+
+/// Whether the vocal stem in `w` has been quiet for the [`VOCAL_IN_GAP_SECS`] before track time
+/// `pos`: its mean level then under a fifth of the singing level around (a pause, its reverb
+/// and bleed included; a breath between two words isn't), or nothing sung around. Having waited
+/// `waited` beats already: from [`VOCAL_WAIT_BEATS`] under two fifths, and from twice that,
+/// quiet enough whatever.
+pub fn vocals_quiet_at(w: &crate::stems::StemWave, pos: f64, waited: f64) -> bool {
+    let Some((mean, sung)) = vocal_levels_at(w, pos) else { return true };
+    let factor = if waited < VOCAL_WAIT_BEATS {
+        0.2
+    } else if waited < 2.0 * VOCAL_WAIT_BEATS {
+        0.4
+    } else {
+        return true;
+    };
+    mean < factor * sung
 }
 
 /// The old vocals are cut only where the singer has been quiet at least this long: a cut in a
@@ -2672,7 +2733,7 @@ pub fn plan_blend(inc: &[Vec<f32>; 4], out: &[Vec<f32>; 4], bars: usize, vocals_
 
 #[cfg(test)]
 mod tests {
-    use super::{breathe_in, breathe_out, mashup_blend, plan_blend, smooth, stems_at, vocals_quiet_at, BASS, DRUMS, OTHER, VOCALS};
+    use super::{breathe_in, breathe_out, mashup_blend, plan_blend, smooth, stems_at, vocals_quiet_at, BASS, DRUMS, OTHER, VOCALS, VOCAL_WAIT_BEATS};
 
     #[test]
     fn new_vocals_come_in_after_a_second_of_silence() {
@@ -2680,13 +2741,21 @@ mod tests {
         let per = 100.0;
         let v: Vec<f32> = (0..3000).map(|k| if (1000..1150).contains(&k) { 0.05 } else { 0.5 }).collect();
         let w = crate::stems::StemWave { bins_per_sec: per, levels: [vec![0.5; 3000], vec![0.5; 3000], v, vec![0.5; 3000]] };
-        assert!(!vocals_quiet_at(&w, 9.0), "mid-line");
-        assert!(!vocals_quiet_at(&w, 10.5), "half a second into the pause");
-        assert!(vocals_quiet_at(&w, 11.1), "over a second into it (bleed doesn't count)");
-        assert!(!vocals_quiet_at(&w, 12.0), "the next line under way");
+        assert!(!vocals_quiet_at(&w, 9.0, 0.0), "mid-line");
+        assert!(!vocals_quiet_at(&w, 10.5, 0.0), "half a second into the pause");
+        assert!(vocals_quiet_at(&w, 11.1, 0.0), "over a second into it (bleed doesn't count)");
+        assert!(!vocals_quiet_at(&w, 12.0, 0.0), "the next line under way");
         // Nothing sung around: always.
         let quiet = crate::stems::StemWave { bins_per_sec: per, levels: [vec![0.5; 3000], vec![0.5; 3000], vec![0.02; 3000], vec![0.5; 3000]] };
-        assert!(vocals_quiet_at(&quiet, 12.0));
+        assert!(vocals_quiet_at(&quiet, 12.0, 0.0));
+        // A singer whose stem never quite drops (reverb, backing vocals: 0.15 between lines of
+        // 0.5, never a second below a fifth): after a while a less quiet second does, then none.
+        let busy: Vec<f32> = (0..3000).map(|k| if k % 200 < 100 { 0.5 } else { 0.15 }).collect();
+        let w = crate::stems::StemWave { bins_per_sec: per, levels: [vec![0.5; 3000], vec![0.5; 3000], busy, vec![0.5; 3000]] };
+        let quiet_any = |waited: f64| (1000..2000).any(|k| vocals_quiet_at(&w, k as f64 / per, waited));
+        assert!(!quiet_any(0.0), "never a quiet second");
+        assert!(quiet_any(VOCAL_WAIT_BEATS), "a less quiet one, having waited");
+        assert!(vocals_quiet_at(&w, 10.5, 2.0 * VOCAL_WAIT_BEATS), "no more waiting");
     }
 
     #[test]
