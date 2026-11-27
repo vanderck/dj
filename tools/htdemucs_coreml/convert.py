@@ -122,7 +122,9 @@ def main():
     spec = torch.randn(1, 4, BINS, FRAMES)
     wave = torch.randn(1, 2, SEGMENT)
     with torch.no_grad():
-        traced = torch.jit.trace(net, (spec, wave))
+        # (No trace check: torch 2.7 finds the graph differs on a second call, where torch 2.15
+        # doesn't; dj's CI checks the converted model's stems against Mixxx's model instead.)
+        traced = torch.jit.trace(net, (spec, wave), check_trace=False)
         if a.onnx:
             torch.onnx.export(
                 net,
