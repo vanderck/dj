@@ -305,6 +305,11 @@ pub struct Core {
     dirty_since: Option<Instant>,
     /// The auto-mix in progress, if any.
     pub automix: Option<automix::AutoMix>,
+    /// Mixes started before `automix` (the newest) and still running: mixes run side by side
+    /// (each push of a deck's fader, or Mix, mixes into the newest track), oldest first.
+    pub other_mixes: Vec<automix::AutoMix>,
+    /// While a mix ticks: what it sets, held back (see `automix_tick`).
+    mix_batch_one: Option<HashMap<String, f32>>,
     /// After a Now mix: the new track's vocals coming back on its next vocal phrase.
     pub vocal_return: Option<automix::VocalReturn>,
     /// Each deck's stem levels when their switch muted them (`Deck/N/StemVocals` off): back
@@ -413,6 +418,8 @@ impl Core {
             audio_channels: 2,
             dirty_since: None,
             automix: None,
+            other_mixes: Vec::new(),
+            mix_batch_one: None,
             vocal_return: None,
             stem_unmute: [[None; 4]; NUM_DECKS],
             autodj: None,
@@ -3835,10 +3842,10 @@ pub(crate) mod tests {
         let plan = c.plan_best(1, 0, c.settings.mix_style);
         c.start_mix(plan);
         pump(&mut e, &mut c);
-        assert!(!c.tap_cancel_mix(), "too soon to be meant");
+        assert!(!c.tap_cancel_mix(1), "too soon to be meant");
         assert!(c.automix.is_some());
         std::thread::sleep(std::time::Duration::from_millis(1600));
-        assert!(c.tap_cancel_mix());
+        assert!(c.tap_cancel_mix(1));
         assert!(c.automix.is_none());
         // Not brought in yet: it says the new track still waits, silent.
         assert!(c.status.iter().any(|(_, m)| m == "Mix cancelled: deck 2 still waits, volume down"), "{:?}", c.status);
@@ -4771,7 +4778,7 @@ pub(crate) mod tests {
         assert_eq!(c.automix.as_ref().map(|m| (m.plan.incoming, m.plan.outgoing)), Some((1, 0)));
         assert!(start - c.mix_beat() <= 4.0 * 4.0 + 5.0, "soon: {start} {}", c.mix_beat());
         assert_eq!(c.session.channels[1].params.volume, 0.0, "silent until it starts");
-        assert_eq!(c.fader_mix_waiting_out(), Some(0));
+        assert_eq!(c.fader_mix_waiting_out(0), true);
         // No Auto-DJ in this mode.
         c.set_autodj(Some(vec![PathBuf::from("/nowhere.wav")]));
         assert!(c.autodj.is_none());
@@ -4807,7 +4814,7 @@ pub(crate) mod tests {
         }
         // Its fader starts down: its volume follows, its stems or EQ take it out over 4 bars.
         fader(&mut c, 7, 0.8);
-        assert_eq!(c.fader_mix_waiting_out(), None);
+        assert_eq!(c.fader_mix_waiting_out(0), false);
         assert!((c.session.channels[0].params.volume - 0.8).abs() < 0.01);
         let at = c.snap.clock.beat;
         // Nothing moves before the next bar line: the fade starts on it.
@@ -4842,6 +4849,101 @@ pub(crate) mod tests {
         }
         assert!(c.automix.is_none());
         assert!((c.session.channels[1].params.volume - 100.0 / 127.0).abs() < 0.01, "{}", c.session.channels[1].params.volume);
+    }
+
+    /// Deck 2 mixed into deck 1 (waiting for deck 1's fader), then deck 3 into deck 2: two
+    /// fader mixes side by side, on stems; never two basses heard meanwhile.
+    fn three_decks_mixing(e: &mut dj_engine::Engine, c: &mut Core) {
+        c.settings.deck_count = 4;
+        mix_setup(e, c);
+        c.settings.fader_mix = true;
+        c.settings.mix_style = crate::settings::MixStyle::Stems;
+        for (n, ch) in [(7u8, 1), (8u8, 2), (9u8, 3)] {
+            let source = MidiSource { kind: MidiKind::Cc, channel: 0, number: n };
+            c.profile.mappings.push(MidiMapping { source, address: format!("Mixer/CH{ch}/Volume"), mode: MapMode::Absolute, invert: false, feedback: false });
+        }
+        // Never two basses: decks heard with their bass in.
+        let basses = |c: &Core| (0..3).filter(|&d| c.snap.decks[d].playing && c.session.channels[d].params.volume > 0.0 && c.snap.decks[d].stem_gains[1] > 0.0).count();
+        c.handle_midi(&[0xb0, 7, 114]);
+        c.handle_midi(&[0xb0, 8, 0]);
+        c.handle_midi(&[0xb0, 8, 120]);
+        let start = c.automix.as_ref().map(|m| m.plan.start_beat).expect("deck 2 mixing into deck 1");
+        while c.mix_beat() < start + 8.0 {
+            pump(e, c);
+            assert!(basses(c) <= 1);
+        }
+        // A third track, while that mix still waits for deck 1's fader.
+        c.load_track(2, &kick_wav("style-c.wav", 60));
+        let deadline = Instant::now() + std::time::Duration::from_secs(60);
+        while !(c.snap.decks[2].loaded && c.snap.decks[2].stems_ready && c.decks[2].info.as_ref().is_some_and(|i| !i.cues_pending)) {
+            assert!(Instant::now() < deadline, "deck 3 never ready");
+            pump(e, c);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        c.deck_cmd(2, DeckCmd::SetGrid(Some(dj_engine::track::BeatGrid { bpm: 120.0, anchor_secs: 0.0 })));
+        pump(e, c);
+        assert!(c.fader_mix_waiting_out(0));
+        assert_eq!(c.mix_target(2), Some(1), "into the newest track");
+        c.handle_midi(&[0xb0, 9, 0]);
+        c.handle_midi(&[0xb0, 9, 120]);
+        assert_eq!(c.automix.as_ref().map(|m| (m.plan.incoming, m.plan.outgoing)), Some((2, 1)), "deck 3 mixing into deck 2");
+        assert_eq!(c.other_mixes.len(), 1, "the first mix runs on");
+        assert!(c.fader_mix_waiting_out(0) && c.fader_mix_waiting_out(1));
+        let start3 = c.automix.as_ref().map(|m| m.plan.start_beat).unwrap();
+        while c.mix_beat() < start3 + 8.0 {
+            pump(e, c);
+            assert!(basses(c) <= 1, "{:?}", (0..3).map(|d| c.snap.decks[d].stem_gains).collect::<Vec<_>>());
+        }
+        assert!(c.snap.decks[2].playing && c.session.channels[2].params.volume > 0.5, "deck 3 in");
+    }
+
+    #[test]
+    fn mixes_run_side_by_side() {
+        let (mut e, mut c, _config) = core();
+        three_decks_mixing(&mut e, &mut c);
+        let basses = |c: &Core| (0..3).filter(|&d| c.snap.decks[d].playing && c.session.channels[d].params.volume > 0.0 && c.snap.decks[d].stem_gains[1] > 0.0).count();
+        // Deck 1's fader down: out of its mix, which ends; deck 3's runs on.
+        c.handle_midi(&[0xb0, 7, 60]);
+        let deadline = Instant::now() + std::time::Duration::from_secs(60);
+        while !c.other_mixes.is_empty() {
+            assert!(Instant::now() < deadline, "deck 1 never went");
+            pump(&mut e, &mut c);
+            assert!(basses(&c) <= 1);
+        }
+        pump(&mut e, &mut c);
+        assert!(c.status.iter().any(|(_, m)| m == "Mixed into deck 2"), "{:?}", c.status);
+        assert!(!c.snap.decks[0].playing, "deck 1 out");
+        assert_eq!(c.automix.as_ref().map(|m| m.plan.incoming), Some(2));
+        // Deck 2's down: the last mix ends; deck 3 plays on, all in.
+        c.handle_midi(&[0xb0, 8, 60]);
+        let deadline = Instant::now() + std::time::Duration::from_secs(60);
+        while c.automix.is_some() {
+            assert!(Instant::now() < deadline, "deck 2 never went");
+            pump(&mut e, &mut c);
+            assert!(basses(&c) <= 1);
+        }
+        pump(&mut e, &mut c);
+        assert!(!c.snap.decks[1].playing && c.snap.decks[2].playing);
+        assert_eq!(c.snap.decks[2].stem_gains[1], 1.0, "its bass in");
+    }
+
+    #[test]
+    fn a_third_track_waits_for_every_bass_before_it() {
+        let (mut e, mut c, _config) = core();
+        three_decks_mixing(&mut e, &mut c);
+        let basses = |c: &Core| (0..3).filter(|&d| c.snap.decks[d].playing && c.session.channels[d].params.volume > 0.0 && c.snap.decks[d].stem_gains[1] > 0.0).count();
+        // Deck 2 taken out first, deck 1 still playing its bass: deck 3's bass still waits.
+        c.handle_midi(&[0xb0, 8, 60]);
+        let mut checked = 0;
+        while c.other_mixes.len() == 1 && c.automix.as_ref().is_some_and(|m| m.plan.incoming == 2) {
+            pump(&mut e, &mut c);
+            assert!(basses(&c) <= 1, "{:?}", (0..3).map(|d| c.snap.decks[d].stem_gains).collect::<Vec<_>>());
+            if c.snap.decks[1].stem_gains[1] == 0.0 && c.snap.decks[0].stem_gains[1] > 0.0 {
+                assert_eq!(c.snap.decks[2].stem_gains[1], 0.0, "deck 1's bass still in");
+                checked += 1;
+            }
+        }
+        assert!(checked > 0);
     }
 
     #[test]
