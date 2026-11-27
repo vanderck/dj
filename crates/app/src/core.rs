@@ -4706,8 +4706,11 @@ pub(crate) mod tests {
         let fader = |c: &mut Core, n: u8, v: f32| c.handle_midi(&[0xb0, n, (v * 127.0).round() as u8]);
         fader(&mut c, 7, 0.9);
         assert!(c.automix.is_none(), "the playing deck's fader is just its volume");
-        // Deck 2's fader up from the bottom: a mix, at the best moment; the fader only triggers it.
-        fader(&mut c, 8, 0.0);
+        // Deck 2's fader up from the bottom, in the small steps a real one sends: a mix, at the
+        // best moment; the fader only triggers it.
+        for step in 0..=10u8 {
+            c.handle_midi(&[0xb0, 8, step]);
+        }
         fader(&mut c, 8, 0.7);
         let (start, len) = c.automix.as_ref().map(|m| (m.plan.start_beat, m.plan.length_beats)).expect("a mix");
         assert_eq!(c.automix.as_ref().map(|m| (m.plan.incoming, m.plan.outgoing)), Some((1, 0)));
@@ -4757,6 +4760,15 @@ pub(crate) mod tests {
         assert!(c.automix.as_ref().is_some_and(|m| m.plan.start_beat > c.mix_beat() + 1.0), "a mix, not begun yet");
         c.handle_midi(&[0xb0, 8, 0]);
         assert!(c.automix.is_none(), "called off");
+        pump(&mut e, &mut c);
+        // A deck left turned up (the fader moved as plain volume): its fader down makes it silent
+        // again, and the next push up mixes it in.
+        c.route("Mixer/CH2/Volume", &[OscType::Float(0.8)]);
+        c.handle_midi(&[0xb0, 8, 2]);
+        assert_eq!(c.session.channels[1].params.volume, 0.0);
+        c.handle_midi(&[0xb0, 8, 90]);
+        assert!(c.automix.is_some(), "mixing in");
+        c.handle_midi(&[0xb0, 8, 0]);
         pump(&mut e, &mut c);
         // Without the mode, the fader is the deck's volume.
         c.settings.fader_mix = false;

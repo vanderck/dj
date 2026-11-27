@@ -1255,15 +1255,23 @@ impl Core {
             }
             return false;
         }
-        let up = prev.is_none_or(|p| p <= FADER_BOTTOM) && v > FADER_BOTTOM;
-        let silent = self.session.channels[ch].params.volume <= 0.02 || self.session.channels[ch].params.mute;
-        if up && silent {
+        // The fader's bottom is silence: a fader comes up in small steps (1/127, 2/127…), which
+        // mustn't turn the deck up before it's past the bottom and the mix can start; and a deck
+        // left turned up is silent again once its fader is down.
+        if v <= FADER_BOTTOM {
+            self.route(&format!("Mixer/CH{}/Volume", ch + 1), &[OscType::Float(0.0)]);
+            return true;
+        }
+        let p = self.session.channels[ch].params;
+        let silent = p.volume <= FADER_BOTTOM || p.mute;
+        if prev.is_none_or(|p| p <= FADER_BOTTOM) && silent {
             if let Some(out) = self.mix_target(ch) {
                 let plan = self.plan_best(ch, out, self.settings.mix_style);
                 self.start_mix(plan);
                 return true;
             }
         }
+        // Nothing to mix into (the first track of a set): the fader is its volume.
         false
     }
 
