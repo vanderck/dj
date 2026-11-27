@@ -4201,6 +4201,15 @@ pub(crate) mod tests {
         assert!(!c.decks[1].cue_chosen);
     }
 
+    /// Deck `d`'s vocal stem silent (the stand-in model's carries the kicks: never a quiet
+    /// second for new vocals to come in on).
+    fn no_singing(c: &mut Core, d: usize) {
+        let w = c.decks[d].stem_wave.clone().expect("stems");
+        let mut levels = w.levels.clone();
+        levels[2].iter_mut().for_each(|x| *x = 0.0);
+        c.decks[d].stem_wave = Some(Arc::new(crate::stems::StemWave { bins_per_sec: w.bins_per_sec, levels }));
+    }
+
     fn run_mix(e: &mut dj_engine::Engine, c: &mut Core, mut each: impl FnMut(&Core, f64)) {
         let (start, len) = c.automix.as_ref().map(|m| (m.plan.start_beat, m.plan.length_beats)).unwrap();
         let mut blocks = 0;
@@ -4331,6 +4340,7 @@ pub(crate) mod tests {
         c.deck_cmd(1, DeckCmd::SetGrid(Some(dj_engine::track::BeatGrid { bpm: 120.0, anchor_secs: 0.0 })));
         pump(&mut e, &mut c);
         // Stems asked for but missing on a deck: EQ.
+        no_singing(&mut c, 1);
         let plan = c.plan_now(1, 0, MixStyle::Stems);
         assert_eq!(plan.how, MixHow::Stems);
 
@@ -4398,9 +4408,11 @@ pub(crate) mod tests {
         // (The test model's vocals are silent.) No singing to bring: as Auto, saying why.
         let p = c.plan_now(1, 0, MixStyle::Mashup);
         assert!(p.why_how.starts_with("no mashup: the new track has no vocals"), "{}", p.why_how);
-        // The new track sings throughout.
+        // The new track sings throughout, a 1.25 s pause every 8 s.
         let w = c.decks[1].stem_wave.clone().expect("stems");
-        let sung = crate::stems::StemWave { bins_per_sec: w.bins_per_sec, levels: [w.levels[0].clone(), w.levels[1].clone(), vec![0.5; w.levels[2].len()], w.levels[3].clone()] };
+        let per = w.bins_per_sec;
+        let voice = (0..w.levels[2].len()).map(|k| if (k as f64 / per) % 8.0 < 1.25 { 0.0 } else { 0.5 }).collect();
+        let sung = crate::stems::StemWave { bins_per_sec: w.bins_per_sec, levels: [w.levels[0].clone(), w.levels[1].clone(), voice, w.levels[3].clone()] };
         c.decks[1].stem_wave = Some(Arc::new(sung));
         let plan = c.plan_now(1, 0, MixStyle::Mashup);
         assert_eq!(plan.why_how, "mashup");
@@ -4410,16 +4422,25 @@ pub(crate) mod tests {
         assert_eq!(plan.length_beats / 4.0, bars + 2.0, "and two bars as the old music leaves");
         c.start_mix(plan);
         // Over the singing: the new vocals alone on the new deck, the old music without its vocals.
-        let mut seen = 0;
+        // (They come in where the singer has paused for over a second: never mid-line; then stay.)
+        let (mut seen, mut first_in) = (0, None);
         run_mix(&mut e, &mut c, |c, p| {
             let bp = p * (bars + 2.0);
+            let g = c.snap.decks[1].stem_gains;
+            if g[2] > 0.0 && first_in.is_none() {
+                first_in = Some(c.snap.decks[1].position_secs % 8.0);
+            }
             if (1.5..bars - 1.5).contains(&bp) {
                 seen += 1;
-                assert_eq!(c.snap.decks[1].stem_gains, [0.0, 0.0, 1.0, 0.0], "bar {bp:.1}");
+                let want = if first_in.is_some() { 1.0 } else { 0.0 };
+                assert_eq!(g, [0.0, 0.0, want, 0.0], "bar {bp:.1}");
                 assert_eq!(c.snap.decks[0].stem_gains, [1.0, 1.0, 0.0, 1.0], "bar {bp:.1}");
             }
         });
         assert!(seen > 10, "{seen}");
+        let t = first_in.expect("the new vocals came in");
+        // (In a pause, before its line: here the track starts in one, from its first beat.)
+        assert!(t < 1.5, "in a pause, not mid-line: {t:.2} s into the 8 s cycle");
         assert_eq!(c.snap.decks[1].stem_gains, [1.0; 4], "then all of the new track");
     }
 
@@ -4429,6 +4450,7 @@ pub(crate) mod tests {
         c.audio_channels = 4;
         c.set_external_mixer(true);
         mix_setup(&mut e, &mut c);
+        no_singing(&mut c, 1);
         let plan = c.plan_now(1, 0, crate::settings::MixStyle::Stems);
         c.start_mix(plan);
         run_mix(&mut e, &mut c, |_, _| {});
@@ -4649,9 +4671,14 @@ pub(crate) mod tests {
         }
         // Vocals throughout both tracks (the stand-in model's are too quiet to count): the old ones
         // play through the whole mix, so the new ones wait.
+        // (The new singer pauses 2 s every 8 s, a line starting after each pause.)
         for d in 0..2 {
             let bins = (c.snap.decks[d].duration_secs * dj_library::waveform::BINS_PER_SEC) as usize + 1;
-            let w = crate::stems::StemWave { bins_per_sec: dj_library::waveform::BINS_PER_SEC, levels: std::array::from_fn(|_| vec![0.5; bins]) };
+            let mut w = crate::stems::StemWave { bins_per_sec: dj_library::waveform::BINS_PER_SEC, levels: std::array::from_fn(|_| vec![0.5; bins]) };
+            if d == 1 {
+                let per = dj_library::waveform::BINS_PER_SEC;
+                w.levels[2] = (0..bins).map(|k| if (k as f64 / per) % 8.0 < 2.0 { 0.0 } else { 0.5 }).collect();
+            }
             c.decks[d].stem_wave = Some(Arc::new(w));
         }
         let plan = c.plan_now(1, 0, crate::settings::MixStyle::Stems);
@@ -4687,6 +4714,9 @@ pub(crate) mod tests {
             assert!(Instant::now() < deadline, "the vocals never came back");
             pump(&mut e, &mut c);
         }
+        // Where the singer had paused for over a second (never mid-line).
+        let t = c.snap.decks[1].position_secs % 8.0;
+        assert!((1.0..2.2).contains(&t), "back at {t:.2} s into the 8 s cycle");
         pump(&mut e, &mut c);
         assert_eq!(c.snap.decks[1].stem_gains, [1.0; 4], "all in again");
     }
