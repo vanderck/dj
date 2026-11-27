@@ -2056,7 +2056,10 @@ impl Core {
     /// (0) is this track at its own tempo.
     fn tempo_cmd(&mut self, d: usize, fader: f64) -> Option<DeckCmd> {
         let v = self.snap.decks[d];
-        let follower = v.sync && self.snap.clock.owner != ClockOwner::Deck(d as u8) && v.has_grid && v.track_bpm > 0.0;
+        // A synced deck you hear moves everyone's tempo with its fader; a paused one only its own
+        // fader (it follows the clock once it plays): a stray touch on a waiting deck's tempo
+        // mustn't change the music playing.
+        let follower = v.sync && v.playing && self.snap.clock.owner != ClockOwner::Deck(d as u8) && v.has_grid && v.track_bpm > 0.0;
         if !follower {
             return Some(DeckCmd::Tempo(fader));
         }
@@ -5097,6 +5100,41 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_paused_synced_decks_tempo_leaves_the_music_alone() {
+        let (mut e, mut c, _config) = core();
+        mix_setup(&mut e, &mut c);
+        c.deck_cmd(1, DeckCmd::LoopExit);
+        c.deck_cmd(1, DeckCmd::Pause);
+        c.deck_cmd(1, DeckCmd::Sync(true));
+        for _ in 0..4 {
+            pump(&mut e, &mut c);
+        }
+        assert!(!c.snap.decks[1].playing && c.snap.decks[1].sync);
+        let bpm = c.snap.clock.bpm;
+        // A stray message on its tempo (a control sending 1 and 127): the clock stays.
+        for v in [0.01f32, 1.0, 0.01] {
+            c.route("Deck/2/Tempo", &[OscType::Float(v)]);
+            pump(&mut e, &mut c);
+        }
+        pump(&mut e, &mut c);
+        assert!((c.snap.clock.bpm - bpm).abs() < 0.01, "{bpm} → {}", c.snap.clock.bpm);
+        assert!((c.snap.decks[0].bpm - bpm).abs() < 0.01, "the playing deck untouched");
+        // Playing, its fader leads everyone (as before).
+        c.deck_cmd(1, DeckCmd::Play);
+        // (A synced deck starts on its beat.)
+        let deadline = Instant::now() + std::time::Duration::from_secs(30);
+        while !c.snap.decks[1].playing {
+            assert!(Instant::now() < deadline, "never started");
+            pump(&mut e, &mut c);
+        }
+        c.route("Deck/2/Tempo", &[OscType::Float(0.75)]);
+        for _ in 0..4 {
+            pump(&mut e, &mut c);
+        }
+        assert!(c.snap.clock.bpm > bpm + 1.0, "{bpm} → {}", c.snap.clock.bpm);
+    }
+
+    #[test]
     fn a_fader_back_down_calls_off_a_running_mix() {
         let (mut e, mut c, _config) = core();
         mix_setup(&mut e, &mut c);
@@ -5143,7 +5181,13 @@ pub(crate) mod tests {
         c.profile.mappings.push(MidiMapping { source, address: "Mixer/CH2/Volume".into(), mode: MapMode::Absolute, invert: false, feedback: false });
         c.handle_midi(&[0xb0, 8, 0]);
         c.handle_midi(&[0xb0, 8, 90]);
-        assert!(c.automix.as_ref().is_some_and(|m| m.plan.start_beat > c.mix_beat() + 1.0), "a mix, not begun yet");
+        assert!(
+            c.automix.as_ref().is_some_and(|m| !Core::mix_released(m)),
+            "a mix, not begun yet: {:?} at {} · {:?}",
+            c.automix.as_ref().map(|m| m.plan.start_beat),
+            c.mix_beat(),
+            c.status
+        );
         c.handle_midi(&[0xb0, 8, 0]);
         assert!(c.automix.is_none(), "called off");
         pump(&mut e, &mut c);
