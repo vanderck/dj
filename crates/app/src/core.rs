@@ -4846,9 +4846,9 @@ pub(crate) mod tests {
             assert!(Instant::now() < deadline, "the vocals never came back");
             pump(&mut e, &mut c);
         }
-        // Where the singer had paused for over a second (never mid-line).
+        // In the singer's pause (2 s), once most of a second of it has gone by: never mid-line.
         let t = c.snap.decks[1].position_secs % 8.0;
-        assert!((1.0..2.2).contains(&t), "back at {t:.2} s into the 8 s cycle");
+        assert!((0.6..2.2).contains(&t), "back at {t:.2} s into the 8 s cycle");
         pump(&mut e, &mut c);
         assert_eq!(c.snap.decks[1].stem_gains, [1.0; 4], "all in again");
     }
@@ -5201,6 +5201,38 @@ pub(crate) mod tests {
         assert_eq!((go[1], go[2]), (0.0, 0.0), "the old ones out: {go:?}");
         assert_eq!((go[0], go[3]), (1.0, 1.0), "the old drums and music on: {go:?}");
         assert!(c.fader_mix_waiting_out(0));
+    }
+
+    #[test]
+    fn old_vocals_already_off_do_not_hold_the_new_ones() {
+        let (mut e, mut c, _config) = core();
+        mix_setup(&mut e, &mut c);
+        c.settings.fader_mix = true;
+        c.settings.mix_style = crate::settings::MixStyle::Stems;
+        // The old singer never pauses for a second (its stem never quiet), but its vocals are off
+        // already (held out after an earlier mix); the new one pauses 3 s every 8 s.
+        for d in 0..2 {
+            let w = c.decks[d].stem_wave.clone().expect("stems");
+            let per = w.bins_per_sec;
+            let mut levels = w.levels.clone();
+            levels[2] = (0..levels[2].len()).map(|k| if d == 1 && (k as f64 / per) % 8.0 < 3.0 { 0.0 } else { 0.5 }).collect();
+            c.decks[d].stem_wave = Some(Arc::new(crate::stems::StemWave { bins_per_sec: per, levels }));
+        }
+        c.route("Deck/1/StemVocalsLevel", &[OscType::Float(0.0)]);
+        for (n, ch) in [(7u8, 1), (8u8, 2)] {
+            let source = MidiSource { kind: MidiKind::Cc, channel: 0, number: n };
+            c.profile.mappings.push(MidiMapping { source, address: format!("Mixer/CH{ch}/Volume"), mode: MapMode::Absolute, invert: false, feedback: false });
+        }
+        pump(&mut e, &mut c);
+        c.handle_midi(&[0xb0, 7, 114]);
+        c.handle_midi(&[0xb0, 8, 0]);
+        c.handle_midi(&[0xb0, 8, 127]);
+        let (start, len) = c.automix.as_ref().map(|m| (m.plan.start_beat, m.plan.length_beats)).expect("a mix");
+        while c.mix_beat() < start + len + 8.0 {
+            pump(&mut e, &mut c);
+        }
+        assert_eq!(c.snap.decks[1].stem_gains[2], 1.0, "the new vocals in: {:?}", c.snap.decks[1].stem_gains);
+        assert_eq!(c.snap.decks[0].stem_gains[2], 0.0);
     }
 
     #[test]

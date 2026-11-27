@@ -247,7 +247,36 @@ impl Session {
         crate::settings::save_json_later(&Self::path(), self)
     }
 
+    /// dj starting again: every channel's EQ and filter back to neutral (as loading a track puts
+    /// its stems back; a mix may have left them anywhere). The volumes, trims and effects stay.
+    pub fn fresh_start(&mut self) {
+        let neutral = ChannelParams::default();
+        for c in &mut self.channels {
+            c.params.eq = neutral.eq;
+            c.params.cutoff = neutral.cutoff;
+            c.params.res = neutral.res;
+        }
+    }
+
     pub fn global_quantize(&self) -> Option<f64> {
         self.quantize_on.then(|| QUANTIZE_VALUES[self.quantize.min(QUANTIZE_VALUES.len() - 1)].0)
+    }
+}
+
+#[cfg(test)]
+mod fresh_start_tests {
+    use super::*;
+
+    #[test]
+    fn a_new_start_puts_the_eq_and_filter_back() {
+        let mut s = Session::default();
+        s.channels[1].params.eq = [0.0, 0.2, 0.9];
+        s.channels[1].params.cutoff = 0.85;
+        s.channels[1].params.volume = 0.7;
+        s.channels[1].params.trim_db = -3.0;
+        s.fresh_start();
+        let p = s.channels[1].params;
+        assert_eq!((p.eq, p.cutoff), ([0.5; 3], 0.5));
+        assert_eq!((p.volume, p.trim_db), (0.7, -3.0), "the volume and trim stay");
     }
 }
