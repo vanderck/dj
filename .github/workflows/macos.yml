@@ -75,7 +75,7 @@ jobs:
           python -m pip install --quiet --no-deps demucs==4.1.0 openunmix
           curl -sSfL --retry 3 -o "$RUNNER_TEMP/htdemucs.th" https://dl.fbaipublicfiles.com/demucs/hybrid_transformer/955717e8-8726e21a.th
           python tools/htdemucs_coreml/mix.py > "$RUNNER_TEMP/mix.f32"
-          for v in "reduce_mean,square,sqrt,real_div,sub" "reduce_mean,square,sqrt,real_div,sub,layer_norm,softmax"; do
+          for v in "conv,conv_transpose" "linear,matmul" "gelu,sigmoid"; do
             echo "=== fp32 ops: $v"
             rm -rf "$RUNNER_TEMP/v.mlpackage" "$RUNNER_TEMP/cv"
             python tools/htdemucs_coreml/convert.py --fp32-ops "$v" "$RUNNER_TEMP/htdemucs.th" "$RUNNER_TEMP/v.mlpackage" > /dev/null 2>&1
