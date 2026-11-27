@@ -5121,10 +5121,12 @@ pub(crate) mod tests {
         assert!((c.snap.decks[0].bpm - bpm).abs() < 0.01, "the playing deck untouched");
         // Playing, its fader leads everyone (as before).
         c.deck_cmd(1, DeckCmd::Play);
-        for _ in 0..10 {
+        // (A synced deck starts on its beat.)
+        let deadline = Instant::now() + std::time::Duration::from_secs(30);
+        while !c.snap.decks[1].playing {
+            assert!(Instant::now() < deadline, "never started");
             pump(&mut e, &mut c);
         }
-        assert!(c.snap.decks[1].playing);
         c.route("Deck/2/Tempo", &[OscType::Float(0.75)]);
         for _ in 0..4 {
             pump(&mut e, &mut c);
