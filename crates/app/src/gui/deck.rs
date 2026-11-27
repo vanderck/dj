@@ -859,20 +859,20 @@ fn fader_mix_slot(ui: &mut Ui, core: &mut Core, d: usize, rect: Rect, font: egui
         let bars = ((m.plan.start_beat - core.mix_beat()) / 4.0).ceil();
         let label = if bars > 0.0 { format!("Mix in {bars:.0}") } else { "Mixing…".to_string() };
         button(ui, rect, &label, Style::Fill(GREEN), font)
-            .on_hover_text("Its fader brings it in: at the top fully in. Fader to the bottom before it begins: called off");
+            .on_hover_text("Its fader started it and is its volume; its stems or EQ bring it in over the mix. Fader to the bottom before it begins: called off");
         return;
     }
     if core.fader_mix_waiting_out() == Some(d) {
         let label = if rect.width() < 120.0 { "Fader ↓" } else { "Fader ↓: out" };
         button(ui, rect, label, Style::Outline(GREEN, true), font)
-            .on_hover_text("Bring this deck's fader down: the track goes out as you do (until then it plays on in full)");
+            .on_hover_text("Start this deck's fader down: its stems or EQ take the track out over 4 bars, then take the fader to the bottom (until then it plays on in full)");
         return;
     }
     let style = core.settings.mix_style;
     let i = MIX_STYLES.iter().position(|s| s.1 == style).unwrap_or(0);
     let (name, _, tip) = MIX_STYLES[i];
     let resp = button(ui, rect, name, Style::Outline(GREEN, true), font)
-        .on_hover_text(format!("Push this deck's fader up: dj starts it on the next phrase line and mixes it in as you go, as {name} ({tip}). Tap for the next style"));
+        .on_hover_text(format!("Push this deck's fader up: dj starts it on the next phrase line and mixes it in, as {name} ({tip}). Tap for the next style"));
     if resp.clicked() && !core.learn {
         core.set_mix_style(MIX_STYLES[(i + 1) % MIX_STYLES.len()].1);
     }

@@ -168,7 +168,7 @@ fn settings(ui: &mut Ui, core: &mut Core, st: &mut UiState) {
     let external = core.external_routing();
     let resp = ui
         .add_enabled(!external, egui::Checkbox::new(&mut core.settings.fader_mix, "Mix with the faders (MIDI mixer)"))
-        .on_hover_text("No Mix button: push a waiting deck's volume fader up and dj starts it in sync on the next phrase line, in the style shown on the deck (tap it for the next); fader back to the bottom before the mix begins calls it off. The mix follows the faders: the new deck's fader up brings the new track in (its volume, stems, EQ), at the top fully in; the old deck's fader down takes the old one out, at the bottom gone. As fast or slow as you move them. Auto-DJ is off.")
+        .on_hover_text("No Mix button: push a waiting deck's volume fader up and dj starts it in sync on the next phrase line, in the style shown on the deck (tap it for the next); fader back to the bottom before the mix begins calls it off. The faders stay the volumes: the new track's stems or EQ bring it in over the mix's bars while its fader sets how loud; once you start the old deck's fader down, its stems or EQ take the old track out over 4 bars, a fade before you take the fader to the bottom. Auto-DJ is off.")
         .on_disabled_hover_text("Not with an external mixer: dj can't see its faders");
     if resp.changed() && core.settings.fader_mix {
         core.set_autodj(None);
