@@ -4829,6 +4829,22 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn with_the_faders_a_fader_always_moves_its_volume() {
+        // Nothing to mix into: the fader is the deck's volume, even after dj set the volume
+        // itself (a mix's end leaves the old deck at 0, waiting for the fader to pick it up).
+        let (_e, mut c, _config) = core();
+        c.settings.fader_mix = true;
+        let source = MidiSource { kind: MidiKind::Cc, channel: 0, number: 8 };
+        c.profile.mappings.push(MidiMapping { source, address: "Mixer/CH2/Volume".into(), mode: MapMode::Absolute, invert: false, feedback: false });
+        c.set_picked_up("Mixer/CH2/Volume", 0.0);
+        for v in 0..=100u8 {
+            c.handle_midi(&[0xb0, 8, v]);
+        }
+        assert!(c.automix.is_none());
+        assert!((c.session.channels[1].params.volume - 100.0 / 127.0).abs() < 0.01, "{}", c.session.channels[1].params.volume);
+    }
+
+    #[test]
     fn a_fader_back_down_calls_off_a_running_mix() {
         let (mut e, mut c, _config) = core();
         mix_setup(&mut e, &mut c);
