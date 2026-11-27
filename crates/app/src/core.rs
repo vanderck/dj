@@ -310,6 +310,8 @@ pub struct Core {
     pub other_mixes: Vec<automix::AutoMix>,
     /// While a mix ticks: what it sets, held back (see `automix_tick`).
     mix_batch_one: Option<HashMap<String, f32>>,
+    /// Planning for a fader: as soon as the new track can start, not on a phrase further on.
+    pub(crate) plan_asap: std::cell::Cell<bool>,
     /// After a Now mix: the new track's vocals coming back on its next vocal phrase.
     pub vocal_return: Option<automix::VocalReturn>,
     /// Each deck's stem levels when their switch muted them (`Deck/N/StemVocals` off): back
@@ -420,6 +422,7 @@ impl Core {
             automix: None,
             other_mixes: Vec::new(),
             mix_batch_one: None,
+            plan_asap: std::cell::Cell::new(false),
             vocal_return: None,
             stem_unmute: [[None; 4]; NUM_DECKS],
             autodj: None,
@@ -4776,7 +4779,8 @@ pub(crate) mod tests {
         fader(&mut c, 8, 0.1);
         let (start, len) = c.automix.as_ref().map(|m| (m.plan.start_beat, m.plan.length_beats)).expect("a mix");
         assert_eq!(c.automix.as_ref().map(|m| (m.plan.incoming, m.plan.outgoing)), Some((1, 0)));
-        assert!(start - c.mix_beat() <= 4.0 * 4.0 + 5.0, "soon: {start} {}", c.mix_beat());
+        // The first bar the paused deck can start on (a bar to start, up to 3 beats of lead-in).
+        assert!(start - c.mix_beat() <= 12.0, "soon: {start} {}", c.mix_beat());
         assert_eq!(c.session.channels[1].params.volume, 0.0, "silent until it starts");
         assert_eq!(c.fader_mix_waiting_out(0), true);
         // No Auto-DJ in this mode.
@@ -4944,6 +4948,39 @@ pub(crate) mod tests {
             }
         }
         assert!(checked > 0);
+    }
+
+    #[test]
+    fn the_old_track_does_not_go_before_the_new_one_starts() {
+        let (mut e, mut c, _config) = core();
+        mix_setup(&mut e, &mut c);
+        c.settings.fader_mix = true;
+        for (n, ch) in [(7u8, 1), (8u8, 2)] {
+            let source = MidiSource { kind: MidiKind::Cc, channel: 0, number: n };
+            c.profile.mappings.push(MidiMapping { source, address: format!("Mixer/CH{ch}/Volume"), mode: MapMode::Absolute, invert: false, feedback: false });
+        }
+        c.handle_midi(&[0xb0, 7, 114]);
+        c.handle_midi(&[0xb0, 8, 0]);
+        c.handle_midi(&[0xb0, 8, 120]);
+        let start = c.automix.as_ref().map(|m| m.plan.start_beat).expect("a mix");
+        // The old fader starts down straight away, before the new track has started.
+        c.handle_midi(&[0xb0, 7, 90]);
+        let eq0 = c.session.channels[0].params.eq;
+        while c.mix_beat() < start - 0.3 {
+            pump(&mut e, &mut c);
+            assert!(c.snap.decks[0].stem_gains.iter().all(|g| *g == 1.0), "no gap: {:?}", c.snap.decks[0].stem_gains);
+            assert_eq!(c.session.channels[0].params.eq, eq0, "no gap");
+        }
+        // Once it plays, the old fader all the way down: the old track gone, the new one all in
+        // straight away (its bass and vocals don't wait out the old track's 4 bars).
+        while c.mix_beat() < start + 2.0 {
+            pump(&mut e, &mut c);
+        }
+        c.handle_midi(&[0xb0, 7, 0]);
+        let at = c.snap.clock.beat;
+        run_mix(&mut e, &mut c, |_, _| {});
+        assert!(c.snap.clock.beat - at < 2.0, "{} beats", c.snap.clock.beat - at);
+        assert!(!c.snap.decks[0].playing);
     }
 
     #[test]

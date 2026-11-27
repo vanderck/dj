@@ -644,7 +644,8 @@ impl Core {
         // Ahead: a paused deck needs a bar to start; its cue may need a few beats of lead-in.
         let lead = if i.playing { 0.5 } else { 4.5 } + 3.0;
         let earliest = ((o.beat + lead) / 4.0).ceil().max(0.0) as usize;
-        let latest = if when == MixWhen::Now { earliest + 4 } else { out.len() };
+        // (A fader: the first bar it can; Now: within 4 bars of it, on the best one.)
+        let latest = if self.plan_asap.get() { earliest } else if when == MixWhen::Now { earliest + 4 } else { out.len() };
         // Your cue (or where a paused deck stands) as a bar of the new track. It's a preference
         // only when you chose it: a cue loop, or the deck cued away from where it loaded (its start
         // or first cue); otherwise dj picks the best place to bring it in.
@@ -1012,7 +1013,9 @@ impl Core {
         // On a phrase of the outgoing track: its next 8-bar phrase when that's at most 4 bars
         // away, else the next 4-bar line (never more than 4 bars to wait).
         let phrase = ((o.beat + lead) / 32.0).ceil() * 32.0;
-        let (next_bar, on) = if phrase - o.beat <= 16.0 {
+        let (next_bar, on) = if self.plan_asap.get() {
+            (((o.beat + lead) / 4.0).ceil() * 4.0, "on the next bar")
+        } else if phrase - o.beat <= 16.0 {
             (phrase, "on the phrase")
         } else {
             (((o.beat + lead) / 16.0).ceil() * 16.0, "on the next 4 bars")
@@ -1363,8 +1366,10 @@ impl Core {
         let silent = p.volume <= FADER_BOTTOM || p.mute;
         if prev.is_none_or(|p| p <= FADER_BOTTOM) && silent {
             if let Some(out) = self.mix_target(ch) {
-                // From the next phrase line (at most 4 bars away), not the best moment further on.
+                // As soon as it can (its fader is open): the first bar the new track can start on.
+                self.plan_asap.set(true);
                 let plan = self.plan_now(ch, out, self.settings.mix_style);
+                self.plan_asap.set(false);
                 self.start_mix(plan);
                 return true;
             }
@@ -1513,8 +1518,13 @@ impl Core {
             self.tempo_home = None;
             return;
         }
-        // Until the handoff, it follows the old track's tempo; it leads once that one stops.
-        if self.snap.clock.owner != ClockOwner::Deck(th.deck as u8) || !v.playing {
+        // Until the handoff, it follows the old track's tempo; it leads once that one stops. And
+        // not while a mix runs (the tempo steady through it; from where it is after).
+        if self.snap.clock.owner != ClockOwner::Deck(th.deck as u8) || !v.playing || self.automix.is_some() {
+            if th.last.is_some() {
+                th.last = None;
+                self.tempo_home = Some(th);
+            }
             return;
         }
         let clock = self.snap.clock.beat;
@@ -1884,7 +1894,10 @@ impl Core {
         if beat < start {
             return;
         }
-        let p = if finish { 1.0 } else { (beat - start) / len };
+        // Fader mix: the old deck's fader at the bottom, once its half began: the old track is
+        // gone, the new one all in now (nothing left to wait for; else a gap).
+        let old_gone = m.fader && m.out_from.is_some() && self.fader_hw[o].is_some_and(|v| v <= FADER_BOTTOM);
+        let p = if finish || old_gone { 1.0 } else { (beat - start) / len };
         let (how, external, swapped) = (m.plan.how, m.external, m.swapped);
         let (out_volume, in_low, out_low, in_high, out_high, out_mid, in_mid) =
             (m.out_volume, m.in_low, m.out_low, m.in_high, m.out_high, m.out_mid, m.in_mid);
@@ -1906,9 +1919,11 @@ impl Core {
         let bp_out = match (m.fader && !finish, m.out_from) {
             (false, _) => bp,
             (true, None) => -1.0,
+            (true, Some(_)) if old_gone => bars_n,
             (true, Some(t)) => {
                 // The next bar line of the mix (its bars line up with the old track's).
-                let t0 = start + ((t - start) / 4.0).ceil() * 4.0;
+                // (Never before the new track has started: no gap.)
+                let t0 = start + ((t - start) / 4.0).ceil().max(0.0) * 4.0;
                 if beat < t0 {
                     -1.0
                 } else {
