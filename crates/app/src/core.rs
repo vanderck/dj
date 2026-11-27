@@ -118,6 +118,18 @@ pub enum Kind {
 
 /// What kind of control an address is (for MIDI learn and feedback).
 /// The channel (0-based) whose volume `addr` sets (`Mixer/CH2/Volume` → 1).
+/// The deck whose stem level, EQ or filter `addr` is (what a mix moves besides the volume).
+pub fn mix_control_deck(addr: &str) -> Option<usize> {
+    let a = addr.trim_matches('/').to_ascii_lowercase();
+    let parts: Vec<&str> = a.split('/').collect();
+    let n = match parts.as_slice() {
+        ["deck", n, s] if s.starts_with("stem") && s.ends_with("level") => n,
+        ["mixer", ch, "eq", _] | ["mixer", ch, "filter1"] => ch.strip_prefix("ch")?,
+        _ => return None,
+    };
+    n.parse::<usize>().ok()?.checked_sub(1).filter(|d| *d < NUM_DECKS)
+}
+
 pub fn volume_channel(addr: &str) -> Option<usize> {
     let a = addr.trim_matches('/').to_ascii_lowercase();
     let n = a.strip_prefix("mixer/ch")?.strip_suffix("/volume")?;
@@ -314,6 +326,9 @@ pub struct Core {
     pub(crate) plan_asap: std::cell::Cell<bool>,
     /// The session log (see [`crate::mixlog`]).
     pub mixlog: crate::mixlog::MixLog,
+    /// Controls you moved (a stem level, EQ, filter) of a deck in a running mix: yours, the mixes
+    /// leave them alone until they're all over (lowercase addresses).
+    pub(crate) mix_hands_off: std::collections::HashSet<String>,
     /// After a Now mix: the new track's vocals coming back on its next vocal phrase.
     pub vocal_return: Option<automix::VocalReturn>,
     /// Each deck's stem levels when their switch muted them (`Deck/N/StemVocals` off): back
@@ -426,6 +441,7 @@ impl Core {
             mix_batch_one: None,
             plan_asap: std::cell::Cell::new(false),
             mixlog: crate::mixlog::MixLog::new(),
+            mix_hands_off: std::collections::HashSet::new(),
             vocal_return: None,
             stem_unmute: [[None; 4]; NUM_DECKS],
             autodj: None,
@@ -1892,6 +1908,14 @@ impl Core {
     /// Route a control message. `addr` is relative to the root, e.g.
     /// "Deck/1/PlayPause". An optional ":value" suffix supplies the value.
     pub fn route(&mut self, addr: &str, args: &[OscType]) -> bool {
+        // You (or your controller) moving a mixing deck's stem, EQ or filter: it's yours.
+        if self.mixlog.by != "dj" && self.automix.is_some() {
+            if let Some(d) = mix_control_deck(addr) {
+                if self.in_mix(d) {
+                    self.mix_hands_off.insert(addr.trim_matches('/').to_ascii_lowercase());
+                }
+            }
+        }
         if self.mixlog.enabled() {
             let v: Vec<String> = args
                 .iter()
@@ -4869,11 +4893,14 @@ pub(crate) mod tests {
                 blocks += 4;
                 assert!(blocks < 48000 / 512 * 300, "never got there");
                 assert_eq!(c.session.channels[0].params.volume, old_volume, "the old volume untouched");
-                assert!(c.snap.decks[0].stem_gains.iter().all(|g| *g == 1.0), "the old stems untouched: {:?}", c.snap.decks[0].stem_gains);
+                // The old drums and music play on in full (its fader takes them out); its voice
+                // and bass swap with the new track's on the new fader's half.
+                let (go, gi) = (c.snap.decks[0].stem_gains, c.snap.decks[1].stem_gains);
+                assert!(go[0] == 1.0 && go[3] == 1.0, "the old drums and music untouched: {go:?}");
                 if stems {
-                    // Never two basses or two voices: the new ones wait for the old ones to go.
-                    let g = c.snap.decks[1].stem_gains;
-                    assert_eq!((g[1], g[2]), (0.0, 0.0), "{g:?}");
+                    // Never two basses or two voices.
+                    assert!(go[1] == 0.0 || gi[1] == 0.0, "two basses: {go:?} {gi:?}");
+                    assert!(go[2] == 0.0 || gi[2] == 0.0, "two voices: {go:?} {gi:?}");
                 }
             }
         };
@@ -4887,7 +4914,11 @@ pub(crate) mod tests {
         pump_to(&mut e, &mut c, start + len + 8.0);
         assert!(c.automix.is_some(), "waits for the old deck's fader");
         if stems {
-            assert_eq!(c.snap.decks[1].stem_gains[0], 1.0, "the new drums in");
+            // The new track all in (its voice when the stand-in model's kicks allow a pause: never
+            // here), the old bass gone, without touching the old fader.
+            let (go, gi) = (c.snap.decks[0].stem_gains, c.snap.decks[1].stem_gains);
+            assert_eq!((gi[0], gi[1], gi[3]), (1.0, 1.0, 1.0), "the new drums, bass and music in: {gi:?}");
+            assert_eq!(go[1], 0.0, "the old bass swapped out: {go:?}");
         }
         // Its fader starts down: its volume follows, its stems or EQ take it out over 4 bars.
         fader(&mut c, 7, 0.8);
@@ -4898,9 +4929,10 @@ pub(crate) mod tests {
         let bar = start + ((c.mix_beat() - start) / 4.0).ceil() * 4.0;
         let eq = |c: &Core| c.session.channels[0].params.eq;
         let eq0 = eq(&c);
+        let g0 = c.snap.decks[0].stem_gains;
         while c.mix_beat() < bar - 0.3 {
             pump(&mut e, &mut c);
-            assert!(c.snap.decks[0].stem_gains.iter().all(|g| *g == 1.0), "before the bar: {:?}", c.snap.decks[0].stem_gains);
+            assert_eq!(c.snap.decks[0].stem_gains, g0, "before the bar");
             assert_eq!(eq(&c), eq0, "before the bar");
         }
         run_mix(&mut e, &mut c, |_, _| {});
@@ -5132,6 +5164,64 @@ pub(crate) mod tests {
             pump(&mut e, &mut c);
         }
         assert!(c.snap.clock.bpm > bpm + 1.0, "{bpm} → {}", c.snap.clock.bpm);
+    }
+
+    #[test]
+    fn with_the_faders_the_voices_swap_before_the_old_fader_moves() {
+        let (mut e, mut c, _config) = core();
+        mix_setup(&mut e, &mut c);
+        c.settings.fader_mix = true;
+        c.settings.mix_style = crate::settings::MixStyle::Stems;
+        // Both tracks sing, pausing 3 s every 8 s.
+        for d in 0..2 {
+            let w = c.decks[d].stem_wave.clone().expect("stems");
+            let per = w.bins_per_sec;
+            let mut levels = w.levels.clone();
+            levels[2] = (0..levels[2].len()).map(|k| if (k as f64 / per) % 8.0 < 3.0 { 0.0 } else { 0.5 }).collect();
+            c.decks[d].stem_wave = Some(Arc::new(crate::stems::StemWave { bins_per_sec: per, levels }));
+        }
+        for (n, ch) in [(7u8, 1), (8u8, 2)] {
+            let source = MidiSource { kind: MidiKind::Cc, channel: 0, number: n };
+            c.profile.mappings.push(MidiMapping { source, address: format!("Mixer/CH{ch}/Volume"), mode: MapMode::Absolute, invert: false, feedback: false });
+        }
+        c.handle_midi(&[0xb0, 7, 114]);
+        c.handle_midi(&[0xb0, 8, 0]);
+        c.handle_midi(&[0xb0, 8, 127]);
+        let (start, len) = c.automix.as_ref().map(|m| (m.plan.start_beat, m.plan.length_beats)).expect("a mix");
+        while c.mix_beat() < start + len + 8.0 {
+            pump(&mut e, &mut c);
+            let (go, gi) = (c.snap.decks[0].stem_gains, c.snap.decks[1].stem_gains);
+            assert!(go[2] == 0.0 || gi[2] == 0.0, "two voices: {go:?} {gi:?}");
+            assert!(go[1] == 0.0 || gi[1] == 0.0, "two basses: {go:?} {gi:?}");
+        }
+        // The old fader never moved: the new voice and bass in, the old ones out; the old drums
+        // and music still there, for its fader.
+        let (go, gi) = (c.snap.decks[0].stem_gains, c.snap.decks[1].stem_gains);
+        assert_eq!((gi[1], gi[2]), (1.0, 1.0), "the new bass and voice in: {gi:?}");
+        assert_eq!((go[1], go[2]), (0.0, 0.0), "the old ones out: {go:?}");
+        assert_eq!((go[0], go[3]), (1.0, 1.0), "the old drums and music on: {go:?}");
+        assert!(c.fader_mix_waiting_out(0));
+    }
+
+    #[test]
+    fn a_stem_you_move_during_a_mix_stays_yours() {
+        let (mut e, mut c, _config) = core();
+        mix_setup(&mut e, &mut c);
+        let plan = c.plan_now(1, 0, crate::settings::MixStyle::Stems);
+        let start = plan.start_beat;
+        c.start_mix(plan);
+        while c.mix_beat() < start + 4.0 {
+            pump(&mut e, &mut c);
+        }
+        c.route("Deck/2/StemVocalsLevel", &[OscType::Float(0.5)]);
+        for _ in 0..40 {
+            pump(&mut e, &mut c);
+        }
+        assert!((c.snap.decks[1].stem_gains[2] - 0.5).abs() < 0.01, "yours: {:?}", c.snap.decks[1].stem_gains);
+        run_mix(&mut e, &mut c, |_, _| {});
+        pump(&mut e, &mut c);
+        assert!((c.snap.decks[1].stem_gains[2] - 0.5).abs() < 0.01, "after the mix too: {:?}", c.snap.decks[1].stem_gains);
+        assert!(c.mix_hands_off.is_empty(), "the next mix starts afresh");
     }
 
     #[test]

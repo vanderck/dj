@@ -1464,6 +1464,10 @@ impl Core {
     /// Set a control for a mix. While the mixes tick, held back: each mix's last setting, the
     /// lowest of the mixes' applied at the end (see `automix_tick`).
     fn mix_set(&mut self, addr: &str, v: f32) {
+        // (A control you moved during the mix is yours.)
+        if !self.mix_hands_off.is_empty() && self.mix_hands_off.contains(&addr.trim_matches('/').to_ascii_lowercase()) {
+            return;
+        }
         if let Some(b) = self.mix_batch_one.as_mut() {
             b.insert(addr.to_string(), v);
             return;
@@ -1883,7 +1887,11 @@ impl Core {
         if self.automix.is_none() {
             self.automix = self.other_mixes.pop();
         }
+        if self.automix.is_none() {
+            self.mix_hands_off.clear();
+        }
         self.one_bass_one_voice(&mut all);
+        all.retain(|k, _| !self.mix_hands_off.contains(&k.trim_matches('/').to_ascii_lowercase()));
         let by = std::mem::replace(&mut self.mixlog.by, "dj");
         for (k, v) in all {
             self.set_picked_up(&k, v);
@@ -2067,8 +2075,9 @@ impl Core {
                     self.mix_set(&high(o), out_high * (1.0 - 0.5 * rise_h));
                     self.mix_set(&mid(o), out_mid * (1.0 - 0.4 * rise_m));
                 }
-                // The bass swap on the old track's half: the new bass never plays with the old.
-                if po >= ps && !swapped {
+                // The bass swap on the old track's half (with the faders, on whichever half is
+                // further: the new fader swaps it too): the new bass never plays with the old.
+                if (if fader { p.max(po) } else { po }) >= ps && !swapped {
                     self.automix.as_mut().unwrap().swapped = true;
                     self.mix_set(&low(i), in_low);
                     self.mix_set(&mid(i), in_mid);
@@ -2089,12 +2098,22 @@ impl Core {
                     None => stems_at((x / bars_n).clamp(0.0, 1.0), vocals_out, true),
                 };
                 let (mut si, mut so) = (at(bp).0, at(bp_out).1);
+                // Fader mix: the voice and the bass swap on the new track's half (its fader): the
+                // old ones go on the plan's bars even before the old fader moves, so the new ones
+                // come in; the old fader takes the rest (drums, music) out.
+                let bp_swap = if fader { bp.max(bp_out) } else { bp_out };
+                if fader {
+                    let sw = at(bp_swap).1;
+                    for s in [BASS, VOCALS] {
+                        so[s] = so[s].min(sw[s]);
+                    }
+                }
                 // The old vocals go only where their stem has been silent for over a second too
                 // (between two lines, never mid-word); until then the new ones wait (never two
                 // voices). Once gone, they stay gone.
                 // (Up to half a beat early, still in the pause: a cut planned where the next line
                 // starts would find the singer back by the time it's due.)
-                let due = so[VOCALS] < 1.0 || (bp_out >= 0.0 && at(bp_out + 0.125).1[VOCALS] < 1.0);
+                let due = so[VOCALS] < 1.0 || (bp_swap >= 0.0 && at(bp_swap + 0.125).1[VOCALS] < 1.0);
                 if self.automix.as_ref().unwrap().old_vocals_out {
                     so[VOCALS] = 0.0;
                 } else if due {
