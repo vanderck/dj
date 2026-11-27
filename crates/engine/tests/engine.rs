@@ -303,6 +303,30 @@ fn master_handoff_when_master_stops() {
 }
 
 #[test]
+fn the_deck_still_playing_takes_the_clock_at_its_own_tempo() {
+    let (mut e, mut c) = setup();
+    send(&mut c, Command::GlobalQuantize(None));
+    send(&mut c, Command::Load { deck: 0, track: click_track(1, 126.0, 60.0, 48000), start_at_first_cue: false });
+    send(&mut c, Command::Load { deck: 2, track: click_track(2, 122.0, 60.0, 48000), start_at_first_cue: false });
+    deck(&mut c, 2, DeckCmd::Sync(false));
+    deck(&mut c, 0, DeckCmd::Play);
+    deck(&mut c, 2, DeckCmd::Play);
+    run(&mut e, 20);
+    assert_eq!(e.snapshot().clock.owner, ClockOwner::Deck(0));
+    // The master stops; the other plays on, not synced: it's the one you hear, it sets the BPM.
+    deck(&mut c, 0, DeckCmd::Pause);
+    run(&mut e, 20);
+    let s = e.snapshot();
+    assert_eq!(s.clock.owner, ClockOwner::Deck(2));
+    assert!((s.clock.bpm - 122.0).abs() < 0.01, "its own tempo: {}", s.clock.bpm);
+    assert!((s.decks[2].bpm - 122.0).abs() < 0.01, "kept its tempo: {}", s.decks[2].bpm);
+    // Nothing else playing: a stopped master keeps the clock (for when it plays again).
+    deck(&mut c, 2, DeckCmd::Pause);
+    run(&mut e, 20);
+    assert_eq!(e.snapshot().clock.owner, ClockOwner::Deck(2));
+}
+
+#[test]
 fn wallclock_keeps_header_tempo() {
     let (mut e, mut c) = setup();
     send(&mut c, Command::Wallclock(true));

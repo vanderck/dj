@@ -424,8 +424,10 @@ impl Engine {
         self.emit(Event::ClockOwner(o));
     }
 
-    /// Automatic handoff rules: a master deck that stops or is ejected passes
-    /// the clock to the lowest-numbered playing synced deck, else the header.
+    /// Automatic handoff rules: a master deck that stops or is ejected passes the clock to the
+    /// lowest-numbered playing synced deck (at the tempo it had, so nothing jumps); else to a deck
+    /// playing on its own (at its own tempo: the deck you hear sets the BPM); else, ejected, to
+    /// the header (stopped, it keeps it for when it plays again).
     fn maintain_owner(&mut self) {
         if self.wallclock {
             if self.owner != ClockOwner::Header {
@@ -458,11 +460,19 @@ impl Engine {
                         && self.decks[i].sync()
                         && self.decks[i].grid().is_some()
                 });
-                if !ok || next.is_some() {
-                    match next {
-                        Some(i) => self.set_owner(ClockOwner::Deck(i as u8)),
-                        None => self.set_owner(ClockOwner::Header),
+                // A deck still playing, but not synced (it plays at its own tempo): through the
+                // header, which takes it at that tempo.
+                let unsynced = (0..NUM_DECKS).any(|i| {
+                    i != d as usize && self.mode[i] == DeckMode::Track && self.decks[i].is_playing() && self.decks[i].grid().is_some()
+                });
+                match next {
+                    Some(i) => self.set_owner(ClockOwner::Deck(i as u8)),
+                    None if unsynced => {
+                        self.set_owner(ClockOwner::Header);
+                        self.maintain_owner();
                     }
+                    None if !ok => self.set_owner(ClockOwner::Header),
+                    None => {}
                 }
             }
         }
