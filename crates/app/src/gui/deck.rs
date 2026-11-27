@@ -831,7 +831,7 @@ fn sampler(ui: &mut Ui, core: &mut Core, d: usize, rect: Rect) {
 
 /// Whether deck `d` shows the Mix button: it can be mixed in now, or its mix is under way.
 fn mix_shown(core: &Core, d: usize) -> bool {
-    core.automix.as_ref().is_some_and(|m| m.plan.incoming == d) || core.mix_target(d).is_some()
+    core.automix.as_ref().is_some_and(|m| m.plan.incoming == d) || core.mix_target(d).is_some() || core.fader_mix_waiting_out() == Some(d)
 }
 
 /// What Now and Best would do for a deck, with the remembered style (shown in the Mix popup).
@@ -851,6 +851,33 @@ const MIX_STYLES: [(&str, MixStyle, &str); 4] = [
     ("Mashup", MixStyle::Mashup, "The new track's vocals over this track's music (its own vocals out) for 8 to 32 bars, then the new music comes in under them. Needs stems on both decks and keys that fit; otherwise as Auto"),
 ];
 
+/// Mix with the faders: no Mix button. A waiting deck shows the style its fader mixes it in
+/// with (a tap: the next one); a deck its fader started shows the mix; the playing deck, while
+/// the mix waits for it, that its fader takes it out.
+fn fader_mix_slot(ui: &mut Ui, core: &mut Core, d: usize, rect: Rect, font: egui::FontId) {
+    if let Some(m) = core.automix.as_ref().filter(|m| m.plan.incoming == d) {
+        let bars = ((m.plan.start_beat - core.mix_beat()) / 4.0).ceil();
+        let label = if bars > 0.0 { format!("Mix in {bars:.0}") } else { "Mixing…".to_string() };
+        button(ui, rect, &label, Style::Fill(GREEN), font)
+            .on_hover_text("Its fader started it. Fader to the bottom before it begins: called off");
+        return;
+    }
+    if core.fader_mix_waiting_out() == Some(d) {
+        let label = if rect.width() < 120.0 { "Fader ↓" } else { "Fader ↓: out" };
+        button(ui, rect, label, Style::Outline(GREEN, true), font)
+            .on_hover_text("Bring this deck's fader down: dj takes the track out on the mix's bars (until then it plays on in full)");
+        return;
+    }
+    let style = core.settings.mix_style;
+    let i = MIX_STYLES.iter().position(|s| s.1 == style).unwrap_or(0);
+    let (name, _, tip) = MIX_STYLES[i];
+    let resp = button(ui, rect, name, Style::Outline(GREEN, true), font)
+        .on_hover_text(format!("Push this deck's fader up: dj mixes it in at the best moment, as {name} ({tip}). Tap for the next style"));
+    if resp.clicked() && !core.learn {
+        core.set_mix_style(MIX_STYLES[(i + 1) % MIX_STYLES.len()].1);
+    }
+}
+
 /// "in 3 bars · Stems · 16 bars · keys clash": when a plan starts and how it mixes.
 pub(crate) fn plan_summary(core: &Core, plan: &MixPlan) -> String {
     let bars = ((plan.start_beat - core.snap.decks[plan.outgoing].beat) / 4.0).ceil().max(0.0);
@@ -869,6 +896,10 @@ pub(crate) fn plan_summary(core: &Core, plan: &MixPlan) -> String {
 /// playing track's last minute it doesn't ask. While a mix waits or runs, shows its state and a
 /// tap cancels it.
 fn mix_button(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect, font: egui::FontId) {
+    if core.fader_mix_on() {
+        fader_mix_slot(ui, core, d, rect, font);
+        return;
+    }
     if let Some(m) = core.automix.as_ref().filter(|m| m.plan.incoming == d) {
         let bars = ((m.plan.start_beat - core.mix_beat()) / 4.0).ceil();
         let label = if bars > 0.0 { format!("Mix in {bars:.0}") } else { "Mixing…".to_string() };

@@ -1,3 +1,6 @@
 target/
 *.wav
 !tests/**/*.wav
+
+# CI: the Core ML model and its check (.github/workflows/macos.yml)
+/build/

@@ -164,6 +164,18 @@ fn settings(ui: &mut Ui, core: &mut Core, st: &mut UiState) {
     ui.checkbox(&mut core.settings.keylock_on_load, "Key lock (pitch preserve) on load");
     ui.checkbox(&mut core.settings.tempo_home, "After a mix, ease back to the new track's own tempo")
         .on_hover_text("A mix plays the new track at the old one's tempo. Afterwards it glides back to its own (0 %), 0.25 % a bar, too slowly to hear, so a set doesn't drift ever further from the songs' tempos (real DJs keep most tracks within 5 %). Moving its tempo fader stops it.");
+    // Mix with the faders: a MIDI mixer's faders start the mixes (no Mix button, no Auto-DJ).
+    let external = core.external_routing();
+    let resp = ui
+        .add_enabled(!external, egui::Checkbox::new(&mut core.settings.fader_mix, "Mix with the faders (MIDI mixer)"))
+        .on_hover_text("No Mix button: push a waiting deck's volume fader up and dj mixes it in at the best moment, in the style shown on the deck (tap it for the next); fader back to the bottom before the mix begins calls it off. dj brings the new track in (its volume, stems, EQ) while the old one plays on in full, until you bring the old deck's fader down: then dj takes it out on the mix's bars. The faders only start the halves; dj sets the volumes. Auto-DJ is off.")
+        .on_disabled_hover_text("Not with an external mixer: dj can't see its faders");
+    if resp.changed() && core.settings.fader_mix {
+        core.set_autodj(None);
+    }
+    if core.settings.fader_mix && !external && !core.midi_volume_faders() {
+        ui.label(egui::RichText::new("Map your controller's channel volume faders first (MIDI → Learn, then a deck's VOLUME fader).").small().color(egui::Color32::from_rgb(230, 170, 60)));
+    }
     ui.checkbox(&mut core.settings.load_at_first_cue, "Load tracks at their first cue");
     if cfg!(target_os = "macos") {
         ui.checkbox(&mut core.settings.keep_awake, "Keep the Mac awake while dj runs")

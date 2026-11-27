@@ -27,7 +27,8 @@ jobs:
 
   # HT-Demucs's network as a Core ML model (32-bit), bundled with the app: converted
   # from Demucs's weights (tools/htdemucs_coreml), compiled, and checked against Mixxx's ONNX
-  # model through dj's own code. Converted again only when the converter changes.
+  # model through dj's own code. Converted again only when the converter changes. (In build/,
+  # not target/: the Rust cache restores and prunes target/.)
   coreml-model:
     runs-on: macos-latest
     steps:
@@ -38,40 +39,41 @@ jobs:
       - uses: actions/cache@v4
         id: model
         with:
-          path: target/coreml/htdemucs.mlmodelc
-          key: htdemucs-coreml-${{ hashFiles('tools/htdemucs_coreml/convert.py') }}
+          path: build/coreml/htdemucs.mlmodelc
+          key: htdemucs-coreml-v2-${{ hashFiles('tools/htdemucs_coreml/convert.py') }}
       - name: Convert HT-Demucs to Core ML
         if: steps.model.outputs.cache-hit != 'true'
         run: |
           python -m pip install --quiet "torch==2.7.0" "coremltools==9.0" "numpy<2.3" einops julius
           python -m pip install --quiet --no-deps demucs==4.1.0 openunmix
-          mkdir -p target/coreml
+          mkdir -p build/coreml
           curl -sSfL --retry 3 -o "$RUNNER_TEMP/htdemucs.th" https://dl.fbaipublicfiles.com/demucs/hybrid_transformer/955717e8-8726e21a.th
           python tools/htdemucs_coreml/convert.py "$RUNNER_TEMP/htdemucs.th" "$RUNNER_TEMP/htdemucs.mlpackage"
-          xcrun coremlcompiler compile "$RUNNER_TEMP/htdemucs.mlpackage" target/coreml/
-          ls -la target/coreml/htdemucs.mlmodelc
+          xcrun coremlcompiler compile "$RUNNER_TEMP/htdemucs.mlpackage" build/coreml/
+          ls -la build/coreml/htdemucs.mlmodelc
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           key: coreml
       - uses: actions/cache@v4
         with:
-          path: target/mixxx-htdemucs.onnx
-          key: mixxx-htdemucs-onnx-v1
+          path: build/mixxx-htdemucs.onnx
+          key: mixxx-htdemucs-onnx-v2
       - name: Check it against Mixxx's HT-Demucs
         run: |
-          [ -s target/mixxx-htdemucs.onnx ] || curl -sSfL --retry 3 -o target/mixxx-htdemucs.onnx https://github.com/mixxxdj/demucs/releases/latest/download/htdemucs.onnx
+          mkdir -p build
+          [ -s build/mixxx-htdemucs.onnx ] || curl -sSfL --retry 3 -o build/mixxx-htdemucs.onnx https://github.com/mixxxdj/demucs/releases/latest/download/htdemucs.onnx
           python -m pip install --quiet numpy
           python tools/htdemucs_coreml/mix.py > "$RUNNER_TEMP/mix.f32"
           # (Absolute paths: the test runs in the crate's folder.)
-          DEMUCS_MODEL="$PWD/target/mixxx-htdemucs.onnx" DEMUCS_NETWORK="$PWD/target/coreml/htdemucs.mlmodelc" \
+          DEMUCS_MODEL="$PWD/build/mixxx-htdemucs.onnx" DEMUCS_NETWORK="$PWD/build/coreml/htdemucs.mlmodelc" \
             DEMUCS_MIX="$RUNNER_TEMP/mix.f32" MIN_DB=50 \
             cargo test -p stems-core --features onnx --test demucs -- --ignored the_network --nocapture
       # TEMPORARY diagnosis: a 32-bit model next to the 16-bit one.
       - uses: actions/upload-artifact@v4
         with:
           name: htdemucs-coreml
-          path: target/coreml/htdemucs.mlmodelc
+          path: build/coreml/htdemucs.mlmodelc
 
   package:
     runs-on: macos-latest
@@ -113,11 +115,11 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: htdemucs-coreml
-          path: target/coreml/htdemucs.mlmodelc
+          path: build/coreml/htdemucs.mlmodelc
 
       - name: Build and package
         env:
-          DJ_COREML_MODEL: target/coreml/htdemucs.mlmodelc
+          DJ_COREML_MODEL: build/coreml/htdemucs.mlmodelc
         run: |
           ARGS=()
           [ -n "$MACOS_SIGN_IDENTITY" ] && [ -n "$APPLE_ID" ] && ARGS+=(--notarize)
