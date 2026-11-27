@@ -310,6 +310,10 @@ pub struct Core {
     pub other_mixes: Vec<automix::AutoMix>,
     /// While a mix ticks: what it sets, held back (see `automix_tick`).
     mix_batch_one: Option<HashMap<String, f32>>,
+    /// Planning for a fader: as soon as the new track can start, not on a phrase further on.
+    pub(crate) plan_asap: std::cell::Cell<bool>,
+    /// The session log (see [`crate::mixlog`]).
+    pub mixlog: crate::mixlog::MixLog,
     /// After a Now mix: the new track's vocals coming back on its next vocal phrase.
     pub vocal_return: Option<automix::VocalReturn>,
     /// Each deck's stem levels when their switch muted them (`Deck/N/StemVocals` off): back
@@ -420,6 +424,8 @@ impl Core {
             automix: None,
             other_mixes: Vec::new(),
             mix_batch_one: None,
+            plan_asap: std::cell::Cell::new(false),
+            mixlog: crate::mixlog::MixLog::new(),
             vocal_return: None,
             stem_unmute: [[None; 4]; NUM_DECKS],
             autodj: None,
@@ -451,6 +457,7 @@ impl Core {
     pub fn log(&mut self, msg: impl Into<String>) {
         let m = msg.into();
         eprintln!("{m}");
+        self.mixlog.event("status", serde_json::json!({ "msg": m }));
         self.status.push_back((Instant::now(), m));
         while self.status.len() > 50 {
             self.status.pop_front();
@@ -642,6 +649,7 @@ impl Core {
             return;
         }
         let overrides = self.trackdb.tracks.get(&TrackDb::key(path)).cloned();
+        self.mixlog.event("load", serde_json::json!({ "deck": d + 1, "path": path.display().to_string() }));
         self.stem_unmute[d] = [None; 4];
         self.stems.cancel(d);
         self.decks[d].stems_progress = None;
@@ -741,6 +749,20 @@ impl Core {
     }
 
     fn on_track_loaded(&mut self, d: usize, lt: LoadedTrack) {
+        self.mixlog.event(
+            "loaded",
+            serde_json::json!({
+                "deck": d + 1,
+                "path": lt.path.display().to_string(),
+                "title": lt.tags.title,
+                "artist": lt.tags.artist,
+                "tag_bpm": lt.tags.bpm,
+                "key": lt.tags.key_text,
+                "grid_bpm": lt.track.grid.map(|g| g.bpm),
+                "grid_anchor": lt.track.grid.map(|g| g.anchor_secs),
+                "grid_source": format!("{:?}", lt.grid_source),
+            }),
+        );
         let locked = self.trackdb.tracks.get(&TrackDb::key(&lt.path)).map(|o| o.locked).unwrap_or(false);
         let info = LoadedInfo {
             path: lt.path.clone(),
@@ -1870,6 +1892,27 @@ impl Core {
     /// Route a control message. `addr` is relative to the root, e.g.
     /// "Deck/1/PlayPause". An optional ":value" suffix supplies the value.
     pub fn route(&mut self, addr: &str, args: &[OscType]) -> bool {
+        if self.mixlog.enabled() {
+            let v: Vec<String> = args
+                .iter()
+                .map(|a| match a {
+                    OscType::Float(f) => format!("{f:.2}"),
+                    OscType::Double(f) => format!("{f:.2}"),
+                    OscType::Int(i) => i.to_string(),
+                    OscType::String(s) => s.clone(),
+                    OscType::Bool(b) => b.to_string(),
+                    other => format!("{other:?}"),
+                })
+                .collect();
+            let v = v.join(" ");
+            // (Floats when they change; anything else, a press, every time.)
+            if args.iter().all(|a| matches!(a, OscType::Float(_) | OscType::Double(_))) && !args.is_empty() {
+                self.mixlog.set(addr, &v);
+            } else {
+                let by = self.mixlog.by;
+                self.mixlog.event("set", serde_json::json!({ "addr": addr, "value": v, "by": by }));
+            }
+        }
         let (addr, forced): (&str, Option<Vec<OscType>>) = match addr.split_once(':') {
             Some((a, v)) => {
                 let val = v.parse::<i32>().map(OscType::Int).or_else(|_| v.parse::<f32>().map(OscType::Float));
@@ -2578,6 +2621,35 @@ impl Core {
     }
 
     pub(crate) fn handle_midi(&mut self, msg: &[u8]) {
+        if self.mixlog.enabled() {
+            let maps: Vec<String> = self.midi_maps_for(msg);
+            self.mixlog.event("midi", serde_json::json!({ "bytes": msg, "maps": maps }));
+        }
+        let by = std::mem::replace(&mut self.mixlog.by, "midi");
+        self.handle_midi_inner(msg);
+        self.mixlog.by = by;
+    }
+
+    /// The addresses MIDI message `msg` is mapped to (for the log; a 14-bit control's fine half
+    /// on its coarse CC).
+    fn midi_maps_for(&self, msg: &[u8]) -> Vec<String> {
+        let (Some(&st), Some(&n)) = (msg.first(), msg.get(1)) else { return Vec::new() };
+        let ch = st & 0x0f;
+        let kind = match st & 0xf0 {
+            0x80 | 0x90 => MidiKind::Note,
+            0xb0 => MidiKind::Cc,
+            0xe0 => MidiKind::PitchBend,
+            _ => return Vec::new(),
+        };
+        let number = match kind {
+            MidiKind::PitchBend => 0,
+            MidiKind::Cc if (32..64).contains(&n) && self.cc_fine[ch as usize][n as usize - 32] => n - 32,
+            _ => n,
+        };
+        self.profile.mappings.iter().filter(|m| m.source.kind == kind && m.source.channel == ch && m.source.number == number).map(|m| m.address.clone()).collect()
+    }
+
+    fn handle_midi_inner(&mut self, msg: &[u8]) {
         if msg.is_empty() {
             return;
         }
@@ -3149,6 +3221,7 @@ impl Core {
         }
 
         self.automix_tick();
+        self.mixlog_tick();
         self.grid_check_tick();
         crate::stems::GPU.store(self.settings.stems_gpu, std::sync::atomic::Ordering::Relaxed);
         // (After the mix's tick: a mix Auto-DJ starts is seen by the engine before it's checked.)
@@ -4776,7 +4849,8 @@ pub(crate) mod tests {
         fader(&mut c, 8, 0.1);
         let (start, len) = c.automix.as_ref().map(|m| (m.plan.start_beat, m.plan.length_beats)).expect("a mix");
         assert_eq!(c.automix.as_ref().map(|m| (m.plan.incoming, m.plan.outgoing)), Some((1, 0)));
-        assert!(start - c.mix_beat() <= 4.0 * 4.0 + 5.0, "soon: {start} {}", c.mix_beat());
+        // The first bar the paused deck can start on (a bar to start, up to 3 beats of lead-in).
+        assert!(start - c.mix_beat() <= 12.0, "soon: {start} {}", c.mix_beat());
         assert_eq!(c.session.channels[1].params.volume, 0.0, "silent until it starts");
         assert_eq!(c.fader_mix_waiting_out(0), true);
         // No Auto-DJ in this mode.
@@ -4944,6 +5018,82 @@ pub(crate) mod tests {
             }
         }
         assert!(checked > 0);
+    }
+
+    #[test]
+    fn the_old_track_does_not_go_before_the_new_one_starts() {
+        let (mut e, mut c, _config) = core();
+        mix_setup(&mut e, &mut c);
+        c.settings.fader_mix = true;
+        for (n, ch) in [(7u8, 1), (8u8, 2)] {
+            let source = MidiSource { kind: MidiKind::Cc, channel: 0, number: n };
+            c.profile.mappings.push(MidiMapping { source, address: format!("Mixer/CH{ch}/Volume"), mode: MapMode::Absolute, invert: false, feedback: false });
+        }
+        c.handle_midi(&[0xb0, 7, 114]);
+        c.handle_midi(&[0xb0, 8, 0]);
+        c.handle_midi(&[0xb0, 8, 120]);
+        let start = c.automix.as_ref().map(|m| m.plan.start_beat).expect("a mix");
+        // The old fader starts down straight away, before the new track has started.
+        c.handle_midi(&[0xb0, 7, 90]);
+        let eq0 = c.session.channels[0].params.eq;
+        while c.mix_beat() < start - 0.3 {
+            pump(&mut e, &mut c);
+            assert!(c.snap.decks[0].stem_gains.iter().all(|g| *g == 1.0), "no gap: {:?}", c.snap.decks[0].stem_gains);
+            assert_eq!(c.session.channels[0].params.eq, eq0, "no gap");
+        }
+        // Once it plays, the old fader all the way down: the old track gone, the new one all in
+        // straight away (its bass and vocals don't wait out the old track's 4 bars).
+        while c.mix_beat() < start + 2.0 {
+            pump(&mut e, &mut c);
+        }
+        c.handle_midi(&[0xb0, 7, 0]);
+        let at = c.snap.clock.beat;
+        run_mix(&mut e, &mut c, |_, _| {});
+        assert!(c.snap.clock.beat - at < 2.0, "{} beats", c.snap.clock.beat - at);
+        assert!(!c.snap.decks[0].playing);
+    }
+
+    #[test]
+    fn the_session_log_tells_what_happened() {
+        let (mut e, mut c, config) = core();
+        let path = config.dir.join("session.jsonl");
+        c.mixlog = crate::mixlog::MixLog::at(&path);
+        mix_setup(&mut e, &mut c);
+        c.settings.fader_mix = true;
+        for (n, ch) in [(7u8, 1), (8u8, 2)] {
+            let source = MidiSource { kind: MidiKind::Cc, channel: 0, number: n };
+            c.profile.mappings.push(MidiMapping { source, address: format!("Mixer/CH{ch}/Volume"), mode: MapMode::Absolute, invert: false, feedback: false });
+        }
+        c.handle_midi(&[0xb0, 7, 100]);
+        c.handle_midi(&[0xb0, 8, 0]);
+        c.handle_midi(&[0xb0, 8, 120]);
+        let start = c.automix.as_ref().map(|m| m.plan.start_beat).expect("a mix");
+        while c.mix_beat() < start + 4.0 {
+            pump(&mut e, &mut c);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        pump(&mut e, &mut c);
+        c.mark();
+        c.mixlog.flush();
+        let lines: Vec<serde_json::Value> = std::fs::read_to_string(&path).unwrap().lines().map(|l| serde_json::from_str(l).expect("JSON lines")).collect();
+        let has = |ev: &str, f: &dyn Fn(&serde_json::Value) -> bool| lines.iter().any(|l| l["ev"] == ev && f(l));
+        assert!(has("load", &|l| l["path"].as_str().is_some_and(|p| p.ends_with("style-a.wav"))), "the tracks' paths");
+        assert!(has("loaded", &|l| l["deck"] == 2 && l["path"].as_str().is_some_and(|p| p.ends_with("style-b.wav"))));
+        assert!(has("midi", &|l| l["bytes"] == serde_json::json!([0xb0, 8, 120]) && l["maps"] == serde_json::json!(["Mixer/CH2/Volume"])));
+        assert!(has("set", &|l| l["addr"] == "Mixer/CH1/Volume" && l["by"] == "midi"), "your faders");
+        assert!(has("set", &|l| l["by"] == "dj"), "what dj sets mixing");
+        assert!(has("mix", &|l| l["in"] == 2 && l["out"] == 1 && l["fader"] == true));
+        assert!(has("status", &|l| l["msg"].as_str().is_some_and(|m| m.starts_with("Mixing deck 2 into deck 1"))));
+        assert!(has("tempo", &|l| l["deck"] == 2));
+        assert!(has("play", &|l| l["deck"] == 2 && l["playing"] == true));
+        assert!(has("state", &|l| l["decks"].as_array().is_some_and(|d| d.len() == 2) && l["mixes"].as_array().is_some_and(|m| m.len() == 1)));
+        assert!(has("mark", &|l| l["decks"][1]["path"].as_str().is_some_and(|p| p.ends_with("style-b.wav"))));
+        let mut t = 0.0;
+        for l in &lines {
+            let lt = l["t"].as_f64().expect("a time");
+            assert!(lt >= t, "in order");
+            t = lt;
+        }
     }
 
     #[test]

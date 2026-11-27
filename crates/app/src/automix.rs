@@ -644,7 +644,8 @@ impl Core {
         // Ahead: a paused deck needs a bar to start; its cue may need a few beats of lead-in.
         let lead = if i.playing { 0.5 } else { 4.5 } + 3.0;
         let earliest = ((o.beat + lead) / 4.0).ceil().max(0.0) as usize;
-        let latest = if when == MixWhen::Now { earliest + 4 } else { out.len() };
+        // (A fader: the first bar it can; Now: within 4 bars of it, on the best one.)
+        let latest = if self.plan_asap.get() { earliest } else if when == MixWhen::Now { earliest + 4 } else { out.len() };
         // Your cue (or where a paused deck stands) as a bar of the new track. It's a preference
         // only when you chose it: a cue loop, or the deck cued away from where it loaded (its start
         // or first cue); otherwise dj picks the best place to bring it in.
@@ -1012,7 +1013,9 @@ impl Core {
         // On a phrase of the outgoing track: its next 8-bar phrase when that's at most 4 bars
         // away, else the next 4-bar line (never more than 4 bars to wait).
         let phrase = ((o.beat + lead) / 32.0).ceil() * 32.0;
-        let (next_bar, on) = if phrase - o.beat <= 16.0 {
+        let (next_bar, on) = if self.plan_asap.get() {
+            (((o.beat + lead) / 4.0).ceil() * 4.0, "on the next bar")
+        } else if phrase - o.beat <= 16.0 {
             (phrase, "on the phrase")
         } else {
             (((o.beat + lead) / 16.0).ceil() * 16.0, "on the next 4 bars")
@@ -1276,6 +1279,17 @@ impl Core {
         if !why.is_empty() {
             eprintln!("  {why}");
         }
+        let p = &mix.plan;
+        self.mixlog.event(
+            "mix",
+            serde_json::json!({
+                "in": i + 1, "out": o + 1, "how": p.how.name(external), "mode": format!("{:?}", p.mode),
+                "start_beat": p.start_beat, "length_beats": p.length_beats, "lead_in": p.lead_in, "entry_secs": p.entry_secs,
+                "transpose": p.transpose, "fader": mix.fader, "reason": p.reason, "why_how": p.why_how, "notes": p.notes,
+                "blend": p.blend.as_ref().map(|b| serde_json::json!({ "bars": b.bars, "in_at": b.in_at, "out_at": b.out_at, "swap": b.swap })),
+                "out_beat_now": self.snap.decks[o].beat, "in_pos_now": self.snap.decks[i].position_secs,
+            }),
+        );
         // Mixes run side by side: the one running goes on (this is the newest).
         if let Some(prev) = self.automix.take() {
             self.other_mixes.push(prev);
@@ -1363,8 +1377,10 @@ impl Core {
         let silent = p.volume <= FADER_BOTTOM || p.mute;
         if prev.is_none_or(|p| p <= FADER_BOTTOM) && silent {
             if let Some(out) = self.mix_target(ch) {
-                // From the next phrase line (at most 4 bars away), not the best moment further on.
+                // As soon as it can (its fader is open): the first bar the new track can start on.
+                self.plan_asap.set(true);
                 let plan = self.plan_now(ch, out, self.settings.mix_style);
+                self.plan_asap.set(false);
                 self.start_mix(plan);
                 return true;
             }
@@ -1452,7 +1468,85 @@ impl Core {
             b.insert(addr.to_string(), v);
             return;
         }
+        let by = std::mem::replace(&mut self.mixlog.by, "dj");
         self.set_picked_up(addr, v);
+        self.mixlog.by = by;
+    }
+
+    /// Log what changed since the last frame (a deck's BPM, the master, a deck starting or
+    /// stopping) and, every second, each loaded deck's state (see [`crate::mixlog`]).
+    pub(super) fn mixlog_tick(&mut self) {
+        if !self.mixlog.enabled() {
+            return;
+        }
+        let c = self.snap.clock;
+        let owner = match c.owner {
+            ClockOwner::Deck(d) => format!("deck {}", d + 1),
+            ClockOwner::Header => "header".to_string(),
+        };
+        if self.mixlog.changed("clock", format!("{owner} {:.2}", c.bpm)) {
+            self.mixlog.event("clock", serde_json::json!({ "master": owner, "bpm": (c.bpm * 100.0).round() / 100.0 }));
+        }
+        for d in 0..self.deck_count() {
+            let v = self.snap.decks[d];
+            if !v.loaded {
+                continue;
+            }
+            if self.mixlog.changed(&format!("tempo{d}"), format!("{:.2} {}", v.bpm, v.sync)) {
+                self.mixlog.event(
+                    "tempo",
+                    serde_json::json!({ "deck": d + 1, "bpm": (v.bpm * 100.0).round() / 100.0, "track_bpm": v.track_bpm, "tempo_fader": v.tempo_fader, "sync": v.sync }),
+                );
+            }
+            if self.mixlog.changed(&format!("play{d}"), format!("{} {}", v.playing, v.loop_on)) {
+                self.mixlog.event("play", serde_json::json!({ "deck": d + 1, "playing": v.playing, "loop": v.loop_on, "pos": (v.position_secs * 100.0).round() / 100.0 }));
+            }
+        }
+        if self.mixlog.state_due() {
+            let decks: Vec<_> = (0..self.deck_count())
+                .filter(|&d| self.snap.decks[d].loaded)
+                .map(|d| {
+                    let v = self.snap.decks[d];
+                    let p = &self.session.channels[d].params;
+                    serde_json::json!({
+                        "deck": d + 1,
+                        "title": self.decks[d].info.as_ref().and_then(|i| i.tags.title.clone()),
+                        "pos": (v.position_secs * 100.0).round() / 100.0,
+                        "beat": (v.beat * 100.0).round() / 100.0,
+                        "playing": v.playing, "loop": v.loop_on, "sync": v.sync,
+                        "bpm": (v.bpm * 100.0).round() / 100.0, "semitones": v.semitones,
+                        "volume": p.volume, "eq": p.eq, "filter": p.cutoff, "stems": v.stem_gains,
+                        "fader": self.fader_hw[d],
+                    })
+                })
+                .collect();
+            let mixes: Vec<_> = self
+                .mixes()
+                .map(|m| {
+                    serde_json::json!({
+                        "in": m.plan.incoming + 1, "out": m.plan.outgoing + 1, "how": m.plan.how.name(m.external),
+                        "beat": (self.mix_beat_of(m) * 100.0).round() / 100.0, "start": m.plan.start_beat, "length": m.plan.length_beats,
+                        "released": m.released, "out_from": m.out_from, "vocals_in": m.vocals_let_in, "old_vocals_out": m.old_vocals_out,
+                    })
+                })
+                .collect();
+            self.mixlog.event("state", serde_json::json!({ "clock": { "master": owner, "bpm": (c.bpm * 100.0).round() / 100.0, "beat": (c.beat * 100.0).round() / 100.0 }, "decks": decks, "mixes": mixes }));
+        }
+    }
+
+    /// Mark this moment in the session log (where a mix went wrong), and say where the log is.
+    pub fn mark(&mut self) {
+        let at: Vec<_> = (0..self.deck_count())
+            .filter(|&d| self.snap.decks[d].loaded)
+            .map(|d| {
+                let v = self.snap.decks[d];
+                serde_json::json!({ "deck": d + 1, "pos": (v.position_secs * 100.0).round() / 100.0, "playing": v.playing, "path": self.decks[d].info.as_ref().map(|i| i.path.display().to_string()) })
+            })
+            .collect();
+        self.mixlog.event("mark", serde_json::json!({ "decks": at }));
+        let n = self.mixlog.now();
+        let path = self.mixlog.path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "no log".into());
+        self.log(format!("Marked at {}:{:02} · log: {path}", (n / 60.0) as u64, (n % 60.0) as u64));
     }
 
     /// The incoming deck's next phrase (every 4 bars of its grid) where its vocals play, in its
@@ -1513,8 +1607,13 @@ impl Core {
             self.tempo_home = None;
             return;
         }
-        // Until the handoff, it follows the old track's tempo; it leads once that one stops.
-        if self.snap.clock.owner != ClockOwner::Deck(th.deck as u8) || !v.playing {
+        // Until the handoff, it follows the old track's tempo; it leads once that one stops. And
+        // not while a mix runs (the tempo steady through it; from where it is after).
+        if self.snap.clock.owner != ClockOwner::Deck(th.deck as u8) || !v.playing || self.automix.is_some() {
+            if th.last.is_some() {
+                th.last = None;
+                self.tempo_home = Some(th);
+            }
             return;
         }
         let clock = self.snap.clock.beat;
@@ -1785,9 +1884,11 @@ impl Core {
             self.automix = self.other_mixes.pop();
         }
         self.one_bass_one_voice(&mut all);
+        let by = std::mem::replace(&mut self.mixlog.by, "dj");
         for (k, v) in all {
             self.set_picked_up(&k, v);
         }
+        self.mixlog.by = by;
     }
 
     /// Mixes side by side: a track coming in gets its bass (or vocals) on its stems only once no
@@ -1884,7 +1985,10 @@ impl Core {
         if beat < start {
             return;
         }
-        let p = if finish { 1.0 } else { (beat - start) / len };
+        // Fader mix: the old deck's fader at the bottom, once its half began: the old track is
+        // gone, the new one all in now (nothing left to wait for; else a gap).
+        let old_gone = m.fader && m.out_from.is_some() && self.fader_hw[o].is_some_and(|v| v <= FADER_BOTTOM);
+        let p = if finish || old_gone { 1.0 } else { (beat - start) / len };
         let (how, external, swapped) = (m.plan.how, m.external, m.swapped);
         let (out_volume, in_low, out_low, in_high, out_high, out_mid, in_mid) =
             (m.out_volume, m.in_low, m.out_low, m.in_high, m.out_high, m.out_mid, m.in_mid);
@@ -1906,9 +2010,11 @@ impl Core {
         let bp_out = match (m.fader && !finish, m.out_from) {
             (false, _) => bp,
             (true, None) => -1.0,
+            (true, Some(_)) if old_gone => bars_n,
             (true, Some(t)) => {
                 // The next bar line of the mix (its bars line up with the old track's).
-                let t0 = start + ((t - start) / 4.0).ceil() * 4.0;
+                // (Never before the new track has started: no gap.)
+                let t0 = start + ((t - start) / 4.0).ceil().max(0.0) * 4.0;
                 if beat < t0 {
                     -1.0
                 } else {

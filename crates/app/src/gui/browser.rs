@@ -280,7 +280,17 @@ pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect) {
             core.set_autodj(Some(paths));
         }
     }
-    let pills_left = super::mixer::global_pills(ui, core, st, ar.left() - 8.0, y, bar_h);
+    // Mark: where a mix went wrong, in the session log (with the decks' tracks and positions).
+    let mw = pill_width(ui, "Mark", 13.0);
+    let mr = Rect::from_min_size(Pos2::new(ar.left() - 8.0 - mw, y), Vec2::new(mw, bar_h));
+    let mark_hover = match &core.mixlog.path {
+        Some(p) => format!("Mark this moment in the session log, where something went wrong (the tracks and where they were). The log: {}", p.display()),
+        None => "Mark this moment in the session log, where something went wrong (the tracks and where they were). The log is in dj's settings folder, logs (Settings shows it)".to_string(),
+    };
+    if pill(ui, mr, "Mark", false).on_hover_text(mark_hover).clicked() {
+        core.mark();
+    }
+    let pills_left = super::mixer::global_pills(ui, core, st, mr.left() - 8.0, y, bar_h);
     let info_r = Rect::from_min_max(Pos2::new(fr.right() + 12.0, y), Pos2::new(pills_left - 12.0, y + bar_h));
     ui.painter_at(info_r).text(Pos2::new(info_r.right(), info_r.center().y), Align2::RIGHT_CENTER, info, sans(12.5), TEXT_DIM);
 
