@@ -10,6 +10,7 @@ mod core;
 mod fxcat;
 mod gui;
 mod midi;
+mod mixlog;
 mod model;
 mod osc;
 mod profile;

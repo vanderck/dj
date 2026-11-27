@@ -176,6 +176,18 @@ fn settings(ui: &mut Ui, core: &mut Core, st: &mut UiState) {
     if core.settings.fader_mix && !external && !core.midi_volume_faders() {
         ui.label(egui::RichText::new("Map your controller's channel volume faders first (MIDI → Learn, then a deck's VOLUME fader).").small().color(egui::Color32::from_rgb(230, 170, 60)));
     }
+    // The session log: everything that happened (tracks with their paths, MIDI, the mixes),
+    // with your marks: to send when a mix went wrong.
+    ui.horizontal(|ui| {
+        let dir = crate::settings::config_dir().join("logs");
+        let file = core.mixlog.path.as_ref().and_then(|p| p.file_name()).map(|f| f.to_string_lossy().to_string());
+        ui.label(format!("Session log: {}", file.unwrap_or_else(|| "(starts with the first event)".into())))
+            .on_hover_text(format!("Tracks loaded (their paths), MIDI, control changes, tempo, the mixes and your marks (the Mark button, bottom bar), one line each: send it with the tracks when a mix went wrong. In {}", dir.display()));
+        if ui.button("Open folder").clicked() {
+            let _ = std::fs::create_dir_all(&dir);
+            super::fx::open_path(&dir);
+        }
+    });
     ui.checkbox(&mut core.settings.load_at_first_cue, "Load tracks at their first cue");
     if cfg!(target_os = "macos") {
         ui.checkbox(&mut core.settings.keep_awake, "Keep the Mac awake while dj runs")

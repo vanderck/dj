@@ -1279,6 +1279,17 @@ impl Core {
         if !why.is_empty() {
             eprintln!("  {why}");
         }
+        let p = &mix.plan;
+        self.mixlog.event(
+            "mix",
+            serde_json::json!({
+                "in": i + 1, "out": o + 1, "how": p.how.name(external), "mode": format!("{:?}", p.mode),
+                "start_beat": p.start_beat, "length_beats": p.length_beats, "lead_in": p.lead_in, "entry_secs": p.entry_secs,
+                "transpose": p.transpose, "fader": mix.fader, "reason": p.reason, "why_how": p.why_how, "notes": p.notes,
+                "blend": p.blend.as_ref().map(|b| serde_json::json!({ "bars": b.bars, "in_at": b.in_at, "out_at": b.out_at, "swap": b.swap })),
+                "out_beat_now": self.snap.decks[o].beat, "in_pos_now": self.snap.decks[i].position_secs,
+            }),
+        );
         // Mixes run side by side: the one running goes on (this is the newest).
         if let Some(prev) = self.automix.take() {
             self.other_mixes.push(prev);
@@ -1457,7 +1468,85 @@ impl Core {
             b.insert(addr.to_string(), v);
             return;
         }
+        let by = std::mem::replace(&mut self.mixlog.by, "dj");
         self.set_picked_up(addr, v);
+        self.mixlog.by = by;
+    }
+
+    /// Log what changed since the last frame (a deck's BPM, the master, a deck starting or
+    /// stopping) and, every second, each loaded deck's state (see [`crate::mixlog`]).
+    pub(super) fn mixlog_tick(&mut self) {
+        if !self.mixlog.enabled() {
+            return;
+        }
+        let c = self.snap.clock;
+        let owner = match c.owner {
+            ClockOwner::Deck(d) => format!("deck {}", d + 1),
+            ClockOwner::Header => "header".to_string(),
+        };
+        if self.mixlog.changed("clock", format!("{owner} {:.2}", c.bpm)) {
+            self.mixlog.event("clock", serde_json::json!({ "master": owner, "bpm": (c.bpm * 100.0).round() / 100.0 }));
+        }
+        for d in 0..self.deck_count() {
+            let v = self.snap.decks[d];
+            if !v.loaded {
+                continue;
+            }
+            if self.mixlog.changed(&format!("tempo{d}"), format!("{:.2} {}", v.bpm, v.sync)) {
+                self.mixlog.event(
+                    "tempo",
+                    serde_json::json!({ "deck": d + 1, "bpm": (v.bpm * 100.0).round() / 100.0, "track_bpm": v.track_bpm, "tempo_fader": v.tempo_fader, "sync": v.sync }),
+                );
+            }
+            if self.mixlog.changed(&format!("play{d}"), format!("{} {}", v.playing, v.loop_on)) {
+                self.mixlog.event("play", serde_json::json!({ "deck": d + 1, "playing": v.playing, "loop": v.loop_on, "pos": (v.position_secs * 100.0).round() / 100.0 }));
+            }
+        }
+        if self.mixlog.state_due() {
+            let decks: Vec<_> = (0..self.deck_count())
+                .filter(|&d| self.snap.decks[d].loaded)
+                .map(|d| {
+                    let v = self.snap.decks[d];
+                    let p = &self.session.channels[d].params;
+                    serde_json::json!({
+                        "deck": d + 1,
+                        "title": self.decks[d].info.as_ref().and_then(|i| i.tags.title.clone()),
+                        "pos": (v.position_secs * 100.0).round() / 100.0,
+                        "beat": (v.beat * 100.0).round() / 100.0,
+                        "playing": v.playing, "loop": v.loop_on, "sync": v.sync,
+                        "bpm": (v.bpm * 100.0).round() / 100.0, "semitones": v.semitones,
+                        "volume": p.volume, "eq": p.eq, "filter": p.cutoff, "stems": v.stem_gains,
+                        "fader": self.fader_hw[d],
+                    })
+                })
+                .collect();
+            let mixes: Vec<_> = self
+                .mixes()
+                .map(|m| {
+                    serde_json::json!({
+                        "in": m.plan.incoming + 1, "out": m.plan.outgoing + 1, "how": m.plan.how.name(m.external),
+                        "beat": (self.mix_beat_of(m) * 100.0).round() / 100.0, "start": m.plan.start_beat, "length": m.plan.length_beats,
+                        "released": m.released, "out_from": m.out_from, "vocals_in": m.vocals_let_in, "old_vocals_out": m.old_vocals_out,
+                    })
+                })
+                .collect();
+            self.mixlog.event("state", serde_json::json!({ "clock": { "master": owner, "bpm": (c.bpm * 100.0).round() / 100.0, "beat": (c.beat * 100.0).round() / 100.0 }, "decks": decks, "mixes": mixes }));
+        }
+    }
+
+    /// Mark this moment in the session log (where a mix went wrong), and say where the log is.
+    pub fn mark(&mut self) {
+        let at: Vec<_> = (0..self.deck_count())
+            .filter(|&d| self.snap.decks[d].loaded)
+            .map(|d| {
+                let v = self.snap.decks[d];
+                serde_json::json!({ "deck": d + 1, "pos": (v.position_secs * 100.0).round() / 100.0, "playing": v.playing, "path": self.decks[d].info.as_ref().map(|i| i.path.display().to_string()) })
+            })
+            .collect();
+        self.mixlog.event("mark", serde_json::json!({ "decks": at }));
+        let n = self.mixlog.now();
+        let path = self.mixlog.path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "no log".into());
+        self.log(format!("Marked at {}:{:02} · log: {path}", (n / 60.0) as u64, (n % 60.0) as u64));
     }
 
     /// The incoming deck's next phrase (every 4 bars of its grid) where its vocals play, in its
@@ -1795,9 +1884,11 @@ impl Core {
             self.automix = self.other_mixes.pop();
         }
         self.one_bass_one_voice(&mut all);
+        let by = std::mem::replace(&mut self.mixlog.by, "dj");
         for (k, v) in all {
             self.set_picked_up(&k, v);
         }
+        self.mixlog.by = by;
     }
 
     /// Mixes side by side: a track coming in gets its bass (or vocals) on its stems only once no
