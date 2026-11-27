@@ -17,6 +17,9 @@ use stems_core::Stem as CoreStem;
 
 pub enum Update {
     Progress { deck: usize, track_id: u64, fraction: f32 },
+    /// The separator's model loads before this track's separation starts: a second or two, but
+    /// longer the first time with Core ML (it specialises the model for this Mac).
+    LoadingModel { deck: usize, track_id: u64 },
     /// `cues`: cue points detected with the stems, when the request asked for them.
     Done { deck: usize, track_id: u64, stems: Arc<StemData>, wave: Arc<StemWave>, source: String, cues: Option<Vec<Cue>> },
     /// No stems for this track: none prepared and no HT-Demucs model, or it failed (`error`, to
@@ -81,6 +84,7 @@ impl StemsWorker {
         std::thread::Builder::new()
             .name("stems".into())
             .spawn(move || {
+                background_thread();
                 let mut demucs = DemucsCache::default();
                 while let Ok(job) = job_rx.recv() {
                     run(job, &w, &tx, &mut demucs, &section_tx);
@@ -92,6 +96,7 @@ impl StemsWorker {
         std::thread::Builder::new()
             .name("sections".into())
             .spawn(move || {
+                background_thread();
                 let mut model = StructureCache::default();
                 while let Ok(job) = section_rx.recv() {
                     if w[job.deck].load(Ordering::Relaxed) == job.track.id {
@@ -222,6 +227,9 @@ fn run(job: Request, wanted: &[AtomicU64; NUM_DECKS], tx: &Sender<Update>, demuc
         }
         done(&job, tx, stems, name)
     };
+    if job.demucs.as_ref().is_some_and(|p| demucs.needs_load(p, threads)) {
+        let _ = tx.send(Update::LoadingModel { deck, track_id: id });
+    }
     let error = match &job.demucs {
         Some(path) => match demucs.separate(path, threads, &audio.frames, audio.sample_rate, &mut progress) {
             Ok((buffers, name)) => {
@@ -489,6 +497,19 @@ pub struct DemucsCache {
 }
 
 impl DemucsCache {
+    /// Whether [`DemucsCache::separate`] would load the model first.
+    pub fn needs_load(&self, path: &Path, threads: usize) -> bool {
+        #[cfg(any(feature = "stems-onnx", feature = "stems-onnx-dynamic"))]
+        {
+            !matches!(&self.loaded, Some((f, t, g, _)) if *f == model_files(path) && *t == threads && *g == GPU.load(Ordering::Relaxed))
+        }
+        #[cfg(not(any(feature = "stems-onnx", feature = "stems-onnx-dynamic")))]
+        {
+            let _ = (path, threads);
+            false
+        }
+    }
+
     #[cfg(any(feature = "stems-onnx", feature = "stems-onnx-dynamic"))]
     pub fn separate(
         &mut self,
@@ -499,12 +520,20 @@ impl DemucsCache {
         progress: offline::Progress,
     ) -> Result<(StemBuffers, String), OfflineError> {
         use stems_core::demucs::DemucsModel;
-        let files = demucs_files(path);
+        let files = model_files(path);
         if !matches!(&self.loaded, Some((f, t, g, _)) if *f == files && *t == threads && *g == GPU.load(Ordering::Relaxed)) {
             self.loaded = None; // free the old model before loading another
             let gpu = GPU.load(Ordering::Relaxed);
-            let options = stems_core::OnnxOptions { intra_threads: threads, gpu, gpu_cache: Some(crate::settings::config_dir().join("models").join("coreml-cache-ane")) };
-            let model = DemucsModel::from_files(&files, &options).map_err(|e| OfflineError::Model(e.to_string()))?;
+            let options = stems_core::OnnxOptions { intra_threads: threads, gpu };
+            let model = match DemucsModel::from_files(&files, &options) {
+                Ok(m) => m,
+                // The Core ML model didn't load: the ONNX one, on the CPU.
+                Err(e) if files.first().is_some_and(|f| f.extension().is_some_and(|x| x == "mlmodelc")) => {
+                    eprintln!("stems: Core ML: {e}");
+                    DemucsModel::from_files(&demucs_files(path), &options).map_err(|e| OfflineError::Model(e.to_string()))?
+                }
+                Err(e) => return Err(OfflineError::Model(e.to_string())),
+            };
             eprintln!("stems: {} on the {}", model.name(), model.device());
             self.loaded = Some((files, threads, gpu, model));
         }
@@ -532,9 +561,52 @@ impl DemucsCache {
     }
 }
 
+/// The model files to separate with: with the Core ML switch on (macOS), the app's Core
+/// ML model of HT-Demucs when `path` is HT-Demucs (one file); else `path`'s (see
+/// [`demucs_files`]).
+pub fn model_files(path: &Path) -> Vec<PathBuf> {
+    let files = demucs_files(path);
+    if GPU.load(Ordering::Relaxed) && files.len() == 1 {
+        if let Some(m) = coreml_model() {
+            return vec![m];
+        }
+    }
+    files
+}
+
+/// HT-Demucs's network for Core ML, in the app bundle (`Contents/Resources/htdemucs.mlmodelc`,
+/// made by `tools/htdemucs_coreml`), or where `DJ_COREML_MODEL` says.
+pub fn coreml_model() -> Option<PathBuf> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let from_env = std::env::var_os("DJ_COREML_MODEL").filter(|v| !v.is_empty()).map(PathBuf::from);
+    let bundled = || std::env::current_exe().ok()?.parent()?.parent().map(|c| c.join("Resources").join("htdemucs.mlmodelc"));
+    from_env.or_else(bundled).filter(|p| p.exists())
+}
+
 /// Separate stems on the GPU (`Settings::stems_gpu`, kept here for the worker threads): the
 /// model loads again, on the GPU or the CPU, when it changes.
 pub static GPU: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Lower this thread's priority (and that of the threads it starts: ONNX Runtime's, CoreML's)
+/// below the app's: separation, sections and preparing are background work, and must never
+/// keep the audio or the screen waiting. On macOS, QoS "utility" (still on all cores, but
+/// yielding to interactive work).
+pub fn background_thread() {
+    #[cfg(target_os = "macos")]
+    {
+        // <pthread/qos.h>: QOS_CLASS_UTILITY.
+        const QOS_CLASS_UTILITY: u32 = 0x11;
+        extern "C" {
+            fn pthread_set_qos_class_self_np(class: u32, relative_priority: i32) -> i32;
+        }
+        // SAFETY: sets the calling thread's own QoS class; no memory is touched.
+        unsafe {
+            pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
+        }
+    }
+}
 
 /// Where dj keeps a downloaded HT-Demucs model.
 pub fn default_demucs_path() -> PathBuf {
@@ -751,7 +823,7 @@ mod tests {
         let deadline = std::time::Instant::now() + Duration::from_secs(60);
         loop {
             match w.try_recv() {
-                Some(Update::Progress { .. }) => {}
+                Some(Update::Progress { .. } | Update::LoadingModel { .. }) => {}
                 Some(u) => return u,
                 None if std::time::Instant::now() > deadline => panic!("timed out"),
                 None => std::thread::sleep(Duration::from_millis(5)),
@@ -807,7 +879,7 @@ mod tests {
         w.cancel(0);
         std::thread::sleep(Duration::from_millis(300));
         while let Some(u) = w.try_recv() {
-            assert!(matches!(u, Update::Progress { .. }), "a cancelled job delivers nothing");
+            assert!(matches!(u, Update::Progress { .. } | Update::LoadingModel { .. }), "a cancelled job delivers nothing");
         }
     }
 
@@ -823,6 +895,27 @@ mod tests {
 
     /// Needs ONNX Runtime at run time (with `stems-onnx-dynamic`, set ORT_DYLIB_PATH).
     #[cfg(any(feature = "stems-onnx", feature = "stems-onnx-dynamic"))]
+    #[cfg(any(feature = "stems-onnx", feature = "stems-onnx-dynamic"))]
+    #[test]
+    fn the_model_loads_once_and_says_so() {
+        let model = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../stems-core/tests/data/demucs_test.onnx"));
+        let mut cache = DemucsCache::default();
+        assert!(cache.needs_load(&model, 2), "nothing loaded yet");
+        cache.separate(&model, 2, &track(64, 0.1).audio.frames, 44_100, &mut |_| true).unwrap();
+        assert!(!cache.needs_load(&model, 2), "kept");
+        assert!(cache.needs_load(&model, 3), "other threads: loaded again");
+        // The worker says it's loading before the first track's stems.
+        let w = StemsWorker::new();
+        w.request(req(track(65, 1.0), Some(model), false, None));
+        let first = loop {
+            match w.try_recv() {
+                Some(u) => break u,
+                None => std::thread::sleep(Duration::from_millis(5)),
+            }
+        };
+        assert!(matches!(first, Update::LoadingModel { track_id: 65, .. }));
+    }
+
     #[test]
     fn demucs_stems_become_prepared_stems() {
         let dir = std::env::temp_dir().join(format!("dj-demucs-test-{}", std::process::id()));

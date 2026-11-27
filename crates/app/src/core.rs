@@ -72,6 +72,8 @@ pub struct DeckUi {
     pub stems_source: Option<String>,
     /// Why this track has no stems (no HT-Demucs model, or it failed).
     pub stems_missing: Option<&'static str>,
+    /// The separator's model is loading before this track's stems (see `Update::LoadingModel`).
+    pub stems_model_loading: bool,
     /// `LoopInOut` set a loop start and is waiting for the end.
     pub loop_in_pending: bool,
     /// Per-stem loudness of the loaded track, for the waveform lanes (once separated).
@@ -626,6 +628,7 @@ impl Core {
         self.stem_unmute[d] = [None; 4];
         self.stems.cancel(d);
         self.decks[d].stems_progress = None;
+        self.decks[d].stems_model_loading = false;
         self.decks[d].stems_source = None;
         self.decks[d].stems_missing = None;
         self.decks[d].stem_wave = None;
@@ -663,6 +666,7 @@ impl Core {
         let tempo_from_beats = self.decks[d].info.as_ref().is_some_and(|i| i.grid_source == Some(GridSource::Detected));
         // (Progress shows once separation starts; prepared stems just arrive.)
         self.decks[d].stems_progress = None;
+        self.decks[d].stems_model_loading = false;
         self.decks[d].stems_missing = None;
         self.stems.request(crate::stems::Request {
             deck: d,
@@ -708,6 +712,7 @@ impl Core {
         self.decks[d].track = None;
         self.stems.cancel(d);
         self.decks[d].stems_progress = None;
+        self.decks[d].stems_model_loading = false;
         self.decks[d].stems_source = None;
         self.decks[d].stems_missing = None;
         self.decks[d].stem_wave = None;
@@ -765,9 +770,14 @@ impl Core {
         match u {
             Update::Progress { deck, track_id, fraction } if current(self, deck, track_id) => {
                 self.decks[deck].stems_progress = Some(fraction);
+                self.decks[deck].stems_model_loading = false;
+            }
+            Update::LoadingModel { deck, track_id } if current(self, deck, track_id) => {
+                self.decks[deck].stems_model_loading = true;
             }
             Update::Done { deck, track_id, stems, wave, source, cues } if current(self, deck, track_id) => {
                 self.decks[deck].stems_progress = None;
+                self.decks[deck].stems_model_loading = false;
                 self.decks[deck].stem_wave = Some(wave);
                 self.decks[deck].stems_source = Some(source);
                 self.send(Command::AttachStems { deck: deck as u8, stems });
@@ -797,6 +807,7 @@ impl Core {
             }
             Update::NoStems { deck, track_id, error, cues } if current(self, deck, track_id) => {
                 self.decks[deck].stems_progress = None;
+                self.decks[deck].stems_model_loading = false;
                 self.decks[deck].stems_missing = Some(if error.is_some() { "stems failed" } else { "no stems: get HT-Demucs" });
                 if let Some(e) = error {
                     self.log(format!("Deck {} stems: {e}", deck + 1));

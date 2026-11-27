@@ -4,11 +4,14 @@
 //! Every stem comes back as its own buffer, sample-aligned with the input.
 
 #[cfg(any(feature = "onnx", feature = "onnx-dynamic"))]
+mod coreml;
+#[cfg(any(feature = "onnx", feature = "onnx-dynamic"))]
 pub mod demucs;
 pub mod offline;
 #[cfg(any(feature = "onnx", feature = "onnx-dynamic"))]
 mod onnx;
 mod resample;
+pub mod spec;
 pub mod structure;
 
 pub use offline::ModelError;

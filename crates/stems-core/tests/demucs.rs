@@ -69,11 +69,11 @@ fn the_gpu_option_runs_where_it_can_and_says_where() {
     };
     let mut model =
         DemucsModel::from_files(&[format!("{DIR}/demucs_test.onnx")], &options).unwrap();
-    // On an accelerator (the Neural Engine with CoreML, the GPU with DirectML), or on the CPU
+    // On an accelerator (Core ML, the GPU with DirectML), or on the CPU
     // with the reason it isn't (none on this system, or the model doesn't run there).
     match model.device() {
         Device::Accelerator(name) => {
-            assert!(["Neural Engine (CoreML)", "GPU (DirectML)"].contains(name))
+            assert!(["Core ML", "GPU (DirectML)"].contains(name))
         }
         Device::Cpu(why) => assert!(
             why.as_deref().is_some_and(|w| !w.is_empty()),
@@ -83,12 +83,12 @@ fn the_gpu_option_runs_where_it_can_and_says_where() {
     }
     let shown = model.device().to_string();
     assert!(
-        shown == "Neural Engine (CoreML)"
+        shown == "Core ML"
             || shown == "GPU (DirectML)"
             || shown.starts_with("CPU (no acceleration: "),
         "{shown}"
     );
-    // The same stems either way (the Neural Engine computes in half precision).
+    // The same stems either way (the GPU may compute in half precision).
     for n in [3456, 999] {
         check_within(&mut model, n, 2e-3);
     }
@@ -174,4 +174,58 @@ fn other_sample_rates_and_cancelling() {
         r,
         Err(stems_core::offline::OfflineError::Cancelled)
     ));
+}
+
+/// HT-Demucs's network alone (`DEMUCS_NETWORK`: `tools/htdemucs_coreml/convert.py --onnx`, or
+/// on macOS its Core ML model) with the spectrogram done in Rust separates as the whole model
+/// does (`DEMUCS_MODEL`, Mixxx's), on `DEMUCS_MIX` (interleaved f32 stereo, 44.1 kHz).
+/// `cargo test -p stems-core --features onnx -- --ignored network`
+#[test]
+#[ignore]
+fn the_network_with_our_spectrogram_separates_as_the_whole_model() {
+    let var = |k: &str| std::env::var(k).unwrap_or_else(|_| panic!("set {k}"));
+    let bytes = std::fs::read(var("DEMUCS_MIX")).unwrap();
+    let mix: Vec<[f32; 2]> = bytes
+        .as_chunks::<4>()
+        .0
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|[l, r]| [f32::from_le_bytes(*l), f32::from_le_bytes(*r)])
+        .collect();
+    let options = OnnxOptions {
+        intra_threads: 4,
+        ..OnnxOptions::default()
+    };
+    let run = |path: String| {
+        let mut m = DemucsModel::from_files(&[&path], &options).unwrap();
+        let t = std::time::Instant::now();
+        let s = m.separate(&mix, 44_100, &mut |_| true).unwrap();
+        eprintln!(
+            "{path} on {}: {:.1} s",
+            m.device(),
+            t.elapsed().as_secs_f64()
+        );
+        s
+    };
+    let whole = run(var("DEMUCS_MODEL"));
+    let net = run(var("DEMUCS_NETWORK"));
+    let min_db: f64 = std::env::var("MIN_DB")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(30.0);
+    let mut worst = f64::INFINITY;
+    for (i, (a, b)) in whole.iter().zip(net.iter()).enumerate() {
+        let (mut sig, mut noise) = (0.0f64, 0.0f64);
+        for (x, y) in a.iter().zip(b.iter()) {
+            for c in 0..2 {
+                sig += (x[c] as f64).powi(2);
+                noise += (x[c] as f64 - y[c] as f64).powi(2);
+            }
+        }
+        let snr = 10.0 * (sig / noise.max(1e-20)).log10();
+        eprintln!("stem {i}: {snr:.1} dB");
+        worst = worst.min(snr);
+    }
+    assert!(worst > min_db, "worst stem: {worst:.1} dB");
 }
