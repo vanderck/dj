@@ -4755,9 +4755,19 @@ pub(crate) mod tests {
         assert_eq!(c.fader_mix_waiting_out(), None);
         assert!((c.session.channels[0].params.volume - 0.8).abs() < 0.01);
         let at = c.snap.clock.beat;
+        // Nothing moves before the next bar line: the fade starts on it.
+        let bar = start + ((c.mix_beat() - start) / 4.0).ceil() * 4.0;
+        let eq = |c: &Core| c.session.channels[0].params.eq;
+        let eq0 = eq(&c);
+        while c.mix_beat() < bar - 0.3 {
+            pump(&mut e, &mut c);
+            assert!(c.snap.decks[0].stem_gains.iter().all(|g| *g == 1.0), "before the bar: {:?}", c.snap.decks[0].stem_gains);
+            assert_eq!(eq(&c), eq0, "before the bar");
+        }
         run_mix(&mut e, &mut c, |_, _| {});
         let took = c.snap.clock.beat - at;
-        assert!((15.0..19.0).contains(&took), "4 bars: {took} beats");
+        // From the next bar line: 4 bars, after up to a bar's wait.
+        assert!((15.0..21.0).contains(&took), "4 bars: {took} beats");
         assert!(!c.snap.decks[0].playing);
         assert_eq!(c.session.channels[0].params.volume, 0.0);
         assert!((c.session.channels[1].params.volume - 0.8).abs() < 0.01, "still its fader");
