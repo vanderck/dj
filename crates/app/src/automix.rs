@@ -1727,19 +1727,28 @@ impl Core {
         let blend = m.plan.blend.clone();
         let bp = p.min(1.0) * len / 4.0; // bar position in the mix
         let bars_n = len / 4.0;
-        // Fader mix: the old track's half runs over 4 bars from the beat after its fader started
+        // Fader mix: the old track's half runs over 4 bars from the bar after its fader started
         // down (from the plan's first move on it), a fade before the fader reaches the bottom;
         // until then it plays on in full. Otherwise both halves run together.
         let first_out = match (how, &blend) {
-            (MixHow::Stems, Some(b)) => b.out_at.iter().flatten().copied().fold(bars_n - 1.0, f64::min).max(0.0),
+            // (A ramp starts before its stem is out; the bass and vocals switch where they're out.)
+            (MixHow::Stems, Some(b)) => (0..4)
+                .filter_map(|s| b.out_at[s].map(|at| if s == BASS || s == VOCALS { at } else { at - b.out_ramp[s] }))
+                .fold(bars_n - 1.0, f64::min)
+                .max(0.0),
             _ => 0.0,
         };
         let bp_out = match (m.fader && !finish, m.out_from) {
             (false, _) => bp,
             (true, None) => -1.0,
             (true, Some(t)) => {
-                let t0 = t.ceil();
-                (first_out + (beat - t0).max(0.0) / FADER_OUT_BEATS * (bars_n - first_out)).min(bars_n)
+                // The next bar line of the mix (its bars line up with the old track's).
+                let t0 = start + ((t - start) / 4.0).ceil() * 4.0;
+                if beat < t0 {
+                    -1.0
+                } else {
+                    (first_out + (beat - t0) / FADER_OUT_BEATS * (bars_n - first_out)).min(bars_n)
+                }
             }
         };
         let po = bp_out / bars_n; // the old track's half, 0..1
