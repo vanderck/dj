@@ -188,6 +188,9 @@ pub struct AutoMix {
     /// The new vocals have been let in (their stem silent long enough first: see
     /// [`VOCAL_IN_GAP_SECS`]); until then they stay out whatever the plan says.
     vocals_let_in: bool,
+    /// The old vocals have gone (their stem silent long enough first); until then they stay,
+    /// and the new ones wait for them.
+    old_vocals_out: bool,
 }
 
 /// After a Now mix: bring the new track's vocals back where its next vocal phrase starts.
@@ -1167,6 +1170,7 @@ impl Core {
             out_from: None,
             out_ref: self.fader_hw[o].unwrap_or(1.0),
             vocals_let_in: false,
+            old_vocals_out: false,
             plan,
         };
         // Its key fitted to the playing track's, while it's still silent.
@@ -1835,7 +1839,24 @@ impl Core {
                     Some(b) => b.levels(x, vocals_out),
                     None => stems_at((x / bars_n).clamp(0.0, 1.0), vocals_out, true),
                 };
-                let (mut si, so) = (at(bp).0, at(bp_out).1);
+                let (mut si, mut so) = (at(bp).0, at(bp_out).1);
+                // The old vocals go only where their stem has been silent for over a second too
+                // (between two lines, never mid-word); until then the new ones wait (never two
+                // voices). Once gone, they stay gone.
+                // (Up to half a beat early, still in the pause: a cut planned where the next line
+                // starts would find the singer back by the time it's due.)
+                let due = so[VOCALS] < 1.0 || (bp_out >= 0.0 && at(bp_out + 0.125).1[VOCALS] < 1.0);
+                if self.automix.as_ref().unwrap().old_vocals_out {
+                    so[VOCALS] = 0.0;
+                } else if due {
+                    if self.vocals_quiet(o) {
+                        so[VOCALS] = 0.0;
+                        self.automix.as_mut().unwrap().old_vocals_out = true;
+                    } else {
+                        so[VOCALS] = 1.0;
+                        si[VOCALS] = 0.0;
+                    }
+                }
                 if fader {
                     // Two halves: the new bass and vocals wait until the old ones have gone (never
                     // two basses, never two voices).
