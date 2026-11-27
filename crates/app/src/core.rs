@@ -4692,7 +4692,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn faders_start_each_half_of_a_mix() {
+    fn the_faders_drive_each_half_of_a_mix() {
         let (mut e, mut c, _config) = core();
         mix_setup(&mut e, &mut c);
         c.settings.fader_mix = true;
@@ -4706,43 +4706,65 @@ pub(crate) mod tests {
         let fader = |c: &mut Core, n: u8, v: f32| c.handle_midi(&[0xb0, n, (v * 127.0).round() as u8]);
         fader(&mut c, 7, 0.9);
         assert!(c.automix.is_none(), "the playing deck's fader is just its volume");
-        // Deck 2's fader up from the bottom, in the small steps a real one sends: a mix, at the
-        // best moment; the fader only triggers it.
+        // Deck 2's fader up from the bottom, in the small steps a real one sends: a mix, from the
+        // next phrase line (at most 4 bars away).
         for step in 0..=10u8 {
             c.handle_midi(&[0xb0, 8, step]);
         }
-        fader(&mut c, 8, 0.7);
-        let (start, len) = c.automix.as_ref().map(|m| (m.plan.start_beat, m.plan.length_beats)).expect("a mix");
+        fader(&mut c, 8, 0.1);
+        let start = c.automix.as_ref().map(|m| m.plan.start_beat).expect("a mix");
         assert_eq!(c.automix.as_ref().map(|m| (m.plan.incoming, m.plan.outgoing)), Some((1, 0)));
-        assert_eq!(c.session.channels[1].params.volume, 0.0, "dj sets the volume, not the fader");
+        assert!(start - c.mix_beat() <= 4.0 * 4.0 + 5.0, "soon: {start} {}", c.mix_beat());
+        assert_eq!(c.session.channels[1].params.volume, 0.0, "silent until it starts");
         assert_eq!(c.fader_mix_waiting_out(), Some(0));
         // No Auto-DJ in this mode.
         c.set_autodj(Some(vec![PathBuf::from("/nowhere.wav")]));
         assert!(c.autodj.is_none());
-        // The new track comes in; the old one plays on in full, and the mix waits for its fader.
-        assert!(start + len + 8.0 < 170.0, "room before the old track ends: {start} {len}");
         let old_volume = c.session.channels[0].params.volume;
-        let stems = c.automix.as_ref().is_some_and(|m| m.plan.how == crate::core::automix::MixHow::Stems);
         assert!(old_volume > 0.85, "its fader set it: {old_volume}");
-        let mut blocks = 0;
-        while c.mix_beat() < start + len + 4.0 {
-            pump(&mut e, &mut c);
-            blocks += 4;
-            assert!(blocks < 48000 / 512 * 300, "never got there");
-            assert_eq!(c.session.channels[0].params.volume, old_volume, "the old volume untouched");
-            assert!(c.snap.decks[0].stem_gains.iter().all(|g| *g == 1.0), "the old stems untouched: {:?}", c.snap.decks[0].stem_gains);
-            if stems {
-                // Never two basses or two voices: the new ones wait for the old ones to go.
-                let g = c.snap.decks[1].stem_gains;
-                assert_eq!((g[1], g[2]), (0.0, 0.0), "{g:?}");
+        let stems = c.automix.as_ref().is_some_and(|m| m.plan.how == crate::core::automix::MixHow::Stems);
+        let pump_to = |e: &mut dj_engine::Engine, c: &mut Core, beat: f64| {
+            let mut blocks = 0;
+            while c.mix_beat() < beat {
+                pump(e, c);
+                blocks += 4;
+                assert!(blocks < 48000 / 512 * 300, "never got there");
+                assert_eq!(c.session.channels[0].params.volume, old_volume, "the old volume untouched");
+                assert!(c.snap.decks[0].stem_gains.iter().all(|g| *g == 1.0), "the old stems untouched: {:?}", c.snap.decks[0].stem_gains);
+                if stems {
+                    // Never two basses or two voices: the new ones wait for the old ones to go.
+                    let g = c.snap.decks[1].stem_gains;
+                    assert_eq!((g[1], g[2]), (0.0, 0.0), "{g:?}");
+                }
             }
-        }
-        assert!(c.automix.is_some(), "waits for the old deck's fader");
+        };
+        // Started, its fader barely up: barely in.
+        pump_to(&mut e, &mut c, start + 2.0);
+        let v = c.session.channels[1].params.volume;
+        assert!(v > 0.0 && v < 0.5, "as far as its fader: {v}");
+        // Its fader at the top: fully in, straight away, however long the plan's mix.
+        fader(&mut c, 8, 1.0);
+        pump_to(&mut e, &mut c, start + 4.0);
         assert_eq!(c.session.channels[1].params.volume, 1.0, "the new track in");
-        // Its fader down: dj takes the old track out on the mix's bars, and the mix ends.
-        fader(&mut c, 7, 0.75);
+        // The old track plays on in full as long as its fader stays up.
+        pump_to(&mut e, &mut c, start + 40.0);
+        assert!(c.automix.is_some(), "waits for the old deck's fader");
+        // Its fader halfway down: on its way out, not gone.
+        fader(&mut c, 7, 0.45);
         assert_eq!(c.fader_mix_waiting_out(), None);
+        for _ in 0..4 {
+            pump(&mut e, &mut c);
+        }
+        assert!(c.automix.is_some());
+        if stems {
+            let g = c.snap.decks[0].stem_gains;
+            assert!(g.iter().any(|g| *g < 1.0), "partly out: {g:?}");
+        }
+        // At the bottom: gone, within a beat or so.
+        fader(&mut c, 7, 0.0);
+        let at = c.mix_beat();
         run_mix(&mut e, &mut c, |_, _| {});
+        assert!(c.mix_beat() - at < 2.0, "out fast: {} beats", c.mix_beat() - at);
         assert!(!c.snap.decks[0].playing);
         assert_eq!(c.session.channels[0].params.volume, 0.0);
         assert_eq!(c.session.channels[1].params.volume, 1.0);
