@@ -4,6 +4,7 @@
 mod browser;
 pub(crate) mod deck;
 mod fx;
+mod keyboard;
 mod mixer;
 mod settings_ui;
 pub mod skin;
@@ -68,6 +69,9 @@ pub struct UiState {
     pub lane_zoom: f32,
     /// What Now and Best would do, shown in the Mix popup (worked out again every second).
     pub mix_preview: Option<deck::MixPreview>,
+    /// The large browser on top of the app, and the touch keyboard in it.
+    pub browser_big: bool,
+    pub keyboard_open: bool,
 }
 
 impl Default for UiState {
@@ -98,6 +102,8 @@ impl Default for UiState {
             focus: [0, 1],
             lane_zoom: 1.0,
             mix_preview: None,
+            browser_big: false,
+            keyboard_open: false,
         }
     }
 }
@@ -279,7 +285,12 @@ impl eframe::App for App {
             mixer::show(ui, &mut self.core, &mut self.ui, mixer);
 
             let br = Rect::from_min_max(Pos2::new(area.left(), area.bottom() - browser_h), area.right_bottom());
-            browser::show(ui, &mut self.core, &mut self.ui, br);
+            if self.ui.browser_big {
+                // (Shown large, on top: see `browser_overlay`.)
+                skin::card(ui, br);
+            } else {
+                browser::show(ui, &mut self.core, &mut self.ui, br, false);
+            }
 
             // MIDI learn hint.
             if self.core.learn {
@@ -295,6 +306,9 @@ impl eframe::App for App {
             }
         });
 
+        if self.ui.browser_big {
+            browser_overlay(&ctx, &mut self.core, &mut self.ui);
+        }
         fx::windows(&ctx, &mut self.core, &mut self.ui);
         settings_ui::windows(&ctx, &mut self.core, &mut self.ui);
         load_alert(&ctx, &mut self.core);
@@ -365,6 +379,69 @@ fn load_alert(ctx: &egui::Context, core: &mut Core) {
     }
 }
 
+/// The browser large, on top of the app: as high as you drag its top edge (a share of the
+/// window), its text as large as you set it (A− / A+), the touch keyboard under it when the
+/// search field was tapped (Settings). Closes with its button or Esc.
+fn browser_overlay(ctx: &egui::Context, core: &mut Core, st: &mut UiState) {
+    if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        st.browser_big = false;
+        st.keyboard_open = false;
+        return;
+    }
+    let screen = ctx.content_rect();
+    let s = core.settings.browser_big_scale.clamp(1.0, 2.5);
+    let frac = core.settings.browser_big_height.clamp(0.3, 1.0);
+    let h = screen.height() * frac;
+    let id = egui::Id::unique("browser_big");
+    let layer = egui::LayerId::new(egui::Order::Foreground, id);
+    // Drawn at its size divided by the text size, then scaled up (input too).
+    ctx.set_transform_layer(layer, egui::emath::TSTransform::new(Vec2::new(screen.left(), screen.bottom() - h), s));
+    let size = Vec2::new(screen.width(), h) / s;
+    egui::Area::new(id).order(egui::Order::Foreground).fixed_pos(Pos2::ZERO).constrain(false).show(ctx, |ui| {
+        let full = Rect::from_min_size(Pos2::ZERO, size);
+        ui.set_clip_rect(full);
+        ui.allocate_rect(full, egui::Sense::hover());
+        ui.painter().rect_filled(full, CornerRadius::ZERO, BG);
+        ui.painter().line_segment([full.left_top(), full.right_top()], egui::Stroke::new(2.0, BORDER));
+        // Its top: drag to resize; text size; close.
+        let head = Rect::from_min_size(full.min, Vec2::new(size.x, 28.0));
+        let bw = 44.0;
+        let close = Rect::from_min_size(Pos2::new(head.right() - 8.0 - 70.0, head.top() + 3.0), Vec2::new(70.0, 22.0));
+        let plus = Rect::from_min_size(Pos2::new(close.left() - 8.0 - bw, close.top()), Vec2::new(bw, 22.0));
+        let minus = Rect::from_min_size(Pos2::new(plus.left() - 6.0 - bw, close.top()), Vec2::new(bw, 22.0));
+        let grip = Rect::from_min_max(head.min, Pos2::new(minus.left() - 8.0, head.bottom()));
+        let drag = ui.allocate_rect(grip, egui::Sense::drag()).on_hover_cursor(egui::CursorIcon::ResizeVertical);
+        if drag.dragged() {
+            let dy = drag.drag_delta().y * s;
+            core.settings.browser_big_height = ((h - dy) / screen.height()).clamp(0.3, 1.0);
+        }
+        let p = ui.painter();
+        p.rect_filled(Rect::from_center_size(Pos2::new(grip.center().x, grip.center().y), Vec2::new(60.0, 4.0)), CornerRadius::same(2), TEXT_DIM);
+        p.text(Pos2::new(grip.left() + 12.0, grip.center().y), Align2::LEFT_CENTER, "Drag to resize", sans(11.0), TEXT_DIM);
+        if skin::button(ui, minus, "A−", skin::Style::Dark, bold(12.0)).clicked() {
+            core.settings.browser_big_scale = (s - 0.1).max(1.0);
+        }
+        if skin::button(ui, plus, "A+", skin::Style::Dark, bold(12.0)).clicked() {
+            core.settings.browser_big_scale = (s + 0.1).min(2.5);
+        }
+        if skin::button(ui, close, "Close", skin::Style::Light, bold(12.0)).clicked() {
+            st.browser_big = false;
+            st.keyboard_open = false;
+        }
+        // The touch keyboard (Settings), when the search field was tapped.
+        let kb_h = if st.keyboard_open && core.settings.touch_keyboard { (size.y * 0.42).min(260.0) } else { 0.0 };
+        let body = Rect::from_min_max(Pos2::new(full.left(), head.bottom()), Pos2::new(full.right(), full.bottom() - kb_h));
+        browser::show(ui, core, st, body.shrink(6.0), true);
+        if kb_h > 0.0 {
+            let kr = Rect::from_min_max(Pos2::new(full.left(), full.bottom() - kb_h), full.max).shrink(8.0);
+            let layout = keyboard::layout(core.settings.keyboard_layout);
+            if keyboard::show(ui, kr, &mut core.browser_query, layout) == keyboard::Action::Hide {
+                st.keyboard_open = false;
+            }
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use eframe::egui;
@@ -376,6 +453,75 @@ mod tests {
         }
         let mut out = ctx.run_ui(input, |ui| super::load_alert(ui.ctx(), c));
         out.textures_delta.clear(); // (no GPU here to upload them to)
+    }
+
+    /// A frame of the large browser in a 1280×800 window, with these events.
+    fn overlay_frame(ctx: &egui::Context, c: &mut crate::core::Core, st: &mut super::UiState, events: Vec<egui::Event>) {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 800.0))),
+            events,
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| super::browser_overlay(ui.ctx(), c, st));
+        out.textures_delta.clear();
+    }
+
+    /// A tap at `pos` (window coordinates).
+    fn tap(ctx: &egui::Context, c: &mut crate::core::Core, st: &mut super::UiState, pos: egui::Pos2) {
+        let press = |pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
+        overlay_frame(ctx, c, st, vec![egui::Event::PointerMoved(pos)]);
+        overlay_frame(ctx, c, st, vec![press(true)]);
+        overlay_frame(ctx, c, st, vec![press(false)]);
+        overlay_frame(ctx, c, st, vec![]);
+    }
+
+    /// Where a point of the large browser (its own coordinates, before the text size scales it)
+    /// is in the window: 1280×800, 70 % high, text ×1.5 (the defaults).
+    fn on_screen(p: egui::Pos2) -> egui::Pos2 {
+        egui::pos2(p.x * 1.5, 800.0 - 560.0 + p.y * 1.5)
+    }
+
+    #[test]
+    fn the_large_browser_closes_with_its_button() {
+        let (_e, mut c, _config) = crate::core::tests::core();
+        let ctx = egui::Context::default();
+        super::skin::install_fonts(&ctx);
+        let mut st = super::UiState { browser_big: true, ..Default::default() };
+        // (A window's first frame only sizes it.)
+        overlay_frame(&ctx, &mut c, &mut st, vec![]);
+        overlay_frame(&ctx, &mut c, &mut st, vec![]);
+        // Close: top right (its size: 1280 / 1.5 wide).
+        let w = 1280.0 / 1.5;
+        tap(&ctx, &mut c, &mut st, on_screen(egui::pos2(w - 8.0 - 35.0, 14.0)));
+        assert!(!st.browser_big, "closed");
+        // Esc closes it too.
+        st.browser_big = true;
+        overlay_frame(&ctx, &mut c, &mut st, vec![]);
+        overlay_frame(&ctx, &mut c, &mut st, vec![egui::Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() }]);
+        assert!(!st.browser_big);
+    }
+
+    #[test]
+    fn the_touch_keyboard_types_into_the_search() {
+        let (_e, mut c, _config) = crate::core::tests::core();
+        c.settings.touch_keyboard = true;
+        c.settings.keyboard_layout = crate::settings::KeyboardLayout::Azerty;
+        let ctx = egui::Context::default();
+        super::skin::install_fonts(&ctx);
+        let mut st = super::UiState { browser_big: true, keyboard_open: true, ..Default::default() };
+        overlay_frame(&ctx, &mut c, &mut st, vec![]);
+        overlay_frame(&ctx, &mut c, &mut st, vec![]);
+        let size = egui::vec2(1280.0, 560.0) / 1.5;
+        let kb_h = (size.y * 0.42).min(260.0);
+        let kr = egui::Rect::from_min_max(egui::pos2(0.0, size.y - kb_h), size.to_pos2()).shrink(8.0);
+        let keys = super::keyboard::keys(kr, crate::settings::KeyboardLayout::Azerty);
+        let at = |k: &str| on_screen(keys.iter().find(|(l, _)| l == k).expect("a key").1.center());
+        for k in ["d", "j", "space", "a", "z", "Back"] {
+            tap(&ctx, &mut c, &mut st, at(k));
+        }
+        assert_eq!(c.browser_query, "dj a", "typed (AZERTY: a and z where they are)");
+        tap(&ctx, &mut c, &mut st, at("Hide"));
+        assert!(!st.keyboard_open && st.browser_big, "hidden, the browser stays");
     }
 
     #[test]

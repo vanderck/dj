@@ -147,7 +147,8 @@ fn track_menu(ui: &mut Ui, core: &mut Core, path: &std::path::Path) {
     }
 }
 
-pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect) {
+/// The browser in `rect`: at the bottom of the app, or `big` (on top of it, larger).
+pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect, big: bool) {
     ui.allocate_rect(rect, Sense::hover());
     card(ui, rect);
     let r = rect.shrink2(Vec2::new(16.0, 12.0));
@@ -160,14 +161,28 @@ pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect) {
     ui.painter().rect_filled(search_r, CornerRadius::same((bar_h / 2.0) as u8), WELL);
     ui.painter().rect_stroke(search_r, CornerRadius::same((bar_h / 2.0) as u8), egui::Stroke::new(1.0, BORDER), egui::StrokeKind::Inside);
     let mut child = ui.new_child(UiBuilder::new().max_rect(search_r.shrink2(Vec2::new(14.0, 7.0))));
-    child.add(
+    let field = child.add(
         egui::TextEdit::singleline(&mut core.browser_query)
             .frame(egui::Frame::NONE)
             .font(sans(14.0))
             .hint_text("Artist, title, label, 8A, Am")
             .desired_width(search_r.width() - 28.0),
     );
+    // The touch keyboard (Settings): the search field tapped opens it, in the large browser.
+    if core.settings.touch_keyboard && (field.clicked() || field.gained_focus()) {
+        st.browser_big = true;
+        st.keyboard_open = true;
+    }
     let mut x = search_r.right() + 12.0;
+    // The browser large, on top of the app.
+    if !big {
+        let w = pill_width(ui, "Large", 13.0);
+        let lr = Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, bar_h));
+        if pill(ui, lr, "Large", false).on_hover_text("The browser large, on top of the app (drag its top edge to size it, A− / A+ for the text; Esc closes it)").clicked() {
+            st.browser_big = true;
+        }
+        x += w + 8.0;
+    }
     for (label, hist) in [("All tracks", false), ("History", true)] {
         let w = pill_width(ui, label, 13.0);
         let pr = Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, bar_h));

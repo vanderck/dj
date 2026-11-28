@@ -124,6 +124,16 @@ impl Default for AudioSettings {
     }
 }
 
+/// The touch keyboard's layout: the system's (Auto), or one chosen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum KeyboardLayout {
+    #[default]
+    Auto,
+    Qwerty,
+    Azerty,
+    Qwertz,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum KeyNotation {
     #[default]
@@ -156,6 +166,13 @@ pub struct Settings {
     /// (Before: one setting for both; read once into the two above.)
     #[serde(skip_serializing)]
     pub fader_mix: bool,
+    /// The large browser (on top of the app): its height (a share of the window's) and its
+    /// text size (times the bottom browser's).
+    pub browser_big_height: f32,
+    pub browser_big_scale: f32,
+    /// A touch keyboard under the search field (a touch screen), in this layout.
+    pub touch_keyboard: bool,
+    pub keyboard_layout: KeyboardLayout,
     pub tape_stop_ms: f64,
     pub default_loop_beats: f64,
     pub skip_beats: f64,
@@ -272,6 +289,10 @@ impl Default for Settings {
             fader_mix_in: false,
             fader_mix_out: false,
             fader_mix: false,
+            browser_big_height: 0.7,
+            browser_big_scale: 1.5,
+            touch_keyboard: false,
+            keyboard_layout: KeyboardLayout::Auto,
             tape_stop_ms: 25.0,
             default_loop_beats: 4.0,
             skip_beats: 16.0,
