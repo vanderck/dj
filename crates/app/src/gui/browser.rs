@@ -41,23 +41,58 @@ const COLS: [(Option<Col>, &str, f32, bool); 11] = [
     (None, "Load to", 0.065, false),
 ];
 
-/// The columns' widths (shares of the table) with the optional columns `shown`: a hidden one is
-/// 0, its width going to Title and Artist (the key column narrower without the musical name).
-pub fn column_widths(shown: crate::settings::BrowserColumns) -> [f32; 11] {
-    let mut w: [f32; 11] = std::array::from_fn(|i| COLS[i].2);
-    if !shown.musical_key {
-        w[4] = 0.05;
+/// The columns' widths (points) in a table `width` wide, with the optional columns `shown` and
+/// `decks` Load-to buttons: each column as wide as what it shows (whatever the table's width,
+/// so the large browser's numbers aren't cut off), Title and Artist sharing the rest.
+pub fn column_widths(shown: crate::settings::BrowserColumns, width: f32, decks: usize) -> [f32; 11] {
+    let on = |b: bool, w: f32| if b { w } else { 0.0 };
+    let mut w = [
+        28.0,                              // deck badge / prepared dot
+        0.0,                               // Title
+        0.0,                               // Artist
+        70.0,                              // BPM
+        if shown.musical_key { 96.0 } else { 52.0 }, // Key
+        58.0,                              // fits: a tick, ±1 st, Boost
+        on(shown.energy, 96.0),
+        on(shown.vocals, 60.0),
+        on(shown.time, 58.0),
+        on(shown.genre, 130.0),
+        decks as f32 * 30.0 + 16.0,        // Load to
+    ];
+    let free = (width - w.iter().sum::<f32>()).max(120.0);
+    let (t, a) = (COLS[1].2, COLS[2].2);
+    w[1] = free * t / (t + a);
+    w[2] = free * a / (t + a);
+    w
+}
+
+/// `s` shortened with "…" to fit `max` points in `font`.
+fn fit_text(ui: &Ui, s: &str, font: &egui::FontId, max: f32) -> String {
+    let width = |t: &str| ui.painter().layout_no_wrap(t.to_string(), font.clone(), TEXT).size().x;
+    if width(s) <= max {
+        return s.to_string();
     }
-    for (i, on) in [(6, shown.energy), (7, shown.vocals), (8, shown.time), (9, shown.genre)] {
-        if !on {
-            w[i] = 0.0;
+    let chars: Vec<char> = s.chars().collect();
+    let (mut lo, mut hi) = (0, chars.len());
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        let t: String = chars[..mid].iter().collect::<String>().trim_end().to_string() + "…";
+        if width(&t) <= max {
+            lo = mid;
+        } else {
+            hi = mid - 1;
         }
     }
-    let free = 1.0 - w.iter().sum::<f32>();
-    let (t, a) = (COLS[1].2, COLS[2].2);
-    w[1] += free * t / (t + a);
-    w[2] += free * a / (t + a);
-    w
+    chars[..lo].iter().collect::<String>().trim_end().to_string() + "…"
+}
+
+/// A tick (a key that mixes), in `c`'s left part.
+fn tick(p: &egui::Painter, c: Rect, color: Color32) {
+    let h = 12.0;
+    let o = Pos2::new(c.left() + 2.0, c.center().y);
+    let pts = [o + Vec2::new(0.0, 0.0), o + Vec2::new(h * 0.38, h * 0.38), o + Vec2::new(h, -h * 0.5)];
+    p.line_segment([pts[0], pts[1]], egui::Stroke::new(2.4, color));
+    p.line_segment([pts[1], pts[2]], egui::Stroke::new(2.4, color));
 }
 
 /// The right-click menu on the column titles: the optional columns, on or off.
@@ -424,7 +459,7 @@ pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect, big: boo
 
     let table = Rect::from_min_max(Pos2::new(r.left(), y + bar_h + 14.0), r.right_bottom());
     let shown = core.settings.browser_columns;
-    let widths: Vec<f32> = column_widths(shown).iter().map(|w| w * table.width()).collect();
+    let widths: Vec<f32> = column_widths(shown, table.width(), core.deck_count()).to_vec();
     let head = Rect::from_min_size(table.min, Vec2::new(table.width(), 22.0));
     // Right-click the column titles: which optional columns show.
     ui.allocate_rect(head, Sense::click()).context_menu(|ui| columns_menu(ui, core));
@@ -505,9 +540,12 @@ pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect, big: boo
                     p.text(c.left_center(), Align2::LEFT_CENTER, s, font, col);
                 }
             };
-            text(cell(1, x), &e.title, bold(14.0), TEXT, false);
+            // (Too long: shortened with "…", not cut off.)
+            let c1 = cell(1, x);
+            text(c1, &fit_text(ui, &e.title, &bold(14.0), c1.width()), bold(14.0), TEXT, false);
             x += widths[1];
-            text(cell(2, x), &e.artist, sans(14.0), TEXT, false);
+            let c2 = cell(2, x);
+            text(c2, &fit_text(ui, &e.artist, &sans(14.0), c2.width()), sans(14.0), TEXT, false);
             x += widths[2];
             text(cell(3, x), &e.bpm.map(|b| format!("{b:.2}")).unwrap_or_default(), mono(14.0), TEXT, true);
             x += widths[3];
@@ -522,14 +560,17 @@ pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect, big: boo
             if let (Some(k), Some(rk)) = (e.key, reference) {
                 // A key the mix shifts a semitone to fit: by how much.
                 let tag = match (rk.compat(k), key_fit(k, rk)) {
-                    (Compat::Same | Compat::Adjacent | Compat::Relative, _) => Some("Match"),
+                    (Compat::Same | Compat::Adjacent | Compat::Relative, _) => Some("✓"),
                     (Compat::Boost, _) => Some("Boost"),
                     (_, Some((_, 1))) => Some("+1 st"),
                     (_, Some((_, -1))) => Some("−1 st"),
                     _ => None,
                 };
-                if let Some(t) = tag {
-                    text(cell(5, x), t, bold(12.0), GREEN, false);
+                match tag {
+                    // A key that mixes: a tick (drawn: not every font has one).
+                    Some("✓") => tick(&painter, cell(5, x), GREEN),
+                    Some(t) => text(cell(5, x), t, bold(12.0), GREEN, false),
+                    None => {}
                 }
             }
             x += widths[5];
@@ -673,14 +714,37 @@ mod column_tests {
     use super::*;
 
     #[test]
+    fn long_titles_are_shortened_with_an_ellipsis() {
+        let ctx = egui::Context::default();
+        super::super::skin::install_fonts(&ctx);
+        let mut out = (String::new(), String::new(), 0.0, 0.0);
+        let mut o = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let long = "Brimful of Asha (The Norman Cook Remix) [Extended Version]";
+            let f = bold(14.0);
+            let short = fit_text(ui, long, &f, 160.0);
+            let w = ui.painter().layout_no_wrap(short.clone(), f.clone(), TEXT).size().x;
+            out = (short, fit_text(ui, "Muero", &f, 160.0), w, 0.0);
+        });
+        o.textures_delta.clear();
+        assert!(out.0.ends_with('…') && out.0.starts_with("Brimful"), "{}", out.0);
+        assert!(out.2 <= 160.0, "{}", out.2);
+        assert_eq!(out.1, "Muero", "short ones as they are");
+    }
+
+    #[test]
     fn hidden_columns_give_their_width_to_title_and_artist() {
-        let hidden = column_widths(Default::default());
-        let all = column_widths(crate::settings::BrowserColumns { musical_key: true, energy: true, vocals: true, time: true, genre: true });
-        for w in [hidden, all] {
-            assert!((w.iter().sum::<f32>() - 1.0).abs() < 1e-5);
+        let all_on = crate::settings::BrowserColumns { musical_key: true, energy: true, vocals: true, time: true, genre: true };
+        for width in [700.0, 1300.0, 2400.0] {
+            let hidden = column_widths(Default::default(), width, 4);
+            let all = column_widths(all_on, width, 4);
+            // (Every column on in a narrow table: Title and Artist keep a minimum, past its edge.)
+            for w in [hidden, all].into_iter().filter(|w| w[1] + w[2] > 120.5 || width > 1000.0) {
+                assert!((w.iter().sum::<f32>() - width).abs() < 1.0, "fills the table: {w:?}");
+            }
+            assert_eq!((hidden[6], hidden[7], hidden[8], hidden[9]), (0.0, 0.0, 0.0, 0.0));
+            assert!(hidden[1] > all[1] && hidden[2] > all[2], "{hidden:?}");
+            // BPM ("122.00") and the fit column keep their width whatever the table's.
+            assert_eq!((hidden[3], hidden[5]), (70.0, 58.0));
         }
-        assert_eq!(all, std::array::from_fn(|i| COLS[i].2), "all shown: as before");
-        assert_eq!((hidden[6], hidden[7], hidden[8], hidden[9]), (0.0, 0.0, 0.0, 0.0));
-        assert!(hidden[1] > all[1] + 0.1 && hidden[2] > all[2] + 0.07, "{hidden:?}");
     }
 }
