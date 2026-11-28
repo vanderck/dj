@@ -1255,8 +1255,8 @@ impl Core {
             started: std::time::Instant::now(),
             in_seen: false,
             old_over: false,
-            fader_in: self.settings.fader_mix_in && !self.external_routing(),
-            fader_out: self.settings.fader_mix_out && !self.external_routing(),
+            fader_in: self.fader_mix_in_on(),
+            fader_out: self.fader_mix_out_on(),
             out_from: None,
             out_ref: self.fader_hw[o].unwrap_or(1.0),
             vocals_let_in: false,
@@ -1363,13 +1363,20 @@ impl Core {
     /// Mix in with the fader (Settings): a waiting deck's fader coming up starts its mix (no Mix
     /// button), and is its volume.
     pub fn fader_mix_in_on(&self) -> bool {
-        self.settings.fader_mix_in && !self.external_routing()
+        self.settings.fader_mix_in && self.fader_mix_possible()
     }
 
     /// Mix out with the fader (Settings): a mix's old track plays on until its fader comes down,
     /// which takes it out.
     pub fn fader_mix_out_on(&self) -> bool {
-        self.settings.fader_mix_out && !self.external_routing()
+        self.settings.fader_mix_out && self.fader_mix_possible()
+    }
+
+    /// Mixing with the faders needs dj's own mixer (it sees the faders) and a controller's
+    /// channel volume faders mapped; until then dj works as standalone software (Mix buttons,
+    /// Auto-DJ), whatever the settings say.
+    pub fn fader_mix_possible(&self) -> bool {
+        !self.external_routing() && self.midi_volume_faders()
     }
 
     /// Fader mix: a controller's volume fader for channel `ch` moved to `v` (0..1). True when the

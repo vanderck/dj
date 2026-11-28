@@ -306,6 +306,11 @@ pub fn boot() -> (audio::AudioHost, Core) {
 
 fn headless() {
     let (_host, mut core) = boot();
+    // Headless, OSC is the only way in: on, whatever the setting.
+    if !core.settings.osc_enabled {
+        core.settings.osc_enabled = true;
+        core.start_osc();
+    }
     let root = core.settings.osc_root.clone();
     core.log(format!(
         "Headless: OSC on UDP {} (root {root}). Send {root}Deck/1/PlayPause etc. Ctrl+C to quit.",

@@ -5316,6 +5316,27 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn without_mapped_faders_dj_mixes_standalone() {
+        let (mut e, mut c, _config) = core();
+        mix_setup(&mut e, &mut c);
+        // The fader settings on (migrated, say), no controller mapped: the Mix button, Auto-DJ.
+        c.settings.fader_mix_in = true;
+        c.settings.fader_mix_out = true;
+        assert!(!c.fader_mix_on() && !c.fader_mix_possible());
+        assert!(c.mix_target(1).is_some(), "Mix offered");
+        let plan = c.plan_now(1, 0, crate::settings::MixStyle::Eq);
+        c.start_mix(plan);
+        assert!(!c.fader_mix_waiting_out(0));
+        run_mix(&mut e, &mut c, |_, _| {});
+        assert!(!c.snap.decks[0].playing, "the mix finished on its own");
+        // Mapped: they apply.
+        let source = MidiSource { kind: MidiKind::Cc, channel: 0, number: 7 };
+        c.profile.mappings.push(MidiMapping { source, address: "Mixer/CH1/Volume".into(), mode: MapMode::Absolute, invert: false, feedback: false });
+        assert!(c.fader_mix_in_on() && c.fader_mix_out_on());
+        assert!(!crate::settings::Settings::default().fader_mix_in && !crate::settings::Settings::default().osc_enabled, "standalone defaults");
+    }
+
+    #[test]
     fn a_stem_you_move_during_a_mix_stays_yours() {
         let (mut e, mut c, _config) = core();
         mix_setup(&mut e, &mut c);

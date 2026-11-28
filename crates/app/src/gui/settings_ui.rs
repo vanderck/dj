@@ -164,21 +164,24 @@ fn settings(ui: &mut Ui, core: &mut Core, st: &mut UiState) {
     ui.checkbox(&mut core.settings.keylock_on_load, "Key lock (pitch preserve) on load");
     ui.checkbox(&mut core.settings.tempo_home, "After a mix, ease back to the new track's own tempo")
         .on_hover_text("A mix plays the new track at the old one's tempo. Afterwards it glides back to its own (0 %), 0.25 % a bar, too slowly to hear, so a set doesn't drift ever further from the songs' tempos (real DJs keep most tracks within 5 %). Moving its tempo fader stops it.");
-    // Mixing with the faders (a MIDI mixer): in, out, or both. No Auto-DJ with either.
+    // Mixing with the faders (a MIDI mixer): in, out, or both. No Auto-DJ with either. Only once
+    // the controller's volume faders are mapped (standalone, the Mix buttons).
     let external = core.external_routing();
+    let possible = core.fader_mix_possible();
+    let why_not = if external { "Not with an external mixer: dj can't see its faders" } else { "Map your controller's channel volume faders first (MIDI → Learn, then a deck's VOLUME fader)" };
     let resp_in = ui
-        .add_enabled(!external, egui::Checkbox::new(&mut core.settings.fader_mix_in, "Mix in with the fader (MIDI mixer)"))
+        .add_enabled(possible, egui::Checkbox::new(&mut core.settings.fader_mix_in, "Mix in with the fader (MIDI mixer)"))
         .on_hover_text("No Mix button: push a waiting deck's volume fader up and dj starts it in sync on the next bar it can, in the style shown on the deck (tap it for the next); fader back to the bottom calls it off, at any point (the old track back in full). Its fader is its volume; its stems or EQ bring it in over the mix's bars, the voice and the bass swapping with the old track's on the way (one voice, one bass). Without Mix out with the fader, dj takes the old track out too, over the mix's bars. Mixes run side by side: push another deck's fader up while one runs and it mixes into the newest track. A stem or EQ you move during a mix stays yours. Auto-DJ is off.")
-        .on_disabled_hover_text("Not with an external mixer: dj can't see its faders");
+        .on_disabled_hover_text(why_not);
     let resp_out = ui
-        .add_enabled(!external, egui::Checkbox::new(&mut core.settings.fader_mix_out, "Mix out with the fader (MIDI mixer)"))
+        .add_enabled(possible, egui::Checkbox::new(&mut core.settings.fader_mix_out, "Mix out with the fader (MIDI mixer)"))
         .on_hover_text("A mix's old track plays on in full until you bring its fader down: then it goes out on its stems and EQ as you go (the music, then the drums), its volume only in the lower part of the travel: pull slowly for a long blend, quickly for a short one; at the bottom the mix is done. Without Mix in with the fader, mixes start with the Mix button and dj brings the new track in. Auto-DJ is off.")
-        .on_disabled_hover_text("Not with an external mixer: dj can't see its faders");
+        .on_disabled_hover_text(why_not);
     if (resp_in.changed() || resp_out.changed()) && core.fader_mix_on() {
         core.set_autodj(None);
     }
-    if core.fader_mix_on() && !core.midi_volume_faders() {
-        ui.label(egui::RichText::new("Map your controller's channel volume faders first (MIDI → Learn, then a deck's VOLUME fader).").small().color(egui::Color32::from_rgb(230, 170, 60)));
+    if !possible && !external {
+        ui.label(egui::RichText::new("Mixing with the faders: map your controller's channel volume faders first (MIDI → Learn, then a deck's VOLUME fader).").small().weak());
     }
     // The session log: everything that happened (tracks with their paths, MIDI, the mixes),
     // with your marks: to send when a mix went wrong.
