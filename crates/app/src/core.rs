@@ -920,16 +920,19 @@ impl Core {
                     // A grid off the beats (neither half a beat nor whole beats): onto them, if a
                     // grid on the heard beats has them at its tempo (not yours, not a tempo map;
                     // for this load).
-                    match dj_library::analysis::regrid_on_beats(&grid, &heard).filter(|_| !mine && map.is_none()) {
-                        Some(fixed) => {
+                    // (A tempo map through it too: the steady grid replaces it, for this load.)
+                    let fit = if mine { Err("your grid".to_string()) } else { dj_library::analysis::regrid_on_beats(grid.bpm, check.agree, &heard) };
+                    match fit {
+                        Ok(fixed) => {
                             self.deck_cmd(d, DeckCmd::SetGrid(Some(fixed)));
                             self.log(format!(
-                                "Deck {}: grid moved onto the beats All-In-One hears (only {pct:.0} % were on it; {:.2} BPM)",
+                                "Deck {}: grid moved onto the beats All-In-One hears (only {pct:.0} % were on it{}; {:.2} BPM)",
                                 d + 1,
+                                if map.is_some() { ", with its tempo map" } else { "" },
                                 fixed.bpm
                             ));
                         }
-                        None => self.log(format!("Deck {}: the grid doesn't follow the beats All-In-One hears ({pct:.0} % agree): check its BPM", d + 1)),
+                        Err(why) => self.log(format!("Deck {}: the grid doesn't follow the beats All-In-One hears ({pct:.0} % agree), left as it is: {why}", d + 1)),
                     }
                 } else {
                     let bars = if check.bar_shift.is_some() && cues_say_bars { ", bars as the cues say" } else { "" };
