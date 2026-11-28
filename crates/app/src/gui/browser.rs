@@ -41,6 +41,36 @@ const COLS: [(Option<Col>, &str, f32, bool); 11] = [
     (None, "Load to", 0.065, false),
 ];
 
+/// The columns' widths (shares of the table) with the optional columns `shown`: a hidden one is
+/// 0, its width going to Title and Artist (the key column narrower without the musical name).
+pub fn column_widths(shown: crate::settings::BrowserColumns) -> [f32; 11] {
+    let mut w: [f32; 11] = std::array::from_fn(|i| COLS[i].2);
+    if !shown.musical_key {
+        w[4] = 0.05;
+    }
+    for (i, on) in [(6, shown.energy), (7, shown.vocals), (8, shown.time), (9, shown.genre)] {
+        if !on {
+            w[i] = 0.0;
+        }
+    }
+    let free = 1.0 - w.iter().sum::<f32>();
+    let (t, a) = (COLS[1].2, COLS[2].2);
+    w[1] += free * t / (t + a);
+    w[2] += free * a / (t + a);
+    w
+}
+
+/// The right-click menu on the column titles: the optional columns, on or off.
+fn columns_menu(ui: &mut Ui, core: &mut Core) {
+    let c = &mut core.settings.browser_columns;
+    ui.label(egui::RichText::new("Columns").strong());
+    ui.checkbox(&mut c.musical_key, "Key name (Bm, next to 10A)");
+    ui.checkbox(&mut c.energy, "Energy");
+    ui.checkbox(&mut c.vocals, "Vocals (share sung)");
+    ui.checkbox(&mut c.time, "Time");
+    ui.checkbox(&mut c.genre, "Genre");
+}
+
 /// Below this share of bars with vocals (%), a track shows as instrumental.
 const INSTRUMENTAL: u8 = 5;
 
@@ -393,13 +423,16 @@ pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect, big: boo
     }
 
     let table = Rect::from_min_max(Pos2::new(r.left(), y + bar_h + 14.0), r.right_bottom());
-    let widths: Vec<f32> = COLS.iter().map(|c| c.2 * table.width()).collect();
+    let shown = core.settings.browser_columns;
+    let widths: Vec<f32> = column_widths(shown).iter().map(|w| w * table.width()).collect();
     let head = Rect::from_min_size(table.min, Vec2::new(table.width(), 22.0));
+    // Right-click the column titles: which optional columns show.
+    ui.allocate_rect(head, Sense::click()).context_menu(|ui| columns_menu(ui, core));
     let mut x = head.left();
     for (i, (col, title, _, right)) in COLS.iter().enumerate() {
         let cr = Rect::from_min_size(Pos2::new(x, head.top()), Vec2::new(widths[i] - 10.0, head.height()));
         x += widths[i];
-        if title.is_empty() {
+        if title.is_empty() || widths[i] <= 0.0 {
             continue;
         }
         let arrow = match col {
@@ -409,7 +442,8 @@ pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect, big: boo
         let (pos, align) = if *right { (cr.right_center(), Align2::RIGHT_CENTER) } else { (cr.left_center(), Align2::LEFT_CENTER) };
         ui.painter().text(pos, align, format!("{title}{arrow}"), sans(12.5), TEXT_DIM);
         if let Some(c) = col {
-            if ui.allocate_rect(cr, Sense::click()).clicked() {
+            let resp = ui.allocate_rect(cr, Sense::click()).on_hover_text("Click to sort; right-click for the columns shown");
+            if resp.clicked() {
                 if st.browser_sort == *c {
                     st.browser_asc = !st.browser_asc;
                 } else {
@@ -417,6 +451,7 @@ pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect, big: boo
                     st.browser_asc = true;
                 }
             }
+            resp.context_menu(|ui| columns_menu(ui, core));
         }
     }
     ui.painter().line_segment([head.left_bottom() + Vec2::new(0.0, 3.0), head.right_bottom() + Vec2::new(0.0, 3.0)], egui::Stroke::new(1.0, BORDER));
@@ -479,7 +514,9 @@ pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect, big: boo
             if let Some(k) = e.key {
                 let c = cell(4, x);
                 text(c, &k.camelot(), mono(14.0), TEXT, false);
-                text(Rect::from_min_max(Pos2::new(c.left() + 44.0, c.top()), c.right_bottom()), &k.musical(), sans(13.5), TEXT_DIM, false);
+                if shown.musical_key {
+                    text(Rect::from_min_max(Pos2::new(c.left() + 44.0, c.top()), c.right_bottom()), &k.musical(), sans(13.5), TEXT_DIM, false);
+                }
             }
             x += widths[4];
             if let (Some(k), Some(rk)) = (e.key, reference) {
@@ -496,7 +533,7 @@ pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect, big: boo
                 }
             }
             x += widths[5];
-            if let Some(en) = e.energy {
+            if let (Some(en), true) = (e.energy, widths[6] > 0.0) {
                 let c = cell(6, x);
                 let bar = Rect::from_min_size(Pos2::new(c.left(), c.center().y - 3.0), Vec2::new((c.width() - 26.0).max(20.0), 6.0));
                 painter.rect_filled(bar, CornerRadius::same(3), Color32::from_gray(50));
@@ -505,15 +542,19 @@ pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect, big: boo
             }
             x += widths[6];
             // How much of it has vocals (from its stems): "Inst" for (almost) none.
-            match e.vocals {
+            match e.vocals.filter(|_| widths[7] > 0.0) {
                 Some(v) if v < INSTRUMENTAL => text(cell(7, x), "Inst", sans(13.0), TEXT_DIM, true),
                 Some(v) => text(cell(7, x), &format!("{v} %"), mono(13.0), TEXT, true),
                 None => {}
             }
             x += widths[7];
-            text(cell(8, x), &mmss(e.duration_secs), mono(14.0), TEXT, true);
+            if widths[8] > 0.0 {
+                text(cell(8, x), &mmss(e.duration_secs), mono(14.0), TEXT, true);
+            }
             x += widths[8];
-            text(cell(9, x), &e.genre, sans(14.0), TEXT, false);
+            if widths[9] > 0.0 {
+                text(cell(9, x), &e.genre, sans(14.0), TEXT, false);
+            }
             x += widths[9];
             // Load-to badges on hover.
             if hovered || selected {
@@ -624,5 +665,22 @@ mod tests {
         let prepared = fit_score(&entry("8A", 125.5), r, Some(124.0), None) - mix_bonus(15.0);
         assert!(prepared < near, "{prepared} vs {near}");
         assert_eq!(mix_bonus(-3.0), 0.0);
+    }
+}
+
+#[cfg(test)]
+mod column_tests {
+    use super::*;
+
+    #[test]
+    fn hidden_columns_give_their_width_to_title_and_artist() {
+        let hidden = column_widths(Default::default());
+        let all = column_widths(crate::settings::BrowserColumns { musical_key: true, energy: true, vocals: true, time: true, genre: true });
+        for w in [hidden, all] {
+            assert!((w.iter().sum::<f32>() - 1.0).abs() < 1e-5);
+        }
+        assert_eq!(all, std::array::from_fn(|i| COLS[i].2), "all shown: as before");
+        assert_eq!((hidden[6], hidden[7], hidden[8], hidden[9]), (0.0, 0.0, 0.0, 0.0));
+        assert!(hidden[1] > all[1] + 0.1 && hidden[2] > all[2] + 0.07, "{hidden:?}");
     }
 }
