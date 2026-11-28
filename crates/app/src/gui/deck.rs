@@ -898,8 +898,15 @@ pub(crate) fn plan_summary(core: &Core, plan: &MixPlan) -> String {
 /// playing track's last minute it doesn't ask. While a mix waits or runs, shows its state and a
 /// tap cancels it.
 fn mix_button(ui: &mut Ui, core: &mut Core, st: &mut UiState, d: usize, rect: Rect, font: egui::FontId) {
-    if core.fader_mix_on() {
+    if core.fader_mix_in_on() {
         fader_mix_slot(ui, core, d, rect, font);
+        return;
+    }
+    // Mix out with the fader: the old deck waits for its fader.
+    if core.fader_mix_waiting_out(d) && core.mix_into(d).is_none_or(Core::mix_released) {
+        let label = if rect.width() < 120.0 { "Fader ↓" } else { "Fader ↓: out" };
+        button(ui, rect, label, Style::Outline(GREEN, true), font)
+            .on_hover_text("Bring this deck's fader down: it takes the track out on its stems and EQ as you go (the music, then the drums), its volume in the lower part (until then it plays on in full)");
         return;
     }
     if let Some(m) = core.mix_into(d) {

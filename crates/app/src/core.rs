@@ -4857,7 +4857,8 @@ pub(crate) mod tests {
     fn the_faders_are_the_volumes_and_start_each_half_of_a_mix() {
         let (mut e, mut c, _config) = core();
         mix_setup(&mut e, &mut c);
-        c.settings.fader_mix = true;
+        c.settings.fader_mix_in = true;
+        c.settings.fader_mix_out = true;
         assert!(!c.midi_volume_faders());
         // A controller's channel volume faders: CC 7 (deck 1) and CC 8 (deck 2).
         for (n, ch) in [(7u8, 1), (8u8, 2)] {
@@ -4958,7 +4959,8 @@ pub(crate) mod tests {
         // Nothing to mix into: the fader is the deck's volume, even after dj set the volume
         // itself (a mix's end leaves the old deck at 0, waiting for the fader to pick it up).
         let (_e, mut c, _config) = core();
-        c.settings.fader_mix = true;
+        c.settings.fader_mix_in = true;
+        c.settings.fader_mix_out = true;
         let source = MidiSource { kind: MidiKind::Cc, channel: 0, number: 8 };
         c.profile.mappings.push(MidiMapping { source, address: "Mixer/CH2/Volume".into(), mode: MapMode::Absolute, invert: false, feedback: false });
         c.set_picked_up("Mixer/CH2/Volume", 0.0);
@@ -4974,7 +4976,8 @@ pub(crate) mod tests {
     fn three_decks_mixing(e: &mut dj_engine::Engine, c: &mut Core) {
         c.settings.deck_count = 4;
         mix_setup(e, c);
-        c.settings.fader_mix = true;
+        c.settings.fader_mix_in = true;
+        c.settings.fader_mix_out = true;
         c.settings.mix_style = crate::settings::MixStyle::Stems;
         for (n, ch) in [(7u8, 1), (8u8, 2), (9u8, 3)] {
             let source = MidiSource { kind: MidiKind::Cc, channel: 0, number: n };
@@ -5078,7 +5081,8 @@ pub(crate) mod tests {
     fn the_old_track_does_not_go_before_the_new_one_starts() {
         let (mut e, mut c, _config) = core();
         mix_setup(&mut e, &mut c);
-        c.settings.fader_mix = true;
+        c.settings.fader_mix_in = true;
+        c.settings.fader_mix_out = true;
         for (n, ch) in [(7u8, 1), (8u8, 2)] {
             let source = MidiSource { kind: MidiKind::Cc, channel: 0, number: n };
             c.profile.mappings.push(MidiMapping { source, address: format!("Mixer/CH{ch}/Volume"), mode: MapMode::Absolute, invert: false, feedback: false });
@@ -5113,7 +5117,8 @@ pub(crate) mod tests {
         let path = config.dir.join("session.jsonl");
         c.mixlog = crate::mixlog::MixLog::at(&path);
         mix_setup(&mut e, &mut c);
-        c.settings.fader_mix = true;
+        c.settings.fader_mix_in = true;
+        c.settings.fader_mix_out = true;
         for (n, ch) in [(7u8, 1), (8u8, 2)] {
             let source = MidiSource { kind: MidiKind::Cc, channel: 0, number: n };
             c.profile.mappings.push(MidiMapping { source, address: format!("Mixer/CH{ch}/Volume"), mode: MapMode::Absolute, invert: false, feedback: false });
@@ -5136,7 +5141,7 @@ pub(crate) mod tests {
         assert!(has("midi", &|l| l["bytes"] == serde_json::json!([0xb0, 8, 120]) && l["maps"] == serde_json::json!(["Mixer/CH2/Volume"])));
         assert!(has("set", &|l| l["addr"] == "Mixer/CH1/Volume" && l["by"] == "midi"), "your faders");
         assert!(has("set", &|l| l["by"] == "dj"), "what dj sets mixing");
-        assert!(has("mix", &|l| l["in"] == 2 && l["out"] == 1 && l["fader"] == true));
+        assert!(has("mix", &|l| l["in"] == 2 && l["out"] == 1 && l["fader_in"] == true && l["fader_out"] == true));
         assert!(has("status", &|l| l["msg"].as_str().is_some_and(|m| m.starts_with("Mixing deck 2 into deck 1"))));
         assert!(has("tempo", &|l| l["deck"] == 2));
         assert!(has("play", &|l| l["deck"] == 2 && l["playing"] == true));
@@ -5189,7 +5194,8 @@ pub(crate) mod tests {
     fn with_the_faders_the_voices_swap_before_the_old_fader_moves() {
         let (mut e, mut c, _config) = core();
         mix_setup(&mut e, &mut c);
-        c.settings.fader_mix = true;
+        c.settings.fader_mix_in = true;
+        c.settings.fader_mix_out = true;
         c.settings.mix_style = crate::settings::MixStyle::Stems;
         // Both tracks sing, pausing 3 s every 8 s.
         for d in 0..2 {
@@ -5226,7 +5232,8 @@ pub(crate) mod tests {
     fn old_vocals_already_off_do_not_hold_the_new_ones() {
         let (mut e, mut c, _config) = core();
         mix_setup(&mut e, &mut c);
-        c.settings.fader_mix = true;
+        c.settings.fader_mix_in = true;
+        c.settings.fader_mix_out = true;
         c.settings.mix_style = crate::settings::MixStyle::Stems;
         // The old singer never pauses for a second (its stem never quiet), but its vocals are off
         // already (held out after an earlier mix); the new one pauses 3 s every 8 s.
@@ -5255,6 +5262,60 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn mixing_in_with_the_fader_only_dj_takes_the_old_track_out() {
+        let (mut e, mut c, _config) = core();
+        mix_setup(&mut e, &mut c);
+        c.settings.fader_mix_in = true;
+        for (n, ch) in [(7u8, 1), (8u8, 2)] {
+            let source = MidiSource { kind: MidiKind::Cc, channel: 0, number: n };
+            c.profile.mappings.push(MidiMapping { source, address: format!("Mixer/CH{ch}/Volume"), mode: MapMode::Absolute, invert: false, feedback: false });
+        }
+        c.handle_midi(&[0xb0, 7, 114]);
+        c.handle_midi(&[0xb0, 8, 0]);
+        c.handle_midi(&[0xb0, 8, 100]);
+        assert!(c.automix.is_some(), "its fader started it");
+        assert!(!c.fader_mix_waiting_out(0), "nothing waits for the old fader");
+        // The old fader never moves: the mix finishes on its own, the old deck stopped.
+        run_mix(&mut e, &mut c, |_, _| {});
+        pump(&mut e, &mut c);
+        assert!(!c.snap.decks[0].playing);
+        assert_eq!(c.session.channels[0].params.volume, 0.0);
+        assert!((c.session.channels[1].params.volume - 100.0 / 127.0).abs() < 0.01, "the new deck at its fader");
+    }
+
+    #[test]
+    fn mixing_out_with_the_fader_only_mix_starts_it_and_the_old_fader_ends_it() {
+        let (mut e, mut c, _config) = core();
+        mix_setup(&mut e, &mut c);
+        c.settings.fader_mix_out = true;
+        let source = MidiSource { kind: MidiKind::Cc, channel: 0, number: 7 };
+        c.profile.mappings.push(MidiMapping { source, address: "Mixer/CH1/Volume".into(), mode: MapMode::Absolute, invert: false, feedback: false });
+        c.handle_midi(&[0xb0, 7, 114]);
+        // No fader starts it: the Mix button (as before).
+        assert!(c.mix_target(1).is_some(), "Mix offered");
+        let plan = c.plan_now(1, 0, crate::settings::MixStyle::Stems);
+        let (start, len) = (plan.start_beat, plan.length_beats);
+        c.start_mix(plan);
+        while c.mix_beat() < start + len + 8.0 {
+            pump(&mut e, &mut c);
+        }
+        // dj brought the new track in at full volume; the old one waits for its fader.
+        assert_eq!(c.session.channels[1].params.volume, 1.0);
+        assert!(c.automix.is_some() && c.fader_mix_waiting_out(0));
+        assert!(c.snap.decks[0].playing);
+        c.handle_midi(&[0xb0, 7, 60]);
+        for _ in 0..8 {
+            pump(&mut e, &mut c);
+        }
+        assert!(c.automix.is_some(), "on its way out");
+        c.handle_midi(&[0xb0, 7, 0]);
+        run_mix(&mut e, &mut c, |_, _| {});
+        pump(&mut e, &mut c);
+        assert!(!c.snap.decks[0].playing);
+        assert_eq!(c.session.channels[1].params.volume, 1.0);
+    }
+
+    #[test]
     fn a_stem_you_move_during_a_mix_stays_yours() {
         let (mut e, mut c, _config) = core();
         mix_setup(&mut e, &mut c);
@@ -5279,7 +5340,8 @@ pub(crate) mod tests {
     fn a_fader_back_down_calls_off_a_running_mix() {
         let (mut e, mut c, _config) = core();
         mix_setup(&mut e, &mut c);
-        c.settings.fader_mix = true;
+        c.settings.fader_mix_in = true;
+        c.settings.fader_mix_out = true;
         for (n, ch) in [(7u8, 1), (8u8, 2)] {
             let source = MidiSource { kind: MidiKind::Cc, channel: 0, number: n };
             c.profile.mappings.push(MidiMapping { source, address: format!("Mixer/CH{ch}/Volume"), mode: MapMode::Absolute, invert: false, feedback: false });
@@ -5317,7 +5379,8 @@ pub(crate) mod tests {
     fn a_fader_back_down_calls_off_a_mix_that_has_not_begun() {
         let (mut e, mut c, _config) = core();
         mix_setup(&mut e, &mut c);
-        c.settings.fader_mix = true;
+        c.settings.fader_mix_in = true;
+        c.settings.fader_mix_out = true;
         let source = MidiSource { kind: MidiKind::Cc, channel: 0, number: 8 };
         c.profile.mappings.push(MidiMapping { source, address: "Mixer/CH2/Volume".into(), mode: MapMode::Absolute, invert: false, feedback: false });
         c.handle_midi(&[0xb0, 8, 0]);
@@ -5342,7 +5405,8 @@ pub(crate) mod tests {
         c.handle_midi(&[0xb0, 8, 0]);
         pump(&mut e, &mut c);
         // Without the mode, the fader is the deck's volume.
-        c.settings.fader_mix = false;
+        c.settings.fader_mix_in = false;
+        c.settings.fader_mix_out = false;
         c.handle_midi(&[0xb0, 8, 127]);
         assert!(c.automix.is_none());
         assert_eq!(c.session.channels[1].params.volume, 1.0);
