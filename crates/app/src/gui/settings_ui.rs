@@ -195,6 +195,28 @@ fn settings(ui: &mut Ui, core: &mut Core, st: &mut UiState) {
             super::fx::open_path(&dir);
         }
     });
+    // A touch keyboard for the search field (a touch screen), in the system's layout or one chosen.
+    ui.horizontal(|ui| {
+        ui.checkbox(&mut core.settings.touch_keyboard, "Touch keyboard for searching")
+            .on_hover_text("Tapping the search field opens the large browser with a keyboard under it (for a touch screen).");
+        use crate::settings::KeyboardLayout as K;
+        let sys = match super::keyboard::system_layout() {
+            K::Azerty => "AZERTY",
+            K::Qwertz => "QWERTZ",
+            _ => "QWERTY",
+        };
+        let name = |l: K| match l {
+            K::Auto => format!("System ({sys})"),
+            K::Qwerty => "QWERTY".into(),
+            K::Azerty => "AZERTY".into(),
+            K::Qwertz => "QWERTZ".into(),
+        };
+        egui::ComboBox::from_id_salt("kb_layout").selected_text(name(core.settings.keyboard_layout)).show_ui(ui, |ui| {
+            for l in [K::Auto, K::Qwerty, K::Azerty, K::Qwertz] {
+                ui.selectable_value(&mut core.settings.keyboard_layout, l, name(l));
+            }
+        });
+    });
     ui.checkbox(&mut core.settings.load_at_first_cue, "Load tracks at their first cue");
     if cfg!(target_os = "macos") {
         ui.checkbox(&mut core.settings.keep_awake, "Keep the Mac awake while dj runs")
