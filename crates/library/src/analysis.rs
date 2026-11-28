@@ -962,6 +962,14 @@ pub fn check_beats(beat_at: impl Fn(f64) -> f64, spb: f64, beats: &[(f64, f32)])
 /// On GiantSteps (Beatport's BPMs): of 66 tracks the detector got wrong, this fixed 25; of
 /// the tracks it got right, it changed none. (Unsteady heard beats were wrong as often as not.)
 pub fn tempo_from_beats(grid: &BeatGrid, beats: &[(f64, f32)]) -> Option<BeatGrid> {
+    let g = grid_from_beats(beats)?;
+    ((g.bpm / grid.bpm - 1.0).abs() >= 0.04).then_some(g)
+}
+
+/// A grid on heard beats (`(secs, downbeat 0..1)`): a straight line through them, its bars
+/// where they hear downbeats; `None` when they're too few or not steady (see [`STEADY`]), or
+/// the tempo is outside 60–200 BPM.
+pub fn grid_from_beats(beats: &[(f64, f32)]) -> Option<BeatGrid> {
     let (med, steady) = steadiness(beats)?;
     if steady < STEADY {
         return None;
@@ -986,10 +994,23 @@ pub fn tempo_from_beats(grid: &BeatGrid, beats: &[(f64, f32)]) -> Option<BeatGri
     let near: Vec<(f64, f64)> = pts.iter().copied().filter(|(b, t)| (t - (a + b * spb)).abs() < 0.04).collect();
     let (a, spb) = if near.len() >= 32 { fit(&near)? } else { (a, spb) };
     let bpm = 60.0 / spb;
-    if !(60.0..=200.0).contains(&bpm) || (bpm / grid.bpm - 1.0).abs() < 0.04 {
+    if !(60.0..=200.0).contains(&bpm) {
         return None;
     }
     Some(bars_from_beats(BeatGrid { bpm, anchor_secs: a }, beats))
+}
+
+/// A grid from tags (its tempo right, but placed off the beats: neither half a beat nor whole
+/// beats off, which [`check_beats`] settles) moved onto the heard beats: when it has under half
+/// of them, and a grid on them ([`grid_from_beats`]) at its tempo (within 4 %) has 80 % or more.
+/// `None` otherwise (the heard beats may be the ones that are wrong).
+pub fn regrid_on_beats(grid: &BeatGrid, beats: &[(f64, f32)]) -> Option<BeatGrid> {
+    let agree = |g: &BeatGrid| check_beats(|t| g.beat_at(t), g.seconds_per_beat(), beats).map_or(0.0, |c| c.agree);
+    if agree(grid) >= 0.5 {
+        return None;
+    }
+    let fitted = grid_from_beats(beats)?;
+    ((fitted.bpm / grid.bpm - 1.0).abs() < 0.04 && agree(&fitted) >= 0.8).then_some(fitted)
 }
 
 /// Heard beats steady enough to take their tempo: this share of the beat intervals within 5 %
@@ -1044,6 +1065,24 @@ pub fn tempo_from_drums(grid: &BeatGrid, drums: &BeatGrid, beats: &[(f64, f32)])
 
 #[cfg(test)]
 pub(crate) mod tests {
+
+    #[test]
+    fn a_tag_grid_off_the_beats_is_moved_onto_them() {
+        // Beats at 124 BPM from 0.20 s (a downbeat every 4th); the tag grid at 124 BPM from 0.33 s
+        // (a quarter beat off: neither half a beat nor whole beats).
+        let spb = 60.0 / 124.0;
+        let beats: Vec<(f64, f32)> = (0..200).map(|k| (0.20 + k as f64 * spb, if k % 4 == 0 { 0.6 } else { 0.05 })).collect();
+        let tag = BeatGrid { bpm: 124.0, anchor_secs: 0.33 };
+        let g = regrid_on_beats(&tag, &beats).expect("moved");
+        assert!((g.bpm - 124.0).abs() < 0.05, "{}", g.bpm);
+        let off = ((g.anchor_secs - 0.20) / spb).rem_euclid(4.0);
+        assert!(off < 0.02 || off > 3.98, "on the downbeats: {}", g.anchor_secs);
+        // On the beats already: left alone.
+        assert!(regrid_on_beats(&BeatGrid { bpm: 124.0, anchor_secs: 0.20 }, &beats).is_none());
+        // The heard beats at double tempo (wrong): left alone.
+        let double: Vec<(f64, f32)> = (0..400).map(|k| (0.20 + k as f64 * spb / 2.0, 0.1)).collect();
+        assert!(regrid_on_beats(&tag, &double).is_none());
+    }
     use super::*;
 
     const SR: u32 = 44_100;
