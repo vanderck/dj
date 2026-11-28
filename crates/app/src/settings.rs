@@ -124,6 +124,18 @@ impl Default for AudioSettings {
     }
 }
 
+/// The browser's optional columns (right-click its column titles): hidden by default.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BrowserColumns {
+    /// The key's musical name (Bm) next to its Camelot code (10A).
+    pub musical_key: bool,
+    pub energy: bool,
+    pub vocals: bool,
+    pub time: bool,
+    pub genre: bool,
+}
+
 /// The touch keyboard's layout: the system's (Auto), or one chosen.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum KeyboardLayout {
@@ -173,6 +185,7 @@ pub struct Settings {
     /// A touch keyboard under the search field (a touch screen), in this layout.
     pub touch_keyboard: bool,
     pub keyboard_layout: KeyboardLayout,
+    pub browser_columns: BrowserColumns,
     pub tape_stop_ms: f64,
     pub default_loop_beats: f64,
     pub skip_beats: f64,
@@ -293,6 +306,7 @@ impl Default for Settings {
             browser_big_scale: 1.5,
             touch_keyboard: false,
             keyboard_layout: KeyboardLayout::Auto,
+            browser_columns: BrowserColumns::default(),
             tape_stop_ms: 25.0,
             default_loop_beats: 4.0,
             skip_beats: 16.0,
