@@ -278,7 +278,8 @@ impl Default for Settings {
             load_at_first_cue: true,
             keep_awake: true,
             match_loudness: true,
-            osc_enabled: true,
+            // (Standalone: no network listener until you turn OSC on.)
+            osc_enabled: false,
             osc_port: 9090,
             osc_root: "/dj/".into(),
             osc_feedback: false,
