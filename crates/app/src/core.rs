@@ -847,12 +847,11 @@ impl Core {
                 if !found.sections.is_empty() {
                     self.decks[deck].sections = Some(Arc::new(found.sections.clone()));
                 }
-                if self.heard(deck) {
-                    // Playing with its fader up: a corrected tempo or beat would jump under you
-                    // (and under the decks that follow it). Once you don't hear it.
+                // Playing with its fader up: a fix that would jump under you (or under the decks that
+                // follow it) waits until you don't hear it.
+                let live = self.heard(deck);
+                if !self.check_grid_with_beats(deck, &found.beats, drums, live) {
                     self.decks[deck].grid_check_pending = Some((track_id, found.clone(), drums));
-                } else {
-                    self.check_grid_with_beats(deck, &found.beats, drums);
                 }
                 if let Some(c) = cues {
                     self.apply_detected_cues(deck, c);
@@ -888,10 +887,13 @@ impl Core {
     /// say where the bars are). A grid you set yourself, or one with a tempo map, is only reported
     /// on. The fix is for this load (the check runs again on the next). `drums`: the drum stem's
     /// grid, when the heard beats are too unsteady to settle a detected tempo.
-    fn check_grid_with_beats(&mut self, d: usize, beats: &[crate::stems::Beat], drums: Option<dj_engine::track::BeatGrid>) {
-        let Some(track) = self.decks[d].track.clone() else { return };
-        let Some(info) = self.decks[d].info.as_ref() else { return };
-        let Some(grid) = track.grid else { return };
+    ///
+    /// While you hear the deck (`live`), a fix is made only if nothing you hear jumps for it
+    /// (see [`Self::live_fix_ok`]); else `false`: it waits (see `grid_check_pending`).
+    fn check_grid_with_beats(&mut self, d: usize, beats: &[crate::stems::Beat], drums: Option<dj_engine::track::BeatGrid>, live: bool) -> bool {
+        let Some(track) = self.decks[d].track.clone() else { return true };
+        let Some(info) = self.decks[d].info.as_ref() else { return true };
+        let Some(grid) = track.grid else { return true };
         let heard: Vec<(f64, f32)> = beats.iter().map(|b| (b.secs, b.downbeat)).collect();
         let map = track.tempo_map.clone();
         // A detected tempo the heard beats steadily disagree with: theirs (the detector took
@@ -902,15 +904,18 @@ impl Core {
             let from_beats = dj_library::analysis::tempo_from_beats(&grid, &heard);
             let why = if from_beats.is_some() { "the steady beats All-In-One hears" } else { "the drum stem (All-In-One's beats wander)" };
             if let Some(fixed) = crate::stems::corrected_grid(&grid, &heard, drums.as_ref()) {
+                if live && !self.live_fix_ok(d, &grid, &fixed) {
+                    return false;
+                }
                 self.deck_cmd(d, DeckCmd::SetGrid(Some(fixed)));
                 self.keep_detected_grid(d, fixed);
                 self.log(format!("Deck {}: BPM {:.1} → {:.1}, from {why}", d + 1, grid.bpm, fixed.bpm));
-                return;
+                return true;
             }
         }
         let spb = grid.seconds_per_beat();
         let beat_at = |t: f64| map.as_ref().map_or_else(|| grid.beat_at(t), |m| m.beat_at(t));
-        let Some(check) = dj_library::analysis::check_beats(beat_at, spb, &heard) else { return };
+        let Some(check) = dj_library::analysis::check_beats(beat_at, spb, &heard) else { return true };
         let (half, bars, cues_say_bars) = dj_library::analysis::grid_shift(&check, beat_at, &info.cues);
         let mine = info.grid_source == Some(GridSource::User);
         let pct = (check.agree * 100.0).round();
@@ -924,9 +929,15 @@ impl Core {
                     let fit = if mine { Err("your grid".to_string()) } else { dj_library::analysis::regrid_on_beats(grid.bpm, check.agree, &heard) };
                     match fit {
                         Ok(fixed) => {
+                            if live && !self.live_fix_ok(d, &grid, &fixed) {
+                                return false;
+                            }
                             self.deck_cmd(d, DeckCmd::SetGrid(Some(fixed)));
+                            // Kept: the next load has it from the start (the check needs the
+                            // track analysed, which can come after you've mixed it in).
+                            self.keep_detected_grid(d, fixed);
                             self.log(format!(
-                                "Deck {}: grid moved onto the beats All-In-One hears (only {pct:.0} % were on it{}; {:.2} BPM)",
+                                "Deck {}: grid moved onto the beats All-In-One hears (only {pct:.0} % were on it{}; {:.2} BPM; kept)",
                                 d + 1,
                                 if map.is_some() { ", with its tempo map" } else { "" },
                                 fixed.bpm
@@ -938,7 +949,7 @@ impl Core {
                     let bars = if check.bar_shift.is_some() && cues_say_bars { ", bars as the cues say" } else { "" };
                     self.log(format!("Deck {}: grid checked: {pct:.0} % of the beats All-In-One hears are on it{bars}", d + 1));
                 }
-                return;
+                return true;
             }
             (true, false) => "half a beat off".to_string(),
             (false, true) => format!("its bars start {bars:.0} beat{} later", if bars == 1.0 { "" } else { "s" }),
@@ -946,11 +957,25 @@ impl Core {
         };
         if mine || map.is_some() {
             self.log(format!("Deck {}: All-In-One hears the grid {what}; left as it is ({})", d + 1, if mine { "your grid" } else { "a tempo map" }));
-            return;
+            return true;
         }
         let fixed = dj_engine::track::BeatGrid { bpm: grid.bpm, anchor_secs: grid.anchor_secs + (half + bars) * spb };
+        if live && !self.live_fix_ok(d, &grid, &fixed) {
+            return false;
+        }
         self.deck_cmd(d, DeckCmd::SetGrid(Some(fixed)));
         self.log(format!("Deck {}: grid corrected from the beats All-In-One hears: {what}", d + 1));
+        true
+    }
+
+    /// Whether deck `d`'s grid can go from `old` to `new` while you hear it: the same tempo (a
+    /// tempo change would change how fast a synced deck plays), and it isn't the master of a
+    /// synced deck you hear (that one would jump). A synced deck then moves into phase on its
+    /// own (a nudge, or a skip of up to half a beat), out of sync no longer.
+    fn live_fix_ok(&self, d: usize, old: &dj_engine::track::BeatGrid, new: &dj_engine::track::BeatGrid) -> bool {
+        let same_tempo = (new.bpm / old.bpm - 1.0).abs() < 0.01;
+        let leads_heard = self.snap.clock.owner == ClockOwner::Deck(d as u8) && (0..NUM_DECKS).any(|o| o != d && self.heard(o) && self.snap.decks[o].sync);
+        same_tempo && !leads_heard
     }
 
     /// Whether you hear deck `d`: playing, its fader up and not muted (with an external mixer,
@@ -974,7 +999,7 @@ impl Core {
                 continue;
             }
             let (_, found, drums) = self.decks[d].grid_check_pending.take().unwrap();
-            self.check_grid_with_beats(d, &found.beats, drums);
+            self.check_grid_with_beats(d, &found.beats, drums, false);
             self.save_profile_soon(d);
         }
     }
@@ -3835,6 +3860,36 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_grid_off_the_beats_is_moved_while_you_hear_the_deck_and_kept() {
+        use crate::stems::{Beat, Structure, Update};
+        let (mut e, mut c, _config) = core();
+        c.load_track(0, &kick_wav("live-grid.wav", 40));
+        let deadline = Instant::now() + std::time::Duration::from_secs(60);
+        while !(c.snap.decks[0].loaded && c.decks[0].info.is_some()) {
+            assert!(Instant::now() < deadline, "track never loaded");
+            pump(&mut e, &mut c);
+        }
+        let id = c.decks[0].info.as_ref().unwrap().track_id;
+        c.route("Mixer/CH1/Volume", &[OscType::Float(0.9)]);
+        c.deck_cmd(0, DeckCmd::Play);
+        for _ in 0..20 {
+            pump(&mut e, &mut c);
+        }
+        assert!(c.heard(0));
+        // The beats heard a quarter beat off its grid, at its tempo: moved now (nothing you hear
+        // jumps: no deck follows it), and kept for the next load.
+        let g = c.decks[0].track.as_ref().and_then(|t| t.grid).expect("a grid");
+        let spb = g.seconds_per_beat();
+        let beats: Vec<Beat> = (0..60).map(|k| Beat { secs: g.anchor_secs + (k as f64 + 0.25) * spb, downbeat: if k % 4 == 0 { 0.9 } else { 0.1 } }).collect();
+        c.on_stems_update(Update::Sections { deck: 0, track_id: id, found: Arc::new(Structure { sections: vec![], beats }), cues: None, drums: None });
+        assert!(c.status.iter().any(|(_, m)| m.starts_with("Deck 1: grid moved onto the beats")), "{:?}", c.status.back());
+        assert!(c.decks[0].grid_check_pending.is_none(), "not waiting");
+        let path = c.decks[0].info.as_ref().unwrap().path.clone();
+        let kept = c.trackdb.tracks.get(&TrackDb::key(&path)).and_then(|o| o.grid).expect("kept");
+        assert!((((kept.anchor_secs - g.anchor_secs) / spb).rem_euclid(1.0) - 0.25).abs() < 0.02, "{kept:?} vs {g:?}");
+    }
+
+    #[test]
     fn the_drum_stem_settles_a_bpm_the_heard_beats_cannot() {
         use crate::stems::{Beat, Structure, Update};
         let (mut e, mut c, _config) = core();
@@ -5361,7 +5416,7 @@ pub(crate) mod tests {
         let spb = g.seconds_per_beat();
         let beats: Vec<crate::stems::Beat> =
             (0..100).map(|k| crate::stems::Beat { secs: g.anchor_secs + (k as f64 + 0.25) * spb, downbeat: if k % 4 == 0 { 0.6 } else { 0.05 } }).collect();
-        c.check_grid_with_beats(1, &beats, None);
+        c.check_grid_with_beats(1, &beats, None, false);
         assert!(c.status.iter().any(|(_, m)| m.starts_with("Deck 2: grid moved onto the beats")), "{:?}", c.status.back());
     }
 
