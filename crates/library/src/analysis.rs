@@ -1000,17 +1000,31 @@ pub fn grid_from_beats(beats: &[(f64, f32)]) -> Option<BeatGrid> {
     Some(bars_from_beats(BeatGrid { bpm, anchor_secs: a }, beats))
 }
 
-/// A grid from tags (its tempo right, but placed off the beats: neither half a beat nor whole
-/// beats off, which [`check_beats`] settles) moved onto the heard beats: when it has under half
-/// of them, and a grid on them ([`grid_from_beats`]) at its tempo (within 4 %) has 80 % or more.
-/// `None` otherwise (the heard beats may be the ones that are wrong).
-pub fn regrid_on_beats(grid: &BeatGrid, beats: &[(f64, f32)]) -> Option<BeatGrid> {
-    let agree = |g: &BeatGrid| check_beats(|t| g.beat_at(t), g.seconds_per_beat(), beats).map_or(0.0, |c| c.agree);
-    if agree(grid) >= 0.5 {
-        return None;
+/// A grid (from tags, or a tempo map through it) off the heard beats (`(secs, downbeat
+/// 0..1)`), moved onto them: when it has under half of them (`agree_now`), and a steady grid on
+/// them ([`grid_from_beats`]) at its tempo (`bpm`, within 4 %) has 80 % or more. Otherwise why
+/// not (the heard beats may be the ones that are wrong: unsteady, or at another tempo).
+pub fn regrid_on_beats(bpm: f64, agree_now: f64, beats: &[(f64, f32)]) -> Result<BeatGrid, String> {
+    if agree_now >= 0.5 {
+        return Err("most beats are on it".into());
     }
-    let fitted = grid_from_beats(beats)?;
-    ((fitted.bpm / grid.bpm - 1.0).abs() < 0.04 && agree(&fitted) >= 0.8).then_some(fitted)
+    let Some(fitted) = grid_from_beats(beats) else {
+        return Err(match steadiness(beats) {
+            None => "too few beats heard".into(),
+            Some((_, steady)) if steady < STEADY => {
+                format!("the beats All-In-One hears aren't steady enough to fit a grid on ({:.0} % steady)", steady * 100.0)
+            }
+            Some((med, _)) => format!("the heard beats are at {:.0} BPM", 60.0 / med),
+        });
+    };
+    if (fitted.bpm / bpm - 1.0).abs() >= 0.04 {
+        return Err(format!("a grid on the heard beats is at {:.1} BPM, not {bpm:.1}", fitted.bpm));
+    }
+    let agree = check_beats(|t| fitted.beat_at(t), fitted.seconds_per_beat(), beats).map_or(0.0, |c| c.agree);
+    if agree < 0.8 {
+        return Err(format!("a grid on the heard beats has only {:.0} % of them", agree * 100.0));
+    }
+    Ok(fitted)
 }
 
 /// Heard beats steady enough to take their tempo: this share of the beat intervals within 5 %
@@ -1073,15 +1087,18 @@ pub(crate) mod tests {
         let spb = 60.0 / 124.0;
         let beats: Vec<(f64, f32)> = (0..200).map(|k| (0.20 + k as f64 * spb, if k % 4 == 0 { 0.6 } else { 0.05 })).collect();
         let tag = BeatGrid { bpm: 124.0, anchor_secs: 0.33 };
-        let g = regrid_on_beats(&tag, &beats).expect("moved");
+        let agree = |g: &BeatGrid, b: &[(f64, f32)]| check_beats(|t| g.beat_at(t), g.seconds_per_beat(), b).map_or(0.0, |c| c.agree);
+        let g = regrid_on_beats(124.0, agree(&tag, &beats), &beats).expect("moved");
         assert!((g.bpm - 124.0).abs() < 0.05, "{}", g.bpm);
         let off = ((g.anchor_secs - 0.20) / spb).rem_euclid(4.0);
         assert!(off < 0.02 || off > 3.98, "on the downbeats: {}", g.anchor_secs);
         // On the beats already: left alone.
-        assert!(regrid_on_beats(&BeatGrid { bpm: 124.0, anchor_secs: 0.20 }, &beats).is_none());
+        let on = BeatGrid { bpm: 124.0, anchor_secs: 0.20 };
+        assert!(regrid_on_beats(124.0, agree(&on, &beats), &beats).is_err());
         // The heard beats at double tempo (wrong): left alone.
         let double: Vec<(f64, f32)> = (0..400).map(|k| (0.20 + k as f64 * spb / 2.0, 0.1)).collect();
-        assert!(regrid_on_beats(&tag, &double).is_none());
+        let why = regrid_on_beats(124.0, agree(&tag, &double), &double).unwrap_err();
+        assert!(why.contains("248"), "{why}");
     }
     use super::*;
 
