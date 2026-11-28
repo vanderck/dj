@@ -223,16 +223,6 @@ pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect, big: boo
         st.browser_harmonic = !st.browser_harmonic;
     }
 
-    let imp_w = pill_width(ui, "Import folder", 13.0);
-    let ir = Rect::from_min_size(Pos2::new(r.right() - imp_w, y), Vec2::new(imp_w, bar_h));
-    if pill(ui, ir, "Import folder", false).on_hover_text("Choose a music folder (all its subfolders are included)").clicked() {
-        // The system folder picker (on macOS this also grants access to an external drive).
-        match rfd::FileDialog::new().set_title("Import music folder").pick_folder() {
-            Some(dir) => core.add_library_folder(dir),
-            None if core.settings.library_folders.is_empty() => st.settings_open = true,
-            None => {}
-        }
-    }
     let info = match core.status.back() {
         Some((t, m)) if t.elapsed().as_secs() < 6 => m.clone(),
         _ => format!(
@@ -242,62 +232,79 @@ pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect, big: boo
             if core.library_scanning { " · scanning…" } else { "" }
         ),
     };
-    // Prepare: the tracks listed, ready to mix (stems, sections, mix profiles) in the background.
-    let prep = core.preparer.as_ref().map(|p| p.state());
-    let prep_label = match &prep {
-        Some(p) => format!("Preparing {}/{}", (p.done + 1).min(p.total), p.total),
-        None => "Prepare".into(),
-    };
-    let pw = pill_width(ui, &prep_label, 13.0);
-    let prr = Rect::from_min_size(Pos2::new(ir.left() - 8.0 - pw, y), Vec2::new(pw, bar_h));
-    let hover = match &prep {
-        Some(p) => format!("{} ({:.0} %) · click to stop", p.current, p.fraction * 100.0),
-        None => "Get the tracks listed ready to mix, in the background: their stems (HT-Demucs), sections and mix profiles, so they load ready and Fits can score how they'd mix. Already prepared tracks are skipped.".into(),
-    };
-    if pill(ui, prr, &prep_label, prep.is_some()).on_hover_text(hover).clicked() {
-        if prep.is_some() {
-            core.stop_preparing();
-        } else {
-            let paths: Vec<PathBuf> = if st.browser_hist {
-                core.history.iter().rev().cloned().collect()
-            } else {
-                core.filtered_library().into_iter().map(|i| core.library[i].path.clone()).collect()
-            };
-            core.prepare_tracks(paths);
-        }
-    }
-    if prep.is_some() {
-        ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
-    }
-    // Auto-DJ: the tracks listed, played as a set on decks 1 and 2.
-    let auto_label = match &core.autodj {
-        Some(a) => format!("Auto-DJ · {} left", a.left()),
-        None => "Auto-DJ".into(),
-    };
-    let aw = pill_width(ui, &auto_label, 13.0);
-    let ar = Rect::from_min_size(Pos2::new(prr.left() - 8.0 - aw, y), Vec2::new(aw, bar_h));
-    let auto_hover = if core.fader_mix_on() {
-        "Off while you mix with the faders (Settings)"
-    } else if core.autodj.is_some() {
-        "Click to stop (the playing track plays on)"
+    // The app's own buttons (Import, Prepare, Auto-DJ; Quantize and Menu below): in the bottom
+    // browser only, not the large one (where they'd overlap).
+    let right_left = if big {
+        r.right() + 8.0
     } else {
-        "Play the tracks listed as a set on decks 1 and 2: dj picks each next track (key, tempo, energy, and how well it would mix in: as Fits) and mixes it in at the best moment. Prepare them first so each is ready at once."
-    };
-    if pill(ui, ar, &auto_label, core.autodj.is_some()).on_hover_text(auto_hover).clicked() {
-        if core.autodj.is_some() {
-            core.set_autodj(None);
-        } else {
-            let paths: Vec<PathBuf> = if st.browser_hist {
-                core.history.iter().rev().cloned().collect()
-            } else {
-                core.filtered_library().into_iter().map(|i| core.library[i].path.clone()).collect()
-            };
-            core.set_autodj(Some(paths));
+        let imp_w = pill_width(ui, "Import folder", 13.0);
+        let ir = Rect::from_min_size(Pos2::new(r.right() - imp_w, y), Vec2::new(imp_w, bar_h));
+        if pill(ui, ir, "Import folder", false).on_hover_text("Choose a music folder (all its subfolders are included)").clicked() {
+            // The system folder picker (on macOS this also grants access to an external drive).
+            match rfd::FileDialog::new().set_title("Import music folder").pick_folder() {
+                Some(dir) => core.add_library_folder(dir),
+                None if core.settings.library_folders.is_empty() => st.settings_open = true,
+                None => {}
+            }
         }
-    }
+        // Prepare: the tracks listed, ready to mix (stems, sections, mix profiles) in the background.
+        let prep = core.preparer.as_ref().map(|p| p.state());
+        let prep_label = match &prep {
+            Some(p) => format!("Preparing {}/{}", (p.done + 1).min(p.total), p.total),
+            None => "Prepare".into(),
+        };
+        let pw = pill_width(ui, &prep_label, 13.0);
+        let prr = Rect::from_min_size(Pos2::new(ir.left() - 8.0 - pw, y), Vec2::new(pw, bar_h));
+        let hover = match &prep {
+            Some(p) => format!("{} ({:.0} %) · click to stop", p.current, p.fraction * 100.0),
+            None => "Get the tracks listed ready to mix, in the background: their stems (HT-Demucs), sections and mix profiles, so they load ready and Fits can score how they'd mix. Already prepared tracks are skipped.".into(),
+        };
+        if pill(ui, prr, &prep_label, prep.is_some()).on_hover_text(hover).clicked() {
+            if prep.is_some() {
+                core.stop_preparing();
+            } else {
+                let paths: Vec<PathBuf> = if st.browser_hist {
+                    core.history.iter().rev().cloned().collect()
+                } else {
+                    core.filtered_library().into_iter().map(|i| core.library[i].path.clone()).collect()
+                };
+                core.prepare_tracks(paths);
+            }
+        }
+        if prep.is_some() {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+        }
+        // Auto-DJ: the tracks listed, played as a set on decks 1 and 2.
+        let auto_label = match &core.autodj {
+            Some(a) => format!("Auto-DJ · {} left", a.left()),
+            None => "Auto-DJ".into(),
+        };
+        let aw = pill_width(ui, &auto_label, 13.0);
+        let ar = Rect::from_min_size(Pos2::new(prr.left() - 8.0 - aw, y), Vec2::new(aw, bar_h));
+        let auto_hover = if core.fader_mix_on() {
+            "Off while you mix with the faders (Settings)"
+        } else if core.autodj.is_some() {
+            "Click to stop (the playing track plays on)"
+        } else {
+            "Play the tracks listed as a set on decks 1 and 2: dj picks each next track (key, tempo, energy, and how well it would mix in: as Fits) and mixes it in at the best moment. Prepare them first so each is ready at once."
+        };
+        if pill(ui, ar, &auto_label, core.autodj.is_some()).on_hover_text(auto_hover).clicked() {
+            if core.autodj.is_some() {
+                core.set_autodj(None);
+            } else {
+                let paths: Vec<PathBuf> = if st.browser_hist {
+                    core.history.iter().rev().cloned().collect()
+                } else {
+                    core.filtered_library().into_iter().map(|i| core.library[i].path.clone()).collect()
+                };
+                core.set_autodj(Some(paths));
+            }
+        }
+        ar.left()
+    };
     // Mark: where a mix went wrong, in the session log (with the decks' tracks and positions).
     let mw = pill_width(ui, "Mark", 13.0);
-    let mr = Rect::from_min_size(Pos2::new(ar.left() - 8.0 - mw, y), Vec2::new(mw, bar_h));
+    let mr = Rect::from_min_size(Pos2::new(right_left - 8.0 - mw, y), Vec2::new(mw, bar_h));
     let mark_hover = match &core.mixlog.path {
         Some(p) => format!("Mark this moment in the session log, where something went wrong (the tracks and where they were). The log: {}", p.display()),
         None => "Mark this moment in the session log, where something went wrong (the tracks and where they were). The log is in dj's settings folder, logs (Settings shows it)".to_string(),
@@ -305,7 +312,7 @@ pub fn show(ui: &mut Ui, core: &mut Core, st: &mut UiState, rect: Rect, big: boo
     if pill(ui, mr, "Mark", false).on_hover_text(mark_hover).clicked() {
         core.mark();
     }
-    let pills_left = super::mixer::global_pills(ui, core, st, mr.left() - 8.0, y, bar_h);
+    let pills_left = if big { mr.left() } else { super::mixer::global_pills(ui, core, st, mr.left() - 8.0, y, bar_h) };
     let info_r = Rect::from_min_max(Pos2::new(fr.right() + 12.0, y), Pos2::new(pills_left - 12.0, y + bar_h));
     ui.painter_at(info_r).text(Pos2::new(info_r.right(), info_r.center().y), Align2::RIGHT_CENTER, info, sans(12.5), TEXT_DIM);
 
