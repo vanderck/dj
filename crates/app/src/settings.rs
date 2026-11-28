@@ -147,8 +147,14 @@ pub struct Settings {
     pub tempo_home: bool,
     /// How Mix (and Auto-DJ) mixes: Auto, Blend (Stems, else EQ) or Drop; picked under Mix.
     pub mix_style: MixStyle,
-    /// Mix with the faders (a MIDI mixer): no Mix button; a silent deck's fader coming up mixes it
-    /// in at the best moment, the playing deck's coming down takes it out; no Auto-DJ.
+    /// Mix in with the fader (a MIDI mixer): no Mix button; a waiting deck's fader coming up
+    /// mixes it in, and is its volume. No Auto-DJ.
+    pub fader_mix_in: bool,
+    /// Mix out with the fader: a mix's old track plays on until its fader comes down, which takes
+    /// it out on its stems and EQ, then its volume. No Auto-DJ.
+    pub fader_mix_out: bool,
+    /// (Before: one setting for both; read once into the two above.)
+    #[serde(skip_serializing)]
     pub fader_mix: bool,
     pub tape_stop_ms: f64,
     pub default_loop_beats: f64,
@@ -263,6 +269,8 @@ impl Default for Settings {
             keylock_on_load: true,
             tempo_home: true,
             mix_style: MixStyle::Auto,
+            fader_mix_in: false,
+            fader_mix_out: false,
             fader_mix: false,
             tape_stop_ms: 25.0,
             default_loop_beats: 4.0,
@@ -310,7 +318,16 @@ impl Settings {
     pub fn load() -> Self {
         let mut s: Self = load_json(&Self::path());
         s.migrate_from_collective();
+        s.migrate_fader_mix();
         s
+    }
+
+    /// "Mix with the faders" was one setting; now mixing in and mixing out are each one.
+    fn migrate_fader_mix(&mut self) {
+        if std::mem::take(&mut self.fader_mix) {
+            self.fader_mix_in = true;
+            self.fader_mix_out = true;
+        }
     }
 
     /// Settings saved by Collective: paths into its old settings folder (a downloaded model)
@@ -523,5 +540,22 @@ mod tests {
         let mut s = Settings { osc_root: "/Syndicate/".into(), ..Default::default() };
         s.migrate_from_collective();
         assert_eq!(s.osc_root, "/Syndicate/");
+    }
+}
+
+#[cfg(test)]
+mod fader_mix_tests {
+    use super::*;
+
+    #[test]
+    fn the_one_fader_setting_becomes_both() {
+        let mut s: Settings = serde_json::from_str(r#"{"fader_mix": true}"#).unwrap();
+        s.migrate_fader_mix();
+        assert!(s.fader_mix_in && s.fader_mix_out && !s.fader_mix);
+        let saved = serde_json::to_string(&s).unwrap();
+        assert!(!saved.contains("\"fader_mix\""), "not saved any more");
+        let mut t: Settings = serde_json::from_str(&saved).unwrap();
+        t.migrate_fader_mix();
+        assert!(t.fader_mix_in && t.fader_mix_out);
     }
 }
