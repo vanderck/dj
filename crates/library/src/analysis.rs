@@ -1001,30 +1001,71 @@ pub fn grid_from_beats(beats: &[(f64, f32)]) -> Option<BeatGrid> {
 }
 
 /// A grid (from tags, or a tempo map through it) off the heard beats (`(secs, downbeat
-/// 0..1)`), moved onto them: when it has under half of them (`agree_now`), and a steady grid on
-/// them ([`grid_from_beats`]) at its tempo (`bpm`, within 4 %) has 80 % or more. Otherwise why
-/// not (the heard beats may be the ones that are wrong: unsteady, or at another tempo).
+/// 0..1)`), moved onto them: when it has under half of them (`agree_now`), and a grid on them
+/// at its tempo (`bpm`, within 4 %) has most of them: a straight line through them
+/// ([`grid_from_beats`], 80 %), else the tempo and phase they line up on best
+/// ([`phase_fit`], 70 %: robust to beats missed or heard twice). Otherwise why not (the heard
+/// beats may be the ones that are wrong).
 pub fn regrid_on_beats(bpm: f64, agree_now: f64, beats: &[(f64, f32)]) -> Result<BeatGrid, String> {
     if agree_now >= 0.5 {
         return Err("most beats are on it".into());
     }
-    let Some(fitted) = grid_from_beats(beats) else {
-        return Err(match steadiness(beats) {
-            None => "too few beats heard".into(),
-            Some((_, steady)) if steady < STEADY => {
-                format!("the beats All-In-One hears aren't steady enough to fit a grid on ({:.0} % steady)", steady * 100.0)
-            }
-            Some((med, _)) => format!("the heard beats are at {:.0} BPM", 60.0 / med),
-        });
+    if beats.len() < 32 {
+        return Err("too few beats heard".into());
+    }
+    let agree = |g: &BeatGrid| check_beats(|t| g.beat_at(t), g.seconds_per_beat(), beats).map_or(0.0, |c| c.agree);
+    if let Some(g) = grid_from_beats(beats).filter(|g| (g.bpm / bpm - 1.0).abs() < 0.04 && agree(g) >= 0.8) {
+        return Ok(g);
+    }
+    match phase_fit(bpm, beats) {
+        Some(g) if agree(&g) >= 0.7 => Ok(g),
+        Some(g) => Err(format!("the best grid on the heard beats ({:.2} BPM) has only {:.0} % of them", g.bpm, agree(&g) * 100.0)),
+        None => Err("no tempo near it that the heard beats line up on".into()),
+    }
+}
+
+/// The grid within 4 % of `bpm` that heard beats (`(secs, downbeat 0..1)`) line up on best:
+/// for each tempo, how closely they share one phase (the length of the mean of their phases
+/// as unit vectors); its phase there, its bars where they hear downbeats. `None` when they
+/// line up on none (under 0.5).
+pub fn phase_fit(bpm: f64, beats: &[(f64, f32)]) -> Option<BeatGrid> {
+    let line_up = |b: f64| {
+        let spb = 60.0 / b;
+        let (mut c, mut s) = (0.0, 0.0);
+        for (t, _) in beats {
+            let ph = std::f64::consts::TAU * (t / spb);
+            c += ph.cos();
+            s += ph.sin();
+        }
+        let n = beats.len() as f64;
+        ((c * c + s * s).sqrt() / n, s.atan2(c))
     };
-    if (fitted.bpm / bpm - 1.0).abs() >= 0.04 {
-        return Err(format!("a grid on the heard beats is at {:.1} BPM, not {bpm:.1}", fitted.bpm));
+    // Coarse (0.02 BPM: under a quarter beat of drift over five minutes), then fine.
+    let mut best = (0.0, bpm);
+    let mut b = bpm * 0.96;
+    while b <= bpm * 1.04 {
+        let (r, _) = line_up(b);
+        if r > best.0 {
+            best = (r, b);
+        }
+        b += 0.02;
     }
-    let agree = check_beats(|t| fitted.beat_at(t), fitted.seconds_per_beat(), beats).map_or(0.0, |c| c.agree);
-    if agree < 0.8 {
-        return Err(format!("a grid on the heard beats has only {:.0} % of them", agree * 100.0));
+    let (lo, hi) = (best.1 - 0.02, best.1 + 0.02);
+    let mut b = lo;
+    while b <= hi {
+        let (r, _) = line_up(b);
+        if r > best.0 {
+            best = (r, b);
+        }
+        b += 0.001;
     }
-    Ok(fitted)
+    if best.0 < 0.5 {
+        return None;
+    }
+    let (_, phase) = line_up(best.1);
+    let spb = 60.0 / best.1;
+    let anchor = (phase / std::f64::consts::TAU * spb).rem_euclid(spb);
+    Some(bars_from_beats(BeatGrid { bpm: best.1, anchor_secs: anchor }, beats))
 }
 
 /// Heard beats steady enough to take their tempo: this share of the beat intervals within 5 %
@@ -1097,8 +1138,24 @@ pub(crate) mod tests {
         assert!(regrid_on_beats(124.0, agree(&on, &beats), &beats).is_err());
         // The heard beats at double tempo (wrong): left alone.
         let double: Vec<(f64, f32)> = (0..400).map(|k| (0.20 + k as f64 * spb / 2.0, 0.1)).collect();
-        let why = regrid_on_beats(124.0, agree(&tag, &double), &double).unwrap_err();
-        assert!(why.contains("248"), "{why}");
+        assert!(regrid_on_beats(124.0, agree(&tag, &double), &double).is_err());
+        // Beats missed and heard twice (a quarter of them off the beat, a gap of 10.5 beats):
+        // counted one by one they make no line; their phase still settles the grid.
+        let mut messy: Vec<(f64, f32)> = Vec::new();
+        for k in 0..260 {
+            if (100..110).contains(&k) {
+                continue;
+            }
+            messy.push((0.20 + k as f64 * spb, if k % 4 == 0 { 0.6 } else { 0.05 }));
+            if k % 4 == 1 {
+                messy.push((0.20 + (k as f64 + 0.37) * spb, 0.02));
+            }
+        }
+        messy.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let g = regrid_on_beats(124.0, agree(&tag, &messy), &messy).expect("moved");
+        assert!((g.bpm - 124.0).abs() < 0.05, "{}", g.bpm);
+        let off = ((g.anchor_secs - 0.20) / spb).rem_euclid(4.0);
+        assert!(off < 0.05 || off > 3.95, "on the downbeats: {}", g.anchor_secs);
     }
     use super::*;
 
