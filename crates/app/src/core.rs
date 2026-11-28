@@ -917,7 +917,20 @@ impl Core {
         let what = match (check.offbeat, bars != 0.0) {
             (false, false) => {
                 if check.agree < 0.5 {
-                    self.log(format!("Deck {}: the grid doesn't follow the beats All-In-One hears ({pct:.0} % agree): check its BPM", d + 1));
+                    // A grid off the beats (neither half a beat nor whole beats): onto them, if a
+                    // grid on the heard beats has them at its tempo (not yours, not a tempo map;
+                    // for this load).
+                    match dj_library::analysis::regrid_on_beats(&grid, &heard).filter(|_| !mine && map.is_none()) {
+                        Some(fixed) => {
+                            self.deck_cmd(d, DeckCmd::SetGrid(Some(fixed)));
+                            self.log(format!(
+                                "Deck {}: grid moved onto the beats All-In-One hears (only {pct:.0} % were on it; {:.2} BPM)",
+                                d + 1,
+                                fixed.bpm
+                            ));
+                        }
+                        None => self.log(format!("Deck {}: the grid doesn't follow the beats All-In-One hears ({pct:.0} % agree): check its BPM", d + 1)),
+                    }
                 } else {
                     let bars = if check.bar_shift.is_some() && cues_say_bars { ", bars as the cues say" } else { "" };
                     self.log(format!("Deck {}: grid checked: {pct:.0} % of the beats All-In-One hears are on it{bars}", d + 1));
@@ -5334,6 +5347,19 @@ pub(crate) mod tests {
         c.profile.mappings.push(MidiMapping { source, address: "Mixer/CH1/Volume".into(), mode: MapMode::Absolute, invert: false, feedback: false });
         assert!(c.fader_mix_in_on() && c.fader_mix_out_on());
         assert!(!crate::settings::Settings::default().fader_mix_in && !crate::settings::Settings::default().osc_enabled, "standalone defaults");
+    }
+
+    #[test]
+    fn a_grid_off_the_heard_beats_is_moved_onto_them() {
+        let (mut e, mut c, _config) = core();
+        mix_setup(&mut e, &mut c);
+        // Beats heard a quarter beat off deck 2's grid, at its tempo.
+        let g = c.decks[1].track.as_ref().and_then(|t| t.grid).expect("a grid");
+        let spb = g.seconds_per_beat();
+        let beats: Vec<crate::stems::Beat> =
+            (0..100).map(|k| crate::stems::Beat { secs: g.anchor_secs + (k as f64 + 0.25) * spb, downbeat: if k % 4 == 0 { 0.6 } else { 0.05 } }).collect();
+        c.check_grid_with_beats(1, &beats, None);
+        assert!(c.status.iter().any(|(_, m)| m.starts_with("Deck 2: grid moved onto the beats")), "{:?}", c.status.back());
     }
 
     #[test]
